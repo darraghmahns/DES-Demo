@@ -101,7 +101,7 @@ function App() {
   // Results
   const [extractedData, setExtractedData] = useState<Record<string, unknown> | null>(null);
   const [validationSuccess, setValidationSuccess] = useState<boolean | null>(null);
-  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [, setValidationErrors] = useState<string[]>([]);
   const [citations, setCitations] = useState<VerificationCitation[] | null>(null);
   const [overallConfidence, setOverallConfidence] = useState<number | null>(null);
   const [piiFindings, setPiiFindings] = useState<PIIFinding[] | null>(null);
@@ -113,18 +113,21 @@ function App() {
 
   const abortRef = useRef<(() => void) | null>(null);
 
-  // Load documents
+  // Load documents for current mode and auto-select the first one
   useEffect(() => {
-    fetchDocuments()
-      .then(setDocuments)
-      .catch(() => setDocuments([]))
-      .finally(() => setLoadingDocs(false));
-  }, []);
-
-  // Reset steps when mode changes
-  useEffect(() => {
-    setSteps(getSteps(mode));
+    setLoadingDocs(true);
     resetResults();
+    setSteps(getSteps(mode));
+    fetchDocuments(mode)
+      .then((docs) => {
+        setDocuments(docs);
+        setSelectedDoc(docs.length > 0 ? docs[0].name : null);
+      })
+      .catch(() => {
+        setDocuments([]);
+        setSelectedDoc(null);
+      })
+      .finally(() => setLoadingDocs(false));
   }, [mode]);
 
   function resetResults() {
