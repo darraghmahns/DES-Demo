@@ -229,7 +229,7 @@ function App() {
       {/* Header */}
       <header className="header">
         <div className="header-left">
-          <span className="header-title">DocExtract</span>
+          <span className="header-title">D.E.S.</span>
           <div className="mode-toggle">
             <button
               className={`mode-btn ${mode === 'real_estate' ? 'active' : ''}`}
@@ -271,9 +271,7 @@ function App() {
                       }
                     }}
                   >
-                    <span className="doc-icon">
-                      {doc.name.includes('foia') ? '\uD83C\uDFDB\uFE0F' : '\uD83C\uDFE0'}
-                    </span>
+                    <span className="doc-icon">PDF</span>
                     <div className="doc-info">
                       <div className="doc-name">{doc.name}</div>
                       <div className="doc-meta">
@@ -409,7 +407,7 @@ function App() {
           <div className="results">
             {!extractedData && !isRunning && (
               <div className="empty-state">
-                <div className="empty-state-icon">{'\uD83D\uDCC4'}</div>
+                <div className="empty-state-icon">&mdash;</div>
                 <div className="empty-state-text">
                   Select a document and click Run to start extraction
                 </div>
