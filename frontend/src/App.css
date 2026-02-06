@@ -264,6 +264,24 @@ body {
   border-radius: var(--radius);
 }
 
+.pdf-mobile-link {
+  display: none;
+  text-align: center;
+  padding: 10px;
+  color: var(--cyan);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 8px;
+}
+
+.pdf-mobile-link:hover {
+  background: var(--cyan-dim);
+  border-color: var(--cyan);
+}
+
 /* ========= Right Panel ========= */
 
 .right-panel {
@@ -629,4 +647,190 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
+}
+
+/* ========= Mobile Responsive ========= */
+
+/* Tablet breakpoint — stack panels vertically */
+@media (max-width: 768px) {
+  body {
+    overflow: auto;
+    height: auto;
+  }
+
+  #root {
+    height: auto;
+  }
+
+  .app {
+    height: auto;
+    overflow: visible;
+  }
+
+  .header {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px;
+  }
+
+  .header-left {
+    gap: 10px;
+  }
+
+  .header-subtitle {
+    width: 100%;
+    order: 3;
+  }
+
+  .main {
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .left-panel {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: initial;
+  }
+
+  .pdf-preview {
+    padding: 8px 16px;
+    flex: initial;
+    min-height: auto;
+  }
+
+  .pdf-preview embed {
+    display: none;
+  }
+
+  .pdf-mobile-link {
+    display: block;
+  }
+
+  .pdf-placeholder {
+    min-height: 48px;
+    flex: initial;
+  }
+
+  .right-panel {
+    overflow: visible;
+  }
+
+  .results {
+    overflow: visible;
+    min-height: 300px;
+  }
+
+  /* Make data tables scroll horizontally */
+  .data-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .data-table thead,
+  .data-table tbody,
+  .data-table tr {
+    display: table;
+    width: 100%;
+    table-layout: auto;
+  }
+
+  .data-table thead {
+    position: static;
+  }
+
+  .data-table th {
+    position: static;
+  }
+
+  .tabs {
+    padding: 0 12px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tab {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .pipeline {
+    padding: 12px 16px;
+  }
+
+  .steps {
+    gap: 4px;
+  }
+
+  .step {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .results {
+    padding: 12px 16px;
+  }
+
+  .confidence-section {
+    padding: 10px 16px;
+  }
+
+  .pii-risk-banner {
+    flex-wrap: wrap;
+    font-size: 13px;
+  }
+}
+
+/* Small phone breakpoint */
+@media (max-width: 480px) {
+  .header {
+    padding: 8px 12px;
+  }
+
+  .header-title {
+    font-size: 16px;
+  }
+
+  .mode-btn {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+
+  .panel-section {
+    padding: 12px;
+  }
+
+  .step {
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+
+  .field-name {
+    font-size: 11px;
+    word-break: break-all;
+    white-space: normal;
+  }
+
+  .field-value {
+    font-size: 11px;
+  }
+
+  .data-table td {
+    padding: 6px 8px;
+  }
+
+  .data-table th {
+    padding: 6px 8px;
+    font-size: 10px;
+  }
+
+  .json-output pre {
+    font-size: 10px;
+  }
+
+  .results {
+    padding: 10px 12px;
+  }
 }

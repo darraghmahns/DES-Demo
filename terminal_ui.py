@@ -11,25 +11,31 @@ from rich.text import Text
 
 console = Console()
 
-BANNER = r"""
- ____             _____      _                  _
-|  _ \  ___   ___|  ___|_  _| |_ _ __ __ _  ___| |_
-| | | |/ _ \ / __| |__ \ \/ / __| '__/ _` |/ __| __|
-| |_| | (_) | (__|  __| >  <| |_| | | (_| | (__| |_
-|____/ \___/ \___|_|   /_/\_\\__|_|  \__,_|\___|\__|
-"""
+BANNER_LINES = [
+    r"    ____             ______     __                  __  ",
+    r"   / __ \____  _____/ ____/  __/ /__________ ______/ /_ ",
+    r"  / / / / __ \/ ___/ __/ | |/_/ __/ ___/ __ `/ ___/ __/",
+    r" / /_/ / /_/ / /__/ /____>  </ /_/ /  / /_/ / /__/ /_  ",
+    r"/_____/\____/\___/_____/_/|_|\__/_/   \__,_/\___/\__/  ",
+]
 
 
 def show_banner():
     """Display the main application banner."""
     console.print()
+    art_width = max(len(line) for line in BANNER_LINES)
+    # Panel uses 2 border chars + padding (1,2) means 2 chars each side = 6 total
+    inner_width = console.width - 2 - 4  # border + padding
+    pad = max(0, (inner_width - art_width) // 2)
+    centered = [" " * pad + line.ljust(art_width) for line in BANNER_LINES]
+    art = "\n".join(centered)
     console.print(
         Panel(
-            Text(BANNER, style="bold cyan", justify="center"),
+            Text(art, style="bold cyan", no_wrap=True),
             title="[bold white]Document Intelligence Engine[/]",
             subtitle="[dim]Neural OCR  +  Pydantic Validation[/]",
             border_style="cyan",
-            padding=(0, 2),
+            padding=(1, 2),
         )
     )
     console.print()

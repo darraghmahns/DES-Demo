@@ -305,11 +305,21 @@ function App() {
 
           <div className="pdf-preview">
             {selectedDoc ? (
-              <embed
-                src={getDocumentUrl(selectedDoc)}
-                type="application/pdf"
-                key={selectedDoc}
-              />
+              <>
+                <embed
+                  src={getDocumentUrl(selectedDoc)}
+                  type="application/pdf"
+                  key={selectedDoc}
+                />
+                <a
+                  href={getDocumentUrl(selectedDoc)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="pdf-mobile-link"
+                >
+                  Open PDF in new tab
+                </a>
+              </>
             ) : (
               <div className="pdf-placeholder">Select a document to preview</div>
             )}
