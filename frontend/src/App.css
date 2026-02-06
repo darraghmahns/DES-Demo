@@ -722,27 +722,19 @@ body {
     min-height: 300px;
   }
 
-  /* Make data tables scroll horizontally */
-  .data-table {
-    display: block;
+  /* Wrap tables in a horizontal scroller */
+  .results {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
 
-  .data-table thead,
-  .data-table tbody,
-  .data-table tr {
-    display: table;
-    width: 100%;
-    table-layout: auto;
-  }
-
-  .data-table thead {
-    position: static;
+  .data-table {
+    min-width: 600px;
   }
 
   .data-table th {
     position: static;
+    white-space: nowrap;
   }
 
   .tabs {
