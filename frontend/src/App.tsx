@@ -3,6 +3,11 @@ import {
   fetchDocuments,
   getDocumentUrl,
   runExtraction,
+  uploadFile,
+  checkDotloopStatus,
+  syncToDotloop,
+  getDotloopConnectUrl,
+  fetchDotloopLoops,
 } from './api';
 import type {
   DocumentInfo,
@@ -10,6 +15,8 @@ import type {
   PIIFinding,
   ExtractionResult,
   SSEEvent,
+  DotloopSyncResult,
+  DotloopLoop,
 } from './api';
 
 // ---------------------------------------------------------------------------
@@ -95,6 +102,10 @@ function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [loadingDocs, setLoadingDocs] = useState(true);
 
+  // Upload
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   // Pipeline
   const [steps, setSteps] = useState<PipelineStep[]>(getSteps('real_estate'));
 
@@ -111,7 +122,44 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabId>('extraction');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Dotloop
+  const [extractionId, setExtractionId] = useState<string | null>(null);
+  const [dotloopConfigured, setDotloopConfigured] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<DotloopSyncResult | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [dotloopLoops, setDotloopLoops] = useState<DotloopLoop[]>([]);
+  const [selectedLoopId, setSelectedLoopId] = useState<number | null>(null);
+  const [loadingLoops, setLoadingLoops] = useState(false);
+
   const abortRef = useRef<(() => void) | null>(null);
+
+  // Check Dotloop status on mount + handle OAuth redirect
+  useEffect(() => {
+    checkDotloopStatus().then(setDotloopConfigured);
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('dotloop_connected') === 'true') {
+      // Re-check status after OAuth redirect
+      checkDotloopStatus().then(setDotloopConfigured);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    if (params.get('dotloop_error')) {
+      setSyncError(`Dotloop connection failed: ${params.get('dotloop_error')}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  // Fetch Dotloop loops when extraction completes and Dotloop is configured
+  useEffect(() => {
+    if (dotloopConfigured && mode === 'real_estate' && finalResult && extractionId) {
+      setLoadingLoops(true);
+      fetchDotloopLoops()
+        .then(setDotloopLoops)
+        .catch(() => setDotloopLoops([]))
+        .finally(() => setLoadingLoops(false));
+    }
+  }, [dotloopConfigured, mode, finalResult, extractionId]);
 
   // Load documents for current mode and auto-select the first one
   useEffect(() => {
@@ -142,6 +190,11 @@ function App() {
     setFinalResult(null);
     setErrorMessage(null);
     setActiveTab('extraction');
+    setExtractionId(null);
+    setSyncResult(null);
+    setSyncError(null);
+    setDotloopLoops([]);
+    setSelectedLoopId(null);
   }
 
   const handleEvent = useCallback(
@@ -189,6 +242,9 @@ function App() {
 
         case 'complete':
           setFinalResult(event.data);
+          if (event.data.extraction_id) {
+            setExtractionId(event.data.extraction_id);
+          }
           setIsRunning(false);
           break;
 
@@ -225,6 +281,48 @@ function App() {
     setSelectedDoc(null);
   }
 
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    try {
+      const result = await uploadFile(file);
+      // Refresh document list and auto-select uploaded file
+      const docs = await fetchDocuments(mode);
+      setDocuments(docs);
+      setSelectedDoc(result.name);
+      resetResults();
+      setSteps(getSteps(mode));
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setIsUploading(false);
+      // Reset input so same file can be re-uploaded
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  async function handleDotloopSync() {
+    if (!extractionId || isSyncing) return;
+
+    setIsSyncing(true);
+    setSyncError(null);
+    setSyncResult(null);
+
+    try {
+      const result = await syncToDotloop(
+        extractionId,
+        selectedLoopId ?? undefined,
+      );
+      setSyncResult(result);
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setIsSyncing(false);
+    }
+  }
+
   // --- Render ---
 
   return (
@@ -254,12 +352,38 @@ function App() {
       <div className="main">
         {/* Left Panel */}
         <div className="left-panel">
+          {/* Upload Section */}
+          <div className="panel-section">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf"
+              onChange={handleUpload}
+              style={{ display: 'none' }}
+            />
+            <button
+              className={`upload-btn ${isUploading ? 'uploading' : ''}`}
+              disabled={isUploading || isRunning}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {isUploading ? (
+                <><span className="spinner" /> Uploading...</>
+              ) : (
+                <><span className="upload-icon">+</span> Upload PDF</>
+              )}
+            </button>
+          </div>
+
           <div className="panel-section">
             <div className="panel-section-title">Documents</div>
             <div className="doc-list">
               {loadingDocs ? (
                 <div style={{ textAlign: 'center', padding: 20 }}>
                   <span className="spinner" />
+                </div>
+              ) : documents.length === 0 ? (
+                <div className="empty-doc-list">
+                  Upload a PDF to get started
                 </div>
               ) : (
                 documents.map((doc) => (
@@ -354,6 +478,100 @@ function App() {
               <span className={`confidence-value ${confLevel(overallConfidence)}`}>
                 {(overallConfidence * 100).toFixed(0)}%
               </span>
+            </div>
+          )}
+
+          {/* Dotloop Section — connect button always visible in real_estate mode */}
+          {mode === 'real_estate' && !dotloopConfigured && (
+            <div className="dotloop-section">
+              <a
+                href={getDotloopConnectUrl()}
+                className="dotloop-connect-btn"
+              >
+                <span className="dotloop-icon">&#x1F517;</span> Connect to Dotloop
+              </a>
+            </div>
+          )}
+
+          {/* Dotloop Sync — only after extraction completes */}
+          {mode === 'real_estate' && dotloopConfigured && finalResult && extractionId && (
+            <div className="dotloop-section">
+              {/* Loop selector */}
+              {!syncResult && !syncError && (
+                <div className="dotloop-loop-selector">
+                  <label className="dotloop-label">Target Loop</label>
+                  {loadingLoops ? (
+                    <div style={{ padding: 8, textAlign: 'center' }}>
+                      <span className="spinner" />
+                    </div>
+                  ) : (
+                    <select
+                      className="dotloop-select"
+                      value={selectedLoopId ?? ''}
+                      onChange={(e) =>
+                        setSelectedLoopId(e.target.value ? Number(e.target.value) : null)
+                      }
+                    >
+                      <option value="">+ Create New Loop</option>
+                      {dotloopLoops.map((loop) => (
+                        <option key={loop.id} value={loop.id}>
+                          {loop.name} ({loop.status || 'unknown'})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* Sync button */}
+              {!syncResult && !syncError && (
+                <button
+                  className={`dotloop-sync-btn ${isSyncing ? 'syncing' : ''}`}
+                  disabled={isSyncing || loadingLoops}
+                  onClick={handleDotloopSync}
+                >
+                  {isSyncing ? (
+                    <><span className="spinner" /> Syncing to Dotloop...</>
+                  ) : (
+                    <><span className="dotloop-icon">&#x21C4;</span> Sync to Dotloop</>
+                  )}
+                </button>
+              )}
+
+              {/* Success */}
+              {syncResult && (
+                <div className="dotloop-success">
+                  <span className="dotloop-check">&#x2713;</span>
+                  {syncResult.action} loop in Dotloop
+                  {syncResult.loop_url && (
+                    <a
+                      href={syncResult.loop_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="dotloop-link"
+                    >
+                      Open in Dotloop &#x2192;
+                    </a>
+                  )}
+                  {syncResult.errors.length > 0 && (
+                    <div className="dotloop-warnings">
+                      {syncResult.errors.map((e, i) => (
+                        <div key={i} className="dotloop-warning">{e}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Error */}
+              {syncError && (
+                <div className="dotloop-error">
+                  Sync failed: {syncError}
+                  <button className="dotloop-retry" onClick={handleDotloopSync}>
+                    Retry
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

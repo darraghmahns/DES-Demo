@@ -98,48 +98,53 @@ class DotloopLoopDetails(BaseModel):
         """Serialize to Dotloop's actual API section format.
 
         Field keys match dotloop_mapping.py from the doc_intel project.
+        Uses getattr() throughout so model_construct() partial objects work.
         """
+        addr = self.property_address
+        fin = self.financials
+        dates = self.contract_dates
+
         return {
-            "name": self.loop_name,
-            "transactionType": self.transaction_type,
-            "status": self.transaction_status,
+            "name": getattr(self, "loop_name", "") or "Untitled Loop",
+            "transactionType": getattr(self, "transaction_type", "PURCHASE_OFFER"),
+            "status": getattr(self, "transaction_status", "PRE_OFFER"),
             "loopDetails": {
                 "Property Address": {
-                    "Country": self.property_address.country,
-                    "Street Number": self.property_address.street_number,
-                    "Street Name": self.property_address.street_name,
-                    "Unit Number": self.property_address.unit_number or "",
-                    "City": self.property_address.city,
-                    "State/Prov": self.property_address.state_or_province,
-                    "Zip/Postal Code": self.property_address.postal_code,
-                    "County": self.property_address.county or "",
-                    "MLS Number": self.property_address.mls_number or "",
-                    "Parcel/Tax ID": self.property_address.parcel_tax_id or "",
-                },
+                    "Country": getattr(addr, "country", "US") or "US",
+                    "Street Number": getattr(addr, "street_number", "") or "",
+                    "Street Name": getattr(addr, "street_name", "") or "",
+                    "Unit Number": getattr(addr, "unit_number", "") or "",
+                    "City": getattr(addr, "city", "") or "",
+                    "State/Prov": getattr(addr, "state_or_province", "") or "",
+                    "Zip/Postal Code": getattr(addr, "postal_code", "") or "",
+                    "County": getattr(addr, "county", "") or "",
+                    "MLS Number": getattr(addr, "mls_number", "") or "",
+                    "Parcel/Tax ID": getattr(addr, "parcel_tax_id", "") or "",
+                } if addr else {},
                 "Financials": {
-                    "Purchase/Sale Price": str(self.financials.purchase_price),
-                    "Earnest Money Amount": str(self.financials.earnest_money_amount or ""),
-                    "Earnest Money Held By": self.financials.earnest_money_held_by or "",
-                    "Sale Commission Rate": self.financials.sale_commission_rate or "",
-                    "Sale Commission Total": str(self.financials.sale_commission_total or ""),
-                },
+                    "Purchase/Sale Price": str(getattr(fin, "purchase_price", "") or ""),
+                    "Earnest Money Amount": str(getattr(fin, "earnest_money_amount", "") or ""),
+                    "Earnest Money Held By": getattr(fin, "earnest_money_held_by", "") or "",
+                    "Sale Commission Rate": getattr(fin, "sale_commission_rate", "") or "",
+                    "Sale Commission Total": str(getattr(fin, "sale_commission_total", "") or ""),
+                } if fin else {},
                 "Contract Dates": {
-                    "Contract Agreement Date": self.contract_dates.contract_agreement_date or "",
-                    "Closing Date": self.contract_dates.closing_date or "",
-                    "Offer Date": self.contract_dates.offer_date or "",
-                    "Offer Expiration Date": self.contract_dates.offer_expiration_date or "",
-                    "Inspection Date": self.contract_dates.inspection_date or "",
-                },
+                    "Contract Agreement Date": getattr(dates, "contract_agreement_date", "") or "",
+                    "Closing Date": getattr(dates, "closing_date", "") or "",
+                    "Offer Date": getattr(dates, "offer_date", "") or "",
+                    "Offer Expiration Date": getattr(dates, "offer_expiration_date", "") or "",
+                    "Inspection Date": getattr(dates, "inspection_date", "") or "",
+                } if dates else {},
             },
             "participants": [
                 {
-                    "fullName": p.full_name,
-                    "role": p.role.value,
-                    "email": p.email or "",
-                    "Phone": p.phone or "",
-                    "Company Name": p.company_name or "",
+                    "fullName": getattr(p, "full_name", "") or "",
+                    "role": p.role.value if hasattr(getattr(p, "role", None), "value") else str(getattr(p, "role", "OTHER") or "OTHER"),
+                    "email": getattr(p, "email", "") or "",
+                    "Phone": getattr(p, "phone", "") or "",
+                    "Company Name": getattr(p, "company_name", "") or "",
                 }
-                for p in self.participants
+                for p in (self.participants or [])
             ],
         }
 
@@ -306,8 +311,9 @@ class ExtractionResult(BaseModel):
     pages_processed: int = Field(description="Number of pages analyzed")
 
     # Extracted data (one will be populated based on mode)
-    dotloop_data: Optional[DotloopLoopDetails] = None
-    foia_data: Optional[FOIARequest] = None
+    # Using dict to allow partial/lenient data from model_construct()
+    dotloop_data: Optional[dict] = None
+    foia_data: Optional[dict] = None
 
     # Dotloop API-ready format (populated for real_estate mode)
     dotloop_api_payload: Optional[dict] = None

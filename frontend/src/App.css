@@ -200,6 +200,56 @@ body {
   color: var(--text-muted);
 }
 
+/* Upload Button */
+.upload-btn {
+  width: 100%;
+  padding: 10px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: transparent;
+  color: var(--cyan);
+}
+
+.upload-btn:hover:not(:disabled) {
+  border-color: var(--cyan);
+  background: var(--cyan-dim);
+}
+
+.upload-btn:disabled {
+  color: var(--text-muted);
+  border-color: var(--border-light);
+  cursor: not-allowed;
+}
+
+.upload-btn.uploading {
+  border-color: var(--yellow);
+  color: var(--yellow);
+  background: var(--yellow-dim);
+  cursor: wait;
+}
+
+.upload-icon {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.empty-doc-list {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .run-btn {
   width: 100%;
   padding: 10px;
@@ -825,4 +875,177 @@ body {
   .results {
     padding: 10px 12px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Dotloop Sync Section
+   --------------------------------------------------------------------------- */
+
+.dotloop-section {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dotloop-sync-btn {
+  width: 100%;
+  padding: 10px 16px;
+  border: 1px solid var(--purple);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: transparent;
+  color: var(--purple);
+}
+
+.dotloop-sync-btn:hover:not(:disabled) {
+  background: rgba(188, 140, 255, 0.1);
+}
+
+.dotloop-sync-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.dotloop-sync-btn.syncing {
+  border-color: var(--yellow);
+  color: var(--yellow);
+  background: var(--yellow-dim);
+  cursor: wait;
+}
+
+.dotloop-icon {
+  font-size: 16px;
+}
+
+.dotloop-success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--green-dim);
+  border: 1px solid var(--green);
+  border-radius: var(--radius);
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 500;
+  flex-wrap: wrap;
+}
+
+.dotloop-check {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.dotloop-link {
+  margin-left: auto;
+  color: var(--cyan);
+  text-decoration: none;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.dotloop-link:hover {
+  text-decoration: underline;
+}
+
+.dotloop-warnings {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.dotloop-warning {
+  font-size: 11px;
+  color: var(--yellow);
+  padding: 2px 0;
+}
+
+.dotloop-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  color: var(--red);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.dotloop-retry {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--red);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.dotloop-retry:hover {
+  background: var(--red-dim);
+}
+
+.dotloop-connect-btn {
+  display: flex;
+  width: 100%;
+  padding: 10px 16px;
+  border: 1px dashed var(--cyan);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--cyan);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.15s;
+}
+
+.dotloop-connect-btn:hover {
+  background: rgba(88, 166, 255, 0.1);
+}
+
+.dotloop-loop-selector {
+  margin-bottom: 10px;
+}
+
+.dotloop-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.dotloop-select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dotloop-select:focus {
+  outline: none;
+  border-color: var(--purple);
 }
