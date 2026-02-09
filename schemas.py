@@ -36,6 +36,27 @@ class PIISeverity(str, Enum):
     LOW = "LOW"
 
 
+class RequirementCategory(str, Enum):
+    FORM = "FORM"
+    INSPECTION = "INSPECTION"
+    DISCLOSURE = "DISCLOSURE"
+    CERTIFICATE = "CERTIFICATE"
+    FEE = "FEE"
+
+
+class RequirementStatus(str, Enum):
+    REQUIRED = "REQUIRED"
+    LIKELY_REQUIRED = "LIKELY_REQUIRED"
+    NOT_REQUIRED = "NOT_REQUIRED"
+    UNKNOWN = "UNKNOWN"
+
+
+class ComplianceOverallStatus(str, Enum):
+    PASS = "PASS"
+    ACTION_NEEDED = "ACTION_NEEDED"
+    UNKNOWN_JURISDICTION = "UNKNOWN_JURISDICTION"
+
+
 # =============================================================================
 # Dotloop-Compatible Models (Real Estate)
 # =============================================================================
@@ -131,9 +152,6 @@ class DotloopLoopDetails(BaseModel):
                 "Contract Dates": {
                     "Contract Agreement Date": getattr(dates, "contract_agreement_date", "") or "",
                     "Closing Date": getattr(dates, "closing_date", "") or "",
-                    "Offer Date": getattr(dates, "offer_date", "") or "",
-                    "Offer Expiration Date": getattr(dates, "offer_expiration_date", "") or "",
-                    "Inspection Date": getattr(dates, "inspection_date", "") or "",
                 } if dates else {},
             },
             "participants": [
@@ -152,30 +170,29 @@ class DotloopLoopDetails(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
-                    "loop_name": "Michael B. Curtis, 2100 Waterview Dr, Billings, MT 59101",
+                    "loop_name": "Daniel R. Whitfield, 4738 Ridgeline Ct, Helena, MT 59601",
                     "transaction_type": "PURCHASE_OFFER",
                     "transaction_status": "PRE_OFFER",
                     "property_address": {
-                        "street_number": "2100",
-                        "street_name": "Waterview Dr",
-                        "unit_number": "B",
-                        "city": "Billings",
+                        "street_number": "4738",
+                        "street_name": "Ridgeline Ct",
+                        "city": "Helena",
                         "state_or_province": "MT",
-                        "postal_code": "59101",
+                        "postal_code": "59601",
                         "country": "US",
                     },
                     "financials": {
-                        "purchase_price": 485000.00,
-                        "earnest_money_amount": 10000.00,
-                        "earnest_money_held_by": "First American Title",
+                        "purchase_price": 612500.00,
+                        "earnest_money_amount": 15000.00,
+                        "earnest_money_held_by": "Montana Title & Escrow",
                     },
                     "contract_dates": {
-                        "closing_date": "03/15/2025",
-                        "offer_date": "01/28/2025",
+                        "closing_date": "04/18/2025",
+                        "offer_date": "03/04/2025",
                     },
                     "participants": [
-                        {"full_name": "Michael B. Curtis", "role": "BUYER"},
-                        {"full_name": "Tiffany J. Selong", "role": "SELLER"},
+                        {"full_name": "Daniel R. Whitfield", "role": "BUYER"},
+                        {"full_name": "Gregory T. Navarro", "role": "SELLER"},
                     ],
                 }
             ]
@@ -221,24 +238,24 @@ class FOIARequest(BaseModel):
             "examples": [
                 {
                     "requester": {
-                        "first_name": "Sarah",
-                        "last_name": "Mitchell",
-                        "email": "s.mitchell@springfield-news.org",
-                        "phone": "(217) 555-0134",
-                        "address_street": "742 Evergreen Terrace",
-                        "address_city": "Springfield",
-                        "address_state": "IL",
-                        "address_zip": "62704",
-                        "organization": "Springfield Daily Register",
+                        "first_name": "James",
+                        "last_name": "Callahan",
+                        "email": "j.callahan@capitaltribune.com",
+                        "phone": "(317) 555-0261",
+                        "address_street": "310 Wabash Ave, Suite 400",
+                        "address_city": "Indianapolis",
+                        "address_state": "IN",
+                        "address_zip": "46204",
+                        "organization": "Capital City Tribune",
                     },
-                    "request_description": "All records related to border technology procurement contracts",
+                    "request_description": "All records related to ALPR system procurement contracts",
                     "request_category": "media",
-                    "agency": "Department of Homeland Security",
-                    "agency_component_name": "Office of Privacy",
+                    "agency": "Department of Justice",
+                    "agency_component_name": "Office of Information Policy",
                     "fee_waiver": True,
                     "expedited_processing": True,
-                    "date_range_start": "01/01/2023",
-                    "date_range_end": "12/31/2024",
+                    "date_range_start": "06/01/2023",
+                    "date_range_end": "05/31/2025",
                 }
             ]
         }
@@ -285,6 +302,47 @@ class PIIReport(BaseModel):
 
 
 # =============================================================================
+# Compliance Models
+# =============================================================================
+
+class ComplianceRequirement(BaseModel):
+    """Single jurisdiction-specific requirement for a transaction."""
+    name: str = Field(description="Requirement name (e.g., '9A Report')")
+    code: Optional[str] = Field(default=None, description="Official code or form number")
+    category: RequirementCategory = Field(description="Requirement category")
+    description: str = Field(description="What this requirement entails")
+    authority: Optional[str] = Field(default=None, description="Issuing authority")
+    fee: Optional[str] = Field(default=None, description="Associated fee (e.g., '$225')")
+    url: Optional[str] = Field(default=None, description="Reference URL for more info")
+    status: RequirementStatus = Field(default=RequirementStatus.REQUIRED)
+    notes: Optional[str] = Field(default=None, description="Additional context or caveats")
+
+
+class ComplianceReport(BaseModel):
+    """Jurisdiction compliance report for a transaction."""
+    jurisdiction_key: str = Field(description="Normalized key (e.g., 'CA:Los Angeles:Los Angeles')")
+    jurisdiction_display: str = Field(description="Human-readable name")
+    jurisdiction_type: str = Field(description="'city', 'county', or 'state'")
+    overall_status: ComplianceOverallStatus = Field(default=ComplianceOverallStatus.UNKNOWN_JURISDICTION)
+    requirements: List[ComplianceRequirement] = Field(default_factory=list)
+    transaction_type: Optional[str] = Field(default=None, description="Transaction type checked")
+    notes: Optional[str] = Field(default=None, description="General compliance notes")
+
+    @computed_field
+    @property
+    def requirement_count(self) -> int:
+        return len(self.requirements)
+
+    @computed_field
+    @property
+    def action_items(self) -> int:
+        return sum(
+            1 for r in self.requirements
+            if r.status in (RequirementStatus.REQUIRED, RequirementStatus.LIKELY_REQUIRED)
+        )
+
+
+# =============================================================================
 # Verification / Citation Models
 # =============================================================================
 
@@ -324,3 +382,6 @@ class ExtractionResult(BaseModel):
 
     # PII (gov mode only)
     pii_report: Optional[PIIReport] = None
+
+    # Compliance (real_estate mode)
+    compliance_report: Optional[ComplianceReport] = None

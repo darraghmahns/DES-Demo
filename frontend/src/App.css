@@ -1049,3 +1049,227 @@ body {
   outline: none;
   border-color: var(--purple);
 }
+
+/* ========= Compliance Panel ========= */
+
+.compliance-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compliance-banner {
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid;
+}
+
+.compliance-banner.PASS {
+  background: var(--green-dim);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.compliance-banner.ACTION_NEEDED {
+  background: var(--yellow-dim);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.compliance-banner.UNKNOWN_JURISDICTION {
+  background: var(--red-dim);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.compliance-banner-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.compliance-banner-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+
+.compliance-jurisdiction {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.compliance-status-text {
+  font-size: 13px;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+
+.compliance-banner-notes {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid currentColor;
+  opacity: 0.7;
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* Requirements list */
+.compliance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.compliance-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.compliance-item:hover {
+  border-color: var(--text-muted);
+}
+
+.compliance-item.required {
+  border-left: 3px solid var(--yellow);
+}
+
+.compliance-item.likely {
+  border-left: 3px solid var(--cyan);
+}
+
+.compliance-item.not-required {
+  border-left: 3px solid var(--green);
+}
+
+.compliance-item.unknown {
+  border-left: 3px solid var(--text-muted);
+}
+
+.compliance-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-card-hover);
+}
+
+.compliance-category-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.compliance-item-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compliance-item-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compliance-code {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.compliance-status-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.compliance-status-badge.required {
+  background: var(--yellow-dim);
+  color: var(--yellow);
+}
+
+.compliance-status-badge.likely {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+}
+
+.compliance-status-badge.not-required {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.compliance-status-badge.unknown {
+  background: var(--border-light);
+  color: var(--text-muted);
+}
+
+.compliance-item-body {
+  padding: 10px 14px;
+}
+
+.compliance-description {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.compliance-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.compliance-meta-item {
+  color: var(--text-muted);
+}
+
+.compliance-meta-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.compliance-meta-link {
+  color: var(--cyan);
+  text-decoration: none;
+  font-size: 11px;
+}
+
+.compliance-meta-link:hover {
+  text-decoration: underline;
+}
+
+.compliance-notes {
+  margin: 8px 0 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--yellow);
+  opacity: 0.85;
+}
+
+/* Tab badge for compliance — yellow variant */
+.tab-badge.yellow {
+  background: var(--yellow-dim);
+  color: var(--yellow);
+}

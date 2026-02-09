@@ -1,125 +1,89 @@
-"""SQLAlchemy database engine, session, and ORM models for D.E.S."""
+"""Beanie ODM document models and MongoDB initialization for D.E.S."""
 
 import os
-import uuid
 from datetime import datetime, timezone
+from typing import List, Optional
 
+from beanie import Document, init_beanie
 from dotenv import load_dotenv
-from sqlalchemy import (
-    Column,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    Boolean,
-    create_engine,
-)
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
+from pydantic import BaseModel, Field
+from pymongo import AsyncMongoClient
+
+from schemas import ComplianceReport, PIIReport, VerificationCitation
+from scout_models import ScoutResult
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/des")
-
-engine = create_engine(DATABASE_URL, echo=False)
-SessionLocal = sessionmaker(bind=engine)
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-def _uuid():
-    return uuid.uuid4()
-
-
-def _now():
-    return datetime.now(timezone.utc)
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("MONGODB_DB", "des")
 
 
 # ---------------------------------------------------------------------------
-# ORM Models
+# Embedded Models (subdocuments — not standalone collections)
 # ---------------------------------------------------------------------------
 
 
-class Document(Base):
-    __tablename__ = "documents"
+class ExtractionRecord(BaseModel):
+    """Single extraction run, embedded inside a DocumentRecord."""
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    filename = Column(Text, nullable=False)
-    source = Column(String(20), nullable=False, default="upload")  # upload | dotloop | docusign
-    source_id = Column(Text, nullable=True)  # external ID (loop_id, envelope_id)
-    mode = Column(String(20), nullable=False)  # real_estate | gov
-    page_count = Column(Integer, nullable=False, default=0)
-    file_size_bytes = Column(Integer, nullable=False, default=0)
-    uploaded_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    engine: str = "openai"
+    model_used: str = "docextract-vision-v1"
+    mode: str = "real_estate"
+    extracted_data: Optional[dict] = None
+    dotloop_api_payload: Optional[dict] = None
+    validation_success: bool = True
+    validation_errors: Optional[List[str]] = None
+    overall_confidence: float = 0.0
+    pages_processed: int = 0
+    extraction_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    duration_ms: Optional[int] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    extractions = relationship("Extraction", back_populates="document", cascade="all, delete-orphan")
-
-
-class Extraction(Base):
-    __tablename__ = "extractions"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
-    engine = Column(String(20), nullable=False, default="openai")  # openai | local
-    model_used = Column(Text, nullable=False, default="docextract-vision-v1")
-    mode = Column(String(20), nullable=False)
-    extracted_data = Column(JSONB, nullable=True)
-    dotloop_api_payload = Column(JSONB, nullable=True)
-    validation_success = Column(Boolean, nullable=False, default=True)
-    validation_errors = Column(JSONB, nullable=True)
-    overall_confidence = Column(Float, nullable=False, default=0.0)
-    pages_processed = Column(Integer, nullable=False, default=0)
-    extraction_timestamp = Column(DateTime(timezone=True), nullable=False, default=_now)
-    duration_ms = Column(Integer, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
-
-    document = relationship("Document", back_populates="extractions")
-    citations = relationship("Citation", back_populates="extraction", cascade="all, delete-orphan")
-    pii_findings = relationship("PIIFindingRow", back_populates="extraction", cascade="all, delete-orphan")
-    pii_report = relationship("PIIReportRow", back_populates="extraction", uselist=False, cascade="all, delete-orphan")
+    # Embedded children (were separate tables in Postgres)
+    citations: List[VerificationCitation] = Field(default_factory=list)
+    pii_report: Optional[PIIReport] = None
+    compliance_report: Optional[ComplianceReport] = None
 
 
-class Citation(Base):
-    __tablename__ = "citations"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    extraction_id = Column(UUID(as_uuid=True), ForeignKey("extractions.id"), nullable=False)
-    field_name = Column(Text, nullable=False)
-    extracted_value = Column(Text, nullable=False)
-    page_number = Column(Integer, nullable=False)
-    line_or_region = Column(Text, nullable=False)
-    surrounding_text = Column(Text, nullable=False, default="")
-    confidence = Column(Float, nullable=False, default=0.0)
-
-    extraction = relationship("Extraction", back_populates="citations")
+# ---------------------------------------------------------------------------
+# Top-Level Collection Documents
+# ---------------------------------------------------------------------------
 
 
-class PIIFindingRow(Base):
-    __tablename__ = "pii_findings"
+class DocumentRecord(Document):
+    """A processed PDF document — top-level MongoDB collection."""
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    extraction_id = Column(UUID(as_uuid=True), ForeignKey("extractions.id"), nullable=False)
-    pii_type = Column(String(10), nullable=False)  # SSN | PHONE | EMAIL
-    value_redacted = Column(Text, nullable=False)
-    severity = Column(String(10), nullable=False)  # HIGH | MEDIUM | LOW
-    confidence = Column(Float, nullable=False, default=0.0)
-    location = Column(Text, nullable=False)
-    recommendation = Column(Text, nullable=False, default="")
+    filename: str
+    source: str = "upload"  # upload | dotloop | docusign
+    source_id: Optional[str] = None  # external ID (loop_id, envelope_id)
+    mode: str = "real_estate"  # real_estate | gov
+    page_count: int = 0
+    file_size_bytes: int = 0
+    uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    extraction = relationship("Extraction", back_populates="pii_findings")
+    extractions: List[ExtractionRecord] = Field(default_factory=list)
+
+    class Settings:
+        name = "documents"
 
 
-class PIIReportRow(Base):
-    __tablename__ = "pii_reports"
+# ---------------------------------------------------------------------------
+# Initialization
+# ---------------------------------------------------------------------------
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    extraction_id = Column(UUID(as_uuid=True), ForeignKey("extractions.id"), nullable=False, unique=True)
-    risk_score = Column(Integer, nullable=False, default=0)
-    risk_level = Column(String(10), nullable=False, default="LOW")
-    finding_count = Column(Integer, nullable=False, default=0)
+_client: Optional[AsyncMongoClient] = None
 
-    extraction = relationship("Extraction", back_populates="pii_report")
+
+async def init_db():
+    """Connect to MongoDB Atlas and register Beanie document models."""
+    global _client
+    _client = AsyncMongoClient(MONGODB_URI)
+    await init_beanie(database=_client[DB_NAME], document_models=[DocumentRecord, ScoutResult])
+
+
+async def close_db():
+    """Close the MongoDB connection."""
+    global _client
+    if _client:
+        await _client.close()
+        _client = None

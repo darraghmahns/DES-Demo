@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -85,7 +84,7 @@ def _get_profile_id() -> int:
 # Flow A: Push extraction to Dotloop
 # ---------------------------------------------------------------------------
 
-def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dict[str, Any]:
+async def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dict[str, Any]:
     """Push a saved extraction to Dotloop as a loop.
 
     Steps:
@@ -96,14 +95,14 @@ def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dict[str,
       5. Add participants (skip duplicates by email)
 
     Args:
-        extraction_id: UUID string of the extraction row.
+        extraction_id: Extraction reference string (doc_id:index).
         loop_id: If provided, sync to this existing loop instead of
             creating/finding one automatically.
 
     Returns:
         Dict with loop_id, loop_url, action, and errors list.
     """
-    ext = get_extraction(uuid.UUID(extraction_id))
+    ext = await get_extraction(extraction_id)
     if not ext:
         return {"error": f"Extraction {extraction_id} not found"}
 
@@ -192,6 +191,9 @@ def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dict[str,
                     )
                     log.info("Added participant %s (%s)", p.get("fullName"), p.get("role"))
                 except DotloopAPIError as e:
+                    if "Upgrade to Premium" in e.message:
+                        log.info("Participant add requires Premium plan, skipping remaining")
+                        break
                     errors.append(f"Failed to add {p.get('fullName')}: {e.message}")
                     log.warning("Participant add failed: %s", e.message)
 
@@ -207,7 +209,7 @@ def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dict[str,
 # Flow B: Pull PDF from Dotloop, extract, save
 # ---------------------------------------------------------------------------
 
-def process_from_dotloop(
+async def process_from_dotloop(
     profile_id: int | None = None,
     loop_id: int = 0,
     sync_back: bool = False,
@@ -311,7 +313,7 @@ def process_from_dotloop(
         )
 
         # Save to DB
-        doc_id = save_document(
+        doc_id = await save_document(
             filename=pdf_doc.get("name", "dotloop_document.pdf"),
             mode=mode,
             page_count=file_info["pages"],
@@ -319,7 +321,7 @@ def process_from_dotloop(
             source="dotloop",
             source_id=str(loop_id),
         )
-        ext_id = save_extraction(
+        ext_id = await save_extraction(
             document_id=doc_id,
             result=result,
             engine=engine.name,
@@ -335,7 +337,7 @@ def process_from_dotloop(
 
         # Optionally sync back
         if sync_back:
-            sync_result = sync_to_dotloop(str(ext_id))
+            sync_result = await sync_to_dotloop(str(ext_id))
             response["synced_back"] = True
             response["sync_result"] = sync_result
 
@@ -374,7 +376,7 @@ def list_dotloop_loops(
 # Webhook handler
 # ---------------------------------------------------------------------------
 
-def handle_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+async def handle_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     """Handle a Dotloop webhook event.
 
     Currently supports LOOP_UPDATED events, which trigger a fresh extraction.
@@ -398,7 +400,7 @@ def handle_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     log.info("Processing webhook: %s for loop %s", event_type, loop_id)
 
     try:
-        result = process_from_dotloop(
+        result = await process_from_dotloop(
             profile_id=int(profile_id) if profile_id else None,
             loop_id=int(loop_id),
             sync_back=False,

@@ -29,6 +29,8 @@ from schemas import (
     FOIARequest,
 )
 from ocr_engine import get_engine
+from compliance_engine import run_compliance_check, async_run_compliance_check
+from db import init_db, close_db
 from db_writer import save_document, save_extraction
 from dotloop_connector import (
     is_configured as dotloop_configured,
@@ -50,6 +52,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup():
+    await init_db()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await close_db()
+
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_docs"
 DIST_DIR = Path(__file__).parent / "dist"
@@ -108,7 +120,12 @@ async def get_document(name: str):
     return FileResponse(
         str(pdf_path),
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename={name}"},
+        headers={
+            "Content-Disposition": f"inline; filename={name}",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -158,6 +175,8 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
     """Generator that runs the pipeline and yields SSE events at each step."""
     total_steps = 5  # Load, Convert, Extract, Validate, Output
     total_steps += 1  # Verify citations
+    if mode == "real_estate":
+        total_steps += 1  # Compliance check
     if mode == "gov":
         total_steps += 1  # PII scan
 
@@ -299,7 +318,42 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
             "data": {"citation_count": len(citations), "overall_confidence": overall_confidence},
         })
 
-        # --- Step 6: PII Scan (gov mode only) ---
+        # --- Step 6 (real_estate): Compliance Check ---
+        compliance_report = None
+        if mode == "real_estate":
+            current_step += 1
+            yield sse_event("step", {
+                "step": current_step, "total": total_steps,
+                "title": "Compliance Check", "status": "running",
+            })
+
+            compliance_report = await async_run_compliance_check(
+                validated_data or {},
+                transaction_type=(validated.transaction_type if validated else None),
+            )
+
+            yield sse_event("compliance", {
+                "jurisdiction_key": compliance_report.jurisdiction_key,
+                "jurisdiction_display": compliance_report.jurisdiction_display,
+                "jurisdiction_type": compliance_report.jurisdiction_type,
+                "overall_status": compliance_report.overall_status.value,
+                "requirements": [r.model_dump(mode="json") for r in compliance_report.requirements],
+                "requirement_count": compliance_report.requirement_count,
+                "action_items": compliance_report.action_items,
+                "transaction_type": compliance_report.transaction_type,
+                "notes": compliance_report.notes,
+            })
+            yield sse_event("step_complete", {
+                "step": current_step, "title": "Compliance Check", "status": "complete",
+                "data": {
+                    "jurisdiction": compliance_report.jurisdiction_display,
+                    "requirement_count": compliance_report.requirement_count,
+                    "action_items": compliance_report.action_items,
+                    "status": compliance_report.overall_status.value,
+                },
+            })
+
+        # --- PII Scan (gov mode only) ---
         pii_report = None
         if mode == "gov":
             current_step += 1
@@ -358,6 +412,7 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
             citations=citations,
             overall_confidence=overall_confidence,
             pii_report=pii_report,
+            compliance_report=compliance_report,
         )
 
         # Write to dist/
@@ -365,19 +420,17 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(result.model_dump_json(indent=2))
 
-        # Persist to Postgres
+        # Persist to MongoDB
         duration_ms = int((time.monotonic() - _start_time) * 1000)
         extraction_id = None
         try:
-            doc_id = await asyncio.to_thread(
-                save_document,
+            doc_id = await save_document(
                 Path(pdf_path).name,
                 mode,
                 len(images),
                 Path(pdf_path).stat().st_size,
             )
-            ext_id = await asyncio.to_thread(
-                save_extraction,
+            ext_id = await save_extraction(
                 doc_id,
                 result,
                 engine.name,
@@ -400,6 +453,199 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
 
     except Exception as e:
         yield sse_event("error", {"message": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Compliance Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/compliance/{extraction_ref:path}")
+async def get_compliance_report(extraction_ref: str):
+    """Retrieve the compliance report for a saved extraction."""
+    from db_writer import get_extraction
+    ext = await get_extraction(extraction_ref)
+    if not ext:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    report = ext.get("compliance_report")
+    if not report:
+        return {"status": "none", "message": "No compliance report for this extraction"}
+    return report
+
+
+@app.get("/api/compliance-check")
+async def standalone_compliance_check(
+    state: str = Query(...),
+    county: str = Query(""),
+    city: str = Query(""),
+    transaction_type: str = Query(None),
+):
+    """Standalone compliance check without an extraction — for public API.
+
+    Uses async DB-first lookup so AI Scout results are automatically included.
+    """
+    report = await async_run_compliance_check(
+        {"property_address": {
+            "state_or_province": state,
+            "county": county,
+            "city": city,
+        }},
+        transaction_type=transaction_type,
+    )
+    return report.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# AI Scout Endpoints
+# ---------------------------------------------------------------------------
+
+
+class ScoutRequest(BaseModel):
+    state: str
+    county: str = ""
+    city: str = ""
+
+
+@app.post("/api/scout/research")
+async def scout_research(request: ScoutRequest):
+    """Trigger AI Scout research for a jurisdiction.
+
+    Runs the two-pass GPT-4o pipeline (research → verify) and saves results
+    to MongoDB with is_verified=False, is_active=False.
+    """
+    from scout import run_scout
+
+    if not request.state:
+        raise HTTPException(status_code=400, detail="state is required")
+
+    try:
+        result = await run_scout(
+            state=request.state.strip(),
+            county=request.county.strip() or None,
+            city=request.city.strip() or None,
+            save_to_db=True,
+        )
+        return {
+            "id": str(result.id),
+            "jurisdiction_key": result.jurisdiction_key,
+            "jurisdiction_type": result.jurisdiction_type,
+            "requirement_count": len(result.requirements),
+            "is_verified": result.is_verified,
+            "is_active": result.is_active,
+            "research_timestamp": result.research_timestamp.isoformat(),
+            "notes": result.notes,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/scout/results")
+async def scout_list_results(
+    state: str = Query(None),
+    verified: bool = Query(None),
+):
+    """List AI Scout results, optionally filtered by state or verification status."""
+    from scout_models import ScoutResult
+
+    filters = {}
+    if state:
+        filters["state"] = state.strip().upper()
+    if verified is not None:
+        filters["is_verified"] = verified
+
+    results = await ScoutResult.find(filters).sort("-research_timestamp").to_list(100)
+
+    return [
+        {
+            "id": str(r.id),
+            "jurisdiction_key": r.jurisdiction_key,
+            "jurisdiction_type": r.jurisdiction_type,
+            "state": r.state,
+            "county": r.county,
+            "city": r.city,
+            "requirement_count": len(r.requirements),
+            "is_verified": r.is_verified,
+            "is_active": r.is_active,
+            "source": r.source,
+            "research_timestamp": r.research_timestamp.isoformat(),
+            "notes": r.notes,
+        }
+        for r in results
+    ]
+
+
+@app.get("/api/scout/results/{result_id}")
+async def scout_get_result(result_id: str):
+    """Get a specific AI Scout result with full requirements."""
+    from scout_models import ScoutResult
+    from bson import ObjectId
+
+    try:
+        result = await ScoutResult.get(ObjectId(result_id))
+    except Exception:
+        raise HTTPException(status_code=404, detail="Scout result not found")
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Scout result not found")
+
+    return result.model_dump(mode="json")
+
+
+@app.put("/api/scout/results/{result_id}/verify")
+async def scout_verify_result(result_id: str, verified_by: str = Query("admin")):
+    """Mark a scout result as verified and activate it for compliance checks."""
+    from scout_models import ScoutResult
+    from bson import ObjectId
+
+    try:
+        result = await ScoutResult.get(ObjectId(result_id))
+    except Exception:
+        raise HTTPException(status_code=404, detail="Scout result not found")
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Scout result not found")
+
+    result.is_verified = True
+    result.is_active = True
+    result.verified_by = verified_by
+    result.verification_timestamp = datetime.now(timezone.utc)
+    await result.save()
+
+    return {
+        "id": str(result.id),
+        "jurisdiction_key": result.jurisdiction_key,
+        "is_verified": True,
+        "is_active": True,
+        "verified_by": verified_by,
+        "verification_timestamp": result.verification_timestamp.isoformat(),
+    }
+
+
+@app.put("/api/scout/results/{result_id}/reject")
+async def scout_reject_result(result_id: str):
+    """Mark a scout result as rejected (is_active=False, is_verified stays False)."""
+    from scout_models import ScoutResult
+    from bson import ObjectId
+
+    try:
+        result = await ScoutResult.get(ObjectId(result_id))
+    except Exception:
+        raise HTTPException(status_code=404, detail="Scout result not found")
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Scout result not found")
+
+    result.is_active = False
+    result.is_verified = False
+    result.notes = (result.notes or "") + " [REJECTED]"
+    await result.save()
+
+    return {
+        "id": str(result.id),
+        "jurisdiction_key": result.jurisdiction_key,
+        "is_verified": False,
+        "is_active": False,
+        "status": "rejected",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +680,7 @@ async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyn
     if not dotloop_configured():
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
-        result = await asyncio.to_thread(sync_to_dotloop, extraction_id, loop_id=body.loop_id)
+        result = await sync_to_dotloop(extraction_id, loop_id=body.loop_id)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -455,9 +701,7 @@ async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest):
     if not dotloop_configured():
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
-        result = await asyncio.to_thread(
-            process_from_dotloop, request.profile_id, loop_id, request.sync_back,
-        )
+        result = await process_from_dotloop(request.profile_id, loop_id, request.sync_back)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -545,7 +789,7 @@ async def dotloop_oauth_callback(code: str | None = None, error: str | None = No
 @app.post("/api/webhooks/dotloop")
 async def dotloop_webhook(payload: dict):
     """Receive Dotloop LOOP_UPDATED webhook events."""
-    result = await asyncio.to_thread(dotloop_handle_webhook, payload)
+    result = await dotloop_handle_webhook(payload)
     return result
 
 

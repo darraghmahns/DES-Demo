@@ -32,6 +32,30 @@ export interface PIIReport {
   risk_level: string;
 }
 
+export interface ComplianceRequirement {
+  name: string;
+  code: string | null;
+  category: string;
+  description: string;
+  authority: string | null;
+  fee: string | null;
+  url: string | null;
+  status: string;
+  notes: string | null;
+}
+
+export interface ComplianceReport {
+  jurisdiction_key: string;
+  jurisdiction_display: string;
+  jurisdiction_type: string;
+  overall_status: string;
+  requirements: ComplianceRequirement[];
+  requirement_count: number;
+  action_items: number;
+  transaction_type: string | null;
+  notes: string | null;
+}
+
 export interface ExtractionResult {
   mode: string;
   source_file: string;
@@ -44,6 +68,7 @@ export interface ExtractionResult {
   citations: VerificationCitation[];
   overall_confidence: number;
   pii_report: PIIReport | null;
+  compliance_report: ComplianceReport | null;
   extraction_id?: string;
 }
 
@@ -85,6 +110,18 @@ export interface PIIEvent {
   risk_level: string;
 }
 
+export interface ComplianceEvent {
+  jurisdiction_key: string;
+  jurisdiction_display: string;
+  jurisdiction_type: string;
+  overall_status: string;
+  requirements: ComplianceRequirement[];
+  requirement_count: number;
+  action_items: number;
+  transaction_type: string | null;
+  notes: string | null;
+}
+
 export type SSEEvent =
   | { type: 'step'; data: StepEvent }
   | { type: 'step_complete'; data: StepCompleteEvent }
@@ -92,6 +129,7 @@ export type SSEEvent =
   | { type: 'validation'; data: ValidationEvent }
   | { type: 'citations'; data: CitationsEvent }
   | { type: 'pii'; data: PIIEvent }
+  | { type: 'compliance'; data: ComplianceEvent }
   | { type: 'complete'; data: ExtractionResult }
   | { type: 'error'; data: { message: string } };
 
@@ -112,7 +150,7 @@ export async function fetchDocuments(_mode?: string): Promise<DocumentInfo[]> {
 }
 
 export function getDocumentUrl(name: string): string {
-  return `${API_BASE}/api/documents/${encodeURIComponent(name)}`;
+  return `${API_BASE}/api/documents/${encodeURIComponent(name)}?t=${Date.now()}`;
 }
 
 export async function uploadFile(file: File): Promise<DocumentInfo> {

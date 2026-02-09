@@ -1,185 +1,131 @@
-"""Persistence helpers for saving extraction results to Postgres."""
+"""Async persistence helpers for saving extraction results to MongoDB."""
 
 from __future__ import annotations
 
-import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from db import (
-    SessionLocal,
-    Citation,
-    Document,
-    Extraction,
-    PIIFindingRow,
-    PIIReportRow,
-)
+from beanie import PydanticObjectId
+
+from db import DocumentRecord, ExtractionRecord
 from schemas import ExtractionResult
 
+log = logging.getLogger(__name__)
 
-def save_document(
+
+async def save_document(
     filename: str,
     mode: str,
     page_count: int,
     file_size_bytes: int,
     source: str = "upload",
     source_id: Optional[str] = None,
-) -> uuid.UUID:
+) -> PydanticObjectId:
     """Insert a document record and return its ID."""
-    with SessionLocal() as session:
-        doc = Document(
-            filename=filename,
-            source=source,
-            source_id=source_id,
-            mode=mode,
-            page_count=page_count,
-            file_size_bytes=file_size_bytes,
-        )
-        session.add(doc)
-        session.commit()
-        return doc.id
+    doc = DocumentRecord(
+        filename=filename,
+        source=source,
+        source_id=source_id,
+        mode=mode,
+        page_count=page_count,
+        file_size_bytes=file_size_bytes,
+    )
+    await doc.insert()
+    return doc.id
 
 
-def save_extraction(
-    document_id: uuid.UUID,
+async def save_extraction(
+    document_id: PydanticObjectId,
     result: ExtractionResult,
     engine: str = "openai",
     duration_ms: Optional[int] = None,
-) -> uuid.UUID:
-    """Persist a full ExtractionResult to the database.
+) -> str:
+    """Persist a full ExtractionResult as an embedded subdocument.
 
-    Writes to extractions, citations, pii_findings, and pii_reports tables.
+    Returns the extraction index (as string) within the document.
     """
-    with SessionLocal() as session:
-        # Build extracted_data JSON from whichever mode populated data
-        # dotloop_data / foia_data are already plain dicts (or None)
-        if result.dotloop_data:
-            extracted_data = result.dotloop_data
-        elif result.foia_data:
-            extracted_data = result.foia_data
-        else:
-            extracted_data = None
+    doc = await DocumentRecord.get(document_id)
+    if not doc:
+        raise ValueError(f"Document {document_id} not found")
 
-        extraction = Extraction(
-            document_id=document_id,
-            engine=engine,
-            model_used=result.model_used,
-            mode=result.mode,
-            extracted_data=extracted_data,
-            dotloop_api_payload=result.dotloop_api_payload,
-            validation_success=extracted_data is not None,
-            validation_errors=None,
-            overall_confidence=result.overall_confidence,
-            pages_processed=result.pages_processed,
-            extraction_timestamp=datetime.fromisoformat(result.extraction_timestamp),
-            duration_ms=duration_ms,
-        )
-        session.add(extraction)
-        session.flush()  # get extraction.id before adding children
+    # Build extracted_data from whichever mode populated data
+    if result.dotloop_data:
+        extracted_data = result.dotloop_data
+    elif result.foia_data:
+        extracted_data = result.foia_data
+    else:
+        extracted_data = None
 
-        # Citations
-        for c in result.citations:
-            session.add(Citation(
-                extraction_id=extraction.id,
-                field_name=c.field_name,
-                extracted_value=c.extracted_value,
-                page_number=c.page_number,
-                line_or_region=c.line_or_region,
-                surrounding_text=c.surrounding_text,
-                confidence=c.confidence,
-            ))
+    extraction = ExtractionRecord(
+        engine=engine,
+        model_used=result.model_used,
+        mode=result.mode,
+        extracted_data=extracted_data,
+        dotloop_api_payload=result.dotloop_api_payload,
+        validation_success=extracted_data is not None,
+        overall_confidence=result.overall_confidence,
+        pages_processed=result.pages_processed,
+        extraction_timestamp=datetime.fromisoformat(result.extraction_timestamp),
+        duration_ms=duration_ms,
+        # Citations, PII, and Compliance embed directly — no decomposition needed
+        citations=result.citations,
+        pii_report=result.pii_report,
+        compliance_report=result.compliance_report,
+    )
 
-        # PII findings + report
-        if result.pii_report:
-            for f in result.pii_report.findings:
-                session.add(PIIFindingRow(
-                    extraction_id=extraction.id,
-                    pii_type=f.pii_type.value,
-                    value_redacted=f.value_redacted,
-                    severity=f.severity.value,
-                    confidence=f.confidence,
-                    location=f.location,
-                    recommendation=f.recommendation,
-                ))
+    doc.extractions.append(extraction)
+    await doc.save()
 
-            session.add(PIIReportRow(
-                extraction_id=extraction.id,
-                risk_score=result.pii_report.pii_risk_score,
-                risk_level=result.pii_report.risk_level.value,
-                finding_count=len(result.pii_report.findings),
-            ))
-
-        session.commit()
-        return extraction.id
+    idx = len(doc.extractions) - 1
+    return f"{doc.id}:{idx}"
 
 
-def get_extraction(extraction_id: uuid.UUID) -> dict | None:
-    """Load an extraction and its related data from the database."""
-    with SessionLocal() as session:
-        ext = session.get(Extraction, extraction_id)
-        if not ext:
-            return None
+async def get_extraction(extraction_ref: str) -> dict | None:
+    """Load an extraction by reference ('doc_id:index' or just 'doc_id').
 
-        return {
-            "id": str(ext.id),
-            "document_id": str(ext.document_id),
-            "engine": ext.engine,
-            "model_used": ext.model_used,
-            "mode": ext.mode,
-            "extracted_data": ext.extracted_data,
-            "dotloop_api_payload": ext.dotloop_api_payload,
-            "validation_success": ext.validation_success,
-            "overall_confidence": ext.overall_confidence,
-            "pages_processed": ext.pages_processed,
-            "extraction_timestamp": ext.extraction_timestamp.isoformat() if ext.extraction_timestamp else None,
-            "duration_ms": ext.duration_ms,
-            "citations": [
-                {
-                    "field_name": c.field_name,
-                    "extracted_value": c.extracted_value,
-                    "page_number": c.page_number,
-                    "line_or_region": c.line_or_region,
-                    "surrounding_text": c.surrounding_text,
-                    "confidence": c.confidence,
-                }
-                for c in ext.citations
-            ],
-            "pii_report": {
-                "risk_score": ext.pii_report.risk_score,
-                "risk_level": ext.pii_report.risk_level,
-                "finding_count": ext.pii_report.finding_count,
-                "findings": [
-                    {
-                        "pii_type": f.pii_type,
-                        "value_redacted": f.value_redacted,
-                        "severity": f.severity,
-                        "confidence": f.confidence,
-                        "location": f.location,
-                        "recommendation": f.recommendation,
-                    }
-                    for f in ext.pii_findings
-                ],
-            } if ext.pii_report else None,
-        }
+    Returns a flat dict matching the shape the Dotloop connector expects.
+    """
+    parts = str(extraction_ref).split(":")
+    doc_id = parts[0]
+    idx = int(parts[1]) if len(parts) > 1 else 0
+
+    doc = await DocumentRecord.get(doc_id)
+    if not doc or idx >= len(doc.extractions):
+        return None
+
+    ext = doc.extractions[idx]
+    data = ext.model_dump()
+    data["id"] = extraction_ref
+    data["document_id"] = str(doc.id)
+
+    # Flatten timestamps to ISO strings for JSON serialization
+    if isinstance(data.get("extraction_timestamp"), datetime):
+        data["extraction_timestamp"] = data["extraction_timestamp"].isoformat()
+    if isinstance(data.get("created_at"), datetime):
+        data["created_at"] = data["created_at"].isoformat()
+
+    return data
 
 
-def list_extractions(mode: str | None = None, limit: int = 50) -> list[dict]:
+async def list_extractions(mode: str | None = None, limit: int = 50) -> list[dict]:
     """List recent extractions with basic metadata."""
-    with SessionLocal() as session:
-        query = session.query(Extraction).order_by(Extraction.created_at.desc())
-        if mode:
-            query = query.filter(Extraction.mode == mode)
-        query = query.limit(limit)
+    query = DocumentRecord.find()
+    if mode:
+        query = query.find(DocumentRecord.mode == mode)
 
-        return [
-            {
-                "id": str(ext.id),
-                "document_id": str(ext.document_id),
+    docs = await query.sort(-DocumentRecord.uploaded_at).limit(limit).to_list()
+
+    results = []
+    for doc in docs:
+        for idx, ext in enumerate(doc.extractions):
+            results.append({
+                "id": f"{doc.id}:{idx}",
+                "document_id": str(doc.id),
                 "mode": ext.mode,
                 "engine": ext.engine,
                 "overall_confidence": ext.overall_confidence,
                 "pages_processed": ext.pages_processed,
                 "created_at": ext.created_at.isoformat() if ext.created_at else None,
-            }
-            for ext in query.all()
-        ]
+            })
+    return results[:limit]
