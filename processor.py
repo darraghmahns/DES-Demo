@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
 from pydantic import ValidationError
 
 from schemas import (
@@ -29,9 +28,9 @@ from pdf_converter import (
     image_to_base64,
     pdf_to_images,
 )
-from extractor import extract_from_images, extract_raw_text
-from verifier import compute_overall_confidence, verify_extraction
+from verifier import compute_overall_confidence
 from pii_scanner import scan_all_pages
+from ocr_engine import get_engine
 from terminal_ui import (
     console,
     show_banner,
@@ -120,10 +119,11 @@ def main():
     show_mode_info(args.mode, args.input)
 
     # --- Preflight Checks ---
-    if not os.environ.get("OPENAI_API_KEY"):
+    engine_name = os.environ.get("ENGINE", "openai")
+    if engine_name == "openai" and not os.environ.get("OPENAI_API_KEY"):
         show_error(
             "Missing API Key",
-            "API key not found.\n\n"
+            "OPENAI_API_KEY not found (required when ENGINE=openai).\n\n"
             "  1. Copy .env.example to .env\n"
             "  2. Add your API key\n"
             "  3. Run again",
@@ -174,10 +174,14 @@ def main():
         f"Analyzing {len(images)} page(s) with neural OCR for structured extraction...",
     )
 
-    client = OpenAI()
+    engine = get_engine()
+    use_file = engine.prefers_file_path
 
     with console.status("[bold green]Running neural OCR extraction...", spinner="dots"):
-        raw_extraction = extract_from_images(images_b64, args.mode, client)
+        if use_file:
+            raw_extraction = engine.extract_from_file(str(input_path), args.mode)
+        else:
+            raw_extraction = engine.extract(images_b64, args.mode)
 
     if args.verbose:
         console.print("\n[dim]Raw API response:[/]")
@@ -226,7 +230,10 @@ def main():
         )
 
         with console.status("[bold green]Verifying extraction sources...", spinner="dots"):
-            citations = verify_extraction(images_b64, validated_data, client)
+            if use_file:
+                citations = engine.verify_from_file(str(input_path), validated_data)
+            else:
+                citations = engine.verify(images_b64, validated_data)
 
         overall_confidence = compute_overall_confidence(citations)
 
@@ -246,7 +253,10 @@ def main():
         )
 
         with console.status("[bold green]Extracting text for PII analysis...", spinner="dots"):
-            page_texts = extract_raw_text(images_b64, client)
+            if use_file:
+                page_texts = engine.ocr_raw_text_from_file(str(input_path))
+            else:
+                page_texts = engine.ocr_raw_text(images_b64)
 
         pii_report = scan_all_pages(page_texts)
 
@@ -268,8 +278,8 @@ def main():
         source_file=str(input_path),
         extraction_timestamp=datetime.now(timezone.utc).isoformat(),
         pages_processed=len(images),
-        dotloop_data=validated if args.mode == "real_estate" and not validation_errors else None,
-        foia_data=validated if args.mode == "gov" and not validation_errors else None,
+        dotloop_data=validated_data if args.mode == "real_estate" else None,
+        foia_data=validated_data if args.mode == "gov" else None,
         dotloop_api_payload=dotloop_api_payload,
         citations=citations,
         overall_confidence=overall_confidence,

@@ -100,14 +100,14 @@ def create_purchase_agreement():
     story.append(Paragraph("SECTION 1: PARTIES TO THE AGREEMENT", section_style))
     story.append(Paragraph(
         'This Residential Purchase Agreement ("Agreement") is entered into as of '
-        "<b>January 28, 2025</b> by and between the following parties:",
+        "<b>March 4, 2025</b> by and between the following parties:",
         body_style,
     ))
 
     parties_data = [
         ["", "Name(s)", "Role"],
-        ["BUYER(S):", "Michael B. Curtis & Sarah A. Curtis", "Purchaser"],
-        ["SELLER(S):", "Tiffany J. Selong & Jason R. Selong", "Vendor"],
+        ["BUYER(S):", "Daniel R. Whitfield & Karen M. Whitfield", "Purchaser"],
+        ["SELLER(S):", "Gregory T. Navarro & Lisa A. Navarro", "Vendor"],
     ]
     parties_table = Table(parties_data, colWidths=[1.2 * inch, 3.5 * inch, 1.3 * inch])
     parties_table.setStyle(TableStyle([
@@ -134,14 +134,14 @@ def create_purchase_agreement():
     ))
 
     prop_data = [
-        ["Street Address:", "2100 Waterview Dr, Unit B"],
-        ["City:", "Billings"],
+        ["Street Address:", "4738 Ridgeline Ct"],
+        ["City:", "Helena"],
         ["State:", "Montana (MT)"],
-        ["ZIP Code:", "59101"],
-        ["County:", "Yellowstone"],
-        ["MLS Number:", "MT-2024-88712"],
-        ["Parcel/Tax ID:", "S06-2100-0045-00B"],
-        ["Legal Description:", "Lot 45, Block 12, Waterview Subdivision, Yellowstone County, MT"],
+        ["ZIP Code:", "59601"],
+        ["County:", "Lewis and Clark"],
+        ["MLS Number:", "MT-2025-14209"],
+        ["Parcel/Tax ID:", "R03-4738-0091-00"],
+        ["Legal Description:", "Lot 91, Block 7, Ridgeline Estates, Lewis and Clark County, MT"],
     ]
     prop_table = Table(prop_data, colWidths=[1.8 * inch, 4.2 * inch])
     prop_table.setStyle(TableStyle([
@@ -172,13 +172,13 @@ def create_purchase_agreement():
     story.append(Paragraph("SECTION 3: PURCHASE PRICE AND FINANCIAL TERMS", section_style))
 
     fin_data = [
-        ["Purchase Price:", "$485,000.00"],
-        ["Earnest Money Deposit:", "$10,000.00"],
-        ["Earnest Money Held By:", "First American Title"],
+        ["Purchase Price:", "$612,500.00"],
+        ["Earnest Money Deposit:", "$15,000.00"],
+        ["Earnest Money Held By:", "Montana Title & Escrow"],
         ["Deposit Due Within:", "3 business days of acceptance"],
         ["Financing Type:", "Conventional Mortgage"],
-        ["Down Payment:", "$97,000.00 (20%)"],
-        ["Loan Amount:", "$388,000.00"],
+        ["Down Payment:", "$122,500.00 (20%)"],
+        ["Loan Amount:", "$490,000.00"],
     ]
     fin_table = Table(fin_data, colWidths=[2.2 * inch, 3.8 * inch])
     fin_table.setStyle(TableStyle([
@@ -206,12 +206,12 @@ def create_purchase_agreement():
     story.append(Paragraph("SECTION 4: IMPORTANT DATES", section_style))
 
     dates_data = [
-        ["Offer Date:", "01/28/2025"],
-        ["Offer Expiration:", "02/01/2025 at 5:00 PM MST"],
-        ["Inspection Deadline:", "02/10/2025"],
-        ["Appraisal Deadline:", "02/20/2025"],
-        ["Financing Contingency:", "02/28/2025"],
-        ["Closing Date:", "03/15/2025"],
+        ["Offer Date:", "03/04/2025"],
+        ["Offer Expiration:", "03/08/2025 at 5:00 PM MST"],
+        ["Inspection Deadline:", "03/18/2025"],
+        ["Appraisal Deadline:", "03/25/2025"],
+        ["Financing Contingency:", "04/03/2025"],
+        ["Closing Date:", "04/18/2025"],
         ["Possession Date:", "At closing, upon recording of deed"],
     ]
     dates_table = Table(dates_data, colWidths=[2.2 * inch, 3.8 * inch])
@@ -252,17 +252,17 @@ def create_purchase_agreement():
         ["", "Name", "Brokerage", "Phone", "Email"],
         [
             "Listing Agent:",
-            "Julie Henderson",
-            "Engel & Volkers",
-            "(406) 555-0187",
-            "julie.h@evmontana.com",
+            "Patricia Owens",
+            "Windermere Real Estate",
+            "(406) 555-0312",
+            "p.owens@windermere-mt.com",
         ],
         [
             "Buying Agent:",
-            "Robert Chen",
-            "RE/MAX Realty",
-            "(406) 555-0234",
-            "robert.chen@remax.com",
+            "Marcus Delgado",
+            "Berkshire Hathaway",
+            "(406) 555-0478",
+            "marcus.d@bhhsmt.com",
         ],
     ]
     agent_table = Table(
@@ -304,16 +304,16 @@ def create_purchase_agreement():
 
     sig_data = [
         ["Buyer: ______________________________", "Date: _______________"],
-        ["Michael B. Curtis", ""],
+        ["Daniel R. Whitfield", ""],
         ["", ""],
         ["Buyer: ______________________________", "Date: _______________"],
-        ["Sarah A. Curtis", ""],
+        ["Karen M. Whitfield", ""],
         ["", ""],
         ["Seller: ______________________________", "Date: _______________"],
-        ["Tiffany J. Selong", ""],
+        ["Gregory T. Navarro", ""],
         ["", ""],
         ["Seller: ______________________________", "Date: _______________"],
-        ["Jason R. Selong", ""],
+        ["Lisa A. Navarro", ""],
     ]
     sig_table = Table(sig_data, colWidths=[3.5 * inch, 2.5 * inch])
     sig_table.setStyle(TableStyle([
@@ -381,26 +381,26 @@ def create_foia_request():
     story = []
 
     # Sender info
-    story.append(Paragraph("Sarah Mitchell", header_style))
-    story.append(Paragraph("Springfield Daily Register", header_style))
-    story.append(Paragraph("742 Evergreen Terrace", header_style))
-    story.append(Paragraph("Springfield, IL 62704", header_style))
-    story.append(Paragraph("Phone: (217) 555-0134", header_style))
-    story.append(Paragraph("Email: s.mitchell@springfield-news.org", header_style))
+    story.append(Paragraph("James Callahan", header_style))
+    story.append(Paragraph("Capital City Tribune", header_style))
+    story.append(Paragraph("310 Wabash Ave, Suite 400", header_style))
+    story.append(Paragraph("Indianapolis, IN 46204", header_style))
+    story.append(Paragraph("Phone: (317) 555-0261", header_style))
+    story.append(Paragraph("Email: j.callahan@capitaltribune.com", header_style))
 
     story.append(Spacer(1, 24))
 
     # Date
-    story.append(Paragraph("January 15, 2025", header_style))
+    story.append(Paragraph("February 3, 2025", header_style))
 
     story.append(Spacer(1, 18))
 
     # Recipient
     story.append(Paragraph("FOIA/PA Mail Referral Unit", header_style))
-    story.append(Paragraph("Department of Homeland Security", header_style))
-    story.append(Paragraph("Office of Privacy", header_style))
-    story.append(Paragraph("245 Murray Lane SW, STOP-0655", header_style))
-    story.append(Paragraph("Washington, DC 20528-0655", header_style))
+    story.append(Paragraph("Department of Justice", header_style))
+    story.append(Paragraph("Office of Information Policy", header_style))
+    story.append(Paragraph("441 G Street NW, 6th Floor", header_style))
+    story.append(Paragraph("Washington, DC 20530", header_style))
 
     story.append(Spacer(1, 24))
 
@@ -423,10 +423,10 @@ def create_foia_request():
 
     story.append(Paragraph(
         "<b>Requested Records:</b> All contracts, purchase orders, invoices, and related "
-        "correspondence pertaining to the procurement of border surveillance technology "
-        "systems, including but not limited to: autonomous surveillance towers, ground-based "
-        "radar systems, and integrated sensor platforms. This request covers all such records "
-        "from the period of <b>January 1, 2023</b> through <b>December 31, 2024</b>.",
+        "correspondence pertaining to the procurement of automated license plate reader (ALPR) "
+        "systems, including but not limited to: mobile ALPR units, fixed-mount camera arrays, "
+        "and cloud-based analytics platforms. This request covers all such records "
+        "from the period of <b>June 1, 2023</b> through <b>May 31, 2025</b>.",
         body_style,
     ))
 
@@ -434,15 +434,15 @@ def create_foia_request():
         "This request includes, but is not limited to, records related to contract award "
         "notices, vendor selection criteria, cost-benefit analyses, performance evaluations, "
         "and any internal memoranda discussing the effectiveness or limitations of these "
-        "systems. Reference case file: 078-05-1120.",
+        "systems. Reference case file: 041-12-3387.",
         body_style,
     ))
 
     story.append(Paragraph(
         "<b>Fee Waiver Request:</b> I am a representative of the news media as defined in "
-        "5 U.S.C. § 552(a)(4)(A)(ii)(II). The Springfield Daily Register is a daily newspaper "
-        "serving the greater Springfield metropolitan area with a circulation of approximately "
-        "45,000 readers. The information requested is sought for the purpose of disseminating "
+        "5 U.S.C. § 552(a)(4)(A)(ii)(II). The Capital City Tribune is a daily newspaper "
+        "serving the greater Indianapolis metropolitan area with a circulation of approximately "
+        "62,000 readers. The information requested is sought for the purpose of disseminating "
         "information about government operations to the public. I therefore request a waiver "
         "of all fees associated with this request.",
         body_style,
@@ -466,7 +466,7 @@ def create_foia_request():
     ))
 
     story.append(Paragraph(
-        "I am willing to pay fees for this request up to a maximum of <b>$250.00</b>. "
+        "I am willing to pay fees for this request up to a maximum of <b>$500.00</b>. "
         "Please inform me if the estimated fees will exceed this amount before processing "
         "the request.",
         body_style,
@@ -481,9 +481,9 @@ def create_foia_request():
     story.append(Spacer(1, 20))
     story.append(Paragraph("Sincerely,", body_style))
     story.append(Spacer(1, 28))
-    story.append(Paragraph("<i>Sarah Mitchell</i>", body_style))
-    story.append(Paragraph("Investigative Reporter", header_style))
-    story.append(Paragraph("Springfield Daily Register", header_style))
+    story.append(Paragraph("<i>James Callahan</i>", body_style))
+    story.append(Paragraph("Senior Investigative Correspondent", header_style))
+    story.append(Paragraph("Capital City Tribune", header_style))
 
     doc.build(story)
     print(f"  Created: {output_path}")

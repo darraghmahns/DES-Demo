@@ -36,6 +36,27 @@ class PIISeverity(str, Enum):
     LOW = "LOW"
 
 
+class RequirementCategory(str, Enum):
+    FORM = "FORM"
+    INSPECTION = "INSPECTION"
+    DISCLOSURE = "DISCLOSURE"
+    CERTIFICATE = "CERTIFICATE"
+    FEE = "FEE"
+
+
+class RequirementStatus(str, Enum):
+    REQUIRED = "REQUIRED"
+    LIKELY_REQUIRED = "LIKELY_REQUIRED"
+    NOT_REQUIRED = "NOT_REQUIRED"
+    UNKNOWN = "UNKNOWN"
+
+
+class ComplianceOverallStatus(str, Enum):
+    PASS = "PASS"
+    ACTION_NEEDED = "ACTION_NEEDED"
+    UNKNOWN_JURISDICTION = "UNKNOWN_JURISDICTION"
+
+
 # =============================================================================
 # Dotloop-Compatible Models (Real Estate)
 # =============================================================================
@@ -98,48 +119,50 @@ class DotloopLoopDetails(BaseModel):
         """Serialize to Dotloop's actual API section format.
 
         Field keys match dotloop_mapping.py from the doc_intel project.
+        Uses getattr() throughout so model_construct() partial objects work.
         """
+        addr = self.property_address
+        fin = self.financials
+        dates = self.contract_dates
+
         return {
-            "name": self.loop_name,
-            "transactionType": self.transaction_type,
-            "status": self.transaction_status,
+            "name": getattr(self, "loop_name", "") or "Untitled Loop",
+            "transactionType": getattr(self, "transaction_type", "PURCHASE_OFFER"),
+            "status": getattr(self, "transaction_status", "PRE_OFFER"),
             "loopDetails": {
                 "Property Address": {
-                    "Country": self.property_address.country,
-                    "Street Number": self.property_address.street_number,
-                    "Street Name": self.property_address.street_name,
-                    "Unit Number": self.property_address.unit_number or "",
-                    "City": self.property_address.city,
-                    "State/Prov": self.property_address.state_or_province,
-                    "Zip/Postal Code": self.property_address.postal_code,
-                    "County": self.property_address.county or "",
-                    "MLS Number": self.property_address.mls_number or "",
-                    "Parcel/Tax ID": self.property_address.parcel_tax_id or "",
-                },
+                    "Country": getattr(addr, "country", "US") or "US",
+                    "Street Number": getattr(addr, "street_number", "") or "",
+                    "Street Name": getattr(addr, "street_name", "") or "",
+                    "Unit Number": getattr(addr, "unit_number", "") or "",
+                    "City": getattr(addr, "city", "") or "",
+                    "State/Prov": getattr(addr, "state_or_province", "") or "",
+                    "Zip/Postal Code": getattr(addr, "postal_code", "") or "",
+                    "County": getattr(addr, "county", "") or "",
+                    "MLS Number": getattr(addr, "mls_number", "") or "",
+                    "Parcel/Tax ID": getattr(addr, "parcel_tax_id", "") or "",
+                } if addr else {},
                 "Financials": {
-                    "Purchase/Sale Price": str(self.financials.purchase_price),
-                    "Earnest Money Amount": str(self.financials.earnest_money_amount or ""),
-                    "Earnest Money Held By": self.financials.earnest_money_held_by or "",
-                    "Sale Commission Rate": self.financials.sale_commission_rate or "",
-                    "Sale Commission Total": str(self.financials.sale_commission_total or ""),
-                },
+                    "Purchase/Sale Price": str(getattr(fin, "purchase_price", "") or ""),
+                    "Earnest Money Amount": str(getattr(fin, "earnest_money_amount", "") or ""),
+                    "Earnest Money Held By": getattr(fin, "earnest_money_held_by", "") or "",
+                    "Sale Commission Rate": getattr(fin, "sale_commission_rate", "") or "",
+                    "Sale Commission Total": str(getattr(fin, "sale_commission_total", "") or ""),
+                } if fin else {},
                 "Contract Dates": {
-                    "Contract Agreement Date": self.contract_dates.contract_agreement_date or "",
-                    "Closing Date": self.contract_dates.closing_date or "",
-                    "Offer Date": self.contract_dates.offer_date or "",
-                    "Offer Expiration Date": self.contract_dates.offer_expiration_date or "",
-                    "Inspection Date": self.contract_dates.inspection_date or "",
-                },
+                    "Contract Agreement Date": getattr(dates, "contract_agreement_date", "") or "",
+                    "Closing Date": getattr(dates, "closing_date", "") or "",
+                } if dates else {},
             },
             "participants": [
                 {
-                    "fullName": p.full_name,
-                    "role": p.role.value,
-                    "email": p.email or "",
-                    "Phone": p.phone or "",
-                    "Company Name": p.company_name or "",
+                    "fullName": getattr(p, "full_name", "") or "",
+                    "role": p.role.value if hasattr(getattr(p, "role", None), "value") else str(getattr(p, "role", "OTHER") or "OTHER"),
+                    "email": getattr(p, "email", "") or "",
+                    "Phone": getattr(p, "phone", "") or "",
+                    "Company Name": getattr(p, "company_name", "") or "",
                 }
-                for p in self.participants
+                for p in (self.participants or [])
             ],
         }
 
@@ -147,30 +170,29 @@ class DotloopLoopDetails(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
-                    "loop_name": "Michael B. Curtis, 2100 Waterview Dr, Billings, MT 59101",
+                    "loop_name": "Daniel R. Whitfield, 4738 Ridgeline Ct, Helena, MT 59601",
                     "transaction_type": "PURCHASE_OFFER",
                     "transaction_status": "PRE_OFFER",
                     "property_address": {
-                        "street_number": "2100",
-                        "street_name": "Waterview Dr",
-                        "unit_number": "B",
-                        "city": "Billings",
+                        "street_number": "4738",
+                        "street_name": "Ridgeline Ct",
+                        "city": "Helena",
                         "state_or_province": "MT",
-                        "postal_code": "59101",
+                        "postal_code": "59601",
                         "country": "US",
                     },
                     "financials": {
-                        "purchase_price": 485000.00,
-                        "earnest_money_amount": 10000.00,
-                        "earnest_money_held_by": "First American Title",
+                        "purchase_price": 612500.00,
+                        "earnest_money_amount": 15000.00,
+                        "earnest_money_held_by": "Montana Title & Escrow",
                     },
                     "contract_dates": {
-                        "closing_date": "03/15/2025",
-                        "offer_date": "01/28/2025",
+                        "closing_date": "04/18/2025",
+                        "offer_date": "03/04/2025",
                     },
                     "participants": [
-                        {"full_name": "Michael B. Curtis", "role": "BUYER"},
-                        {"full_name": "Tiffany J. Selong", "role": "SELLER"},
+                        {"full_name": "Daniel R. Whitfield", "role": "BUYER"},
+                        {"full_name": "Gregory T. Navarro", "role": "SELLER"},
                     ],
                 }
             ]
@@ -216,24 +238,24 @@ class FOIARequest(BaseModel):
             "examples": [
                 {
                     "requester": {
-                        "first_name": "Sarah",
-                        "last_name": "Mitchell",
-                        "email": "s.mitchell@springfield-news.org",
-                        "phone": "(217) 555-0134",
-                        "address_street": "742 Evergreen Terrace",
-                        "address_city": "Springfield",
-                        "address_state": "IL",
-                        "address_zip": "62704",
-                        "organization": "Springfield Daily Register",
+                        "first_name": "James",
+                        "last_name": "Callahan",
+                        "email": "j.callahan@capitaltribune.com",
+                        "phone": "(317) 555-0261",
+                        "address_street": "310 Wabash Ave, Suite 400",
+                        "address_city": "Indianapolis",
+                        "address_state": "IN",
+                        "address_zip": "46204",
+                        "organization": "Capital City Tribune",
                     },
-                    "request_description": "All records related to border technology procurement contracts",
+                    "request_description": "All records related to ALPR system procurement contracts",
                     "request_category": "media",
-                    "agency": "Department of Homeland Security",
-                    "agency_component_name": "Office of Privacy",
+                    "agency": "Department of Justice",
+                    "agency_component_name": "Office of Information Policy",
                     "fee_waiver": True,
                     "expedited_processing": True,
-                    "date_range_start": "01/01/2023",
-                    "date_range_end": "12/31/2024",
+                    "date_range_start": "06/01/2023",
+                    "date_range_end": "05/31/2025",
                 }
             ]
         }
@@ -280,6 +302,47 @@ class PIIReport(BaseModel):
 
 
 # =============================================================================
+# Compliance Models
+# =============================================================================
+
+class ComplianceRequirement(BaseModel):
+    """Single jurisdiction-specific requirement for a transaction."""
+    name: str = Field(description="Requirement name (e.g., '9A Report')")
+    code: Optional[str] = Field(default=None, description="Official code or form number")
+    category: RequirementCategory = Field(description="Requirement category")
+    description: str = Field(description="What this requirement entails")
+    authority: Optional[str] = Field(default=None, description="Issuing authority")
+    fee: Optional[str] = Field(default=None, description="Associated fee (e.g., '$225')")
+    url: Optional[str] = Field(default=None, description="Reference URL for more info")
+    status: RequirementStatus = Field(default=RequirementStatus.REQUIRED)
+    notes: Optional[str] = Field(default=None, description="Additional context or caveats")
+
+
+class ComplianceReport(BaseModel):
+    """Jurisdiction compliance report for a transaction."""
+    jurisdiction_key: str = Field(description="Normalized key (e.g., 'CA:Los Angeles:Los Angeles')")
+    jurisdiction_display: str = Field(description="Human-readable name")
+    jurisdiction_type: str = Field(description="'city', 'county', or 'state'")
+    overall_status: ComplianceOverallStatus = Field(default=ComplianceOverallStatus.UNKNOWN_JURISDICTION)
+    requirements: List[ComplianceRequirement] = Field(default_factory=list)
+    transaction_type: Optional[str] = Field(default=None, description="Transaction type checked")
+    notes: Optional[str] = Field(default=None, description="General compliance notes")
+
+    @computed_field
+    @property
+    def requirement_count(self) -> int:
+        return len(self.requirements)
+
+    @computed_field
+    @property
+    def action_items(self) -> int:
+        return sum(
+            1 for r in self.requirements
+            if r.status in (RequirementStatus.REQUIRED, RequirementStatus.LIKELY_REQUIRED)
+        )
+
+
+# =============================================================================
 # Verification / Citation Models
 # =============================================================================
 
@@ -306,8 +369,9 @@ class ExtractionResult(BaseModel):
     pages_processed: int = Field(description="Number of pages analyzed")
 
     # Extracted data (one will be populated based on mode)
-    dotloop_data: Optional[DotloopLoopDetails] = None
-    foia_data: Optional[FOIARequest] = None
+    # Using dict to allow partial/lenient data from model_construct()
+    dotloop_data: Optional[dict] = None
+    foia_data: Optional[dict] = None
 
     # Dotloop API-ready format (populated for real_estate mode)
     dotloop_api_payload: Optional[dict] = None
@@ -318,3 +382,6 @@ class ExtractionResult(BaseModel):
 
     # PII (gov mode only)
     pii_report: Optional[PIIReport] = None
+
+    # Compliance (real_estate mode)
+    compliance_report: Optional[ComplianceReport] = None
