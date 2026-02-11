@@ -42,7 +42,7 @@ def verify_extraction(
     images_b64: list[str],
     extracted_data: dict,
     client: OpenAI,
-) -> list[VerificationCitation]:
+) -> tuple[list[VerificationCitation], dict]:
     """Second-pass verification: ask GPT-4o to cite source locations.
 
     Args:
@@ -51,8 +51,10 @@ def verify_extraction(
         client: OpenAI client instance.
 
     Returns:
-        List of VerificationCitation objects.
+        Tuple of (list of VerificationCitation objects, usage dict).
     """
+    from extractor import _usage_dict
+
     content: list[dict] = []
 
     # Include all page images
@@ -96,7 +98,7 @@ def verify_extraction(
             # Skip malformed citations rather than failing
             continue
 
-    return citations
+    return citations, _usage_dict(response.usage)
 
 
 def compute_overall_confidence(citations: list[VerificationCitation]) -> float:

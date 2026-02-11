@@ -65,11 +65,25 @@ export interface ExtractionResult {
   dotloop_data: Record<string, unknown> | null;
   foia_data: Record<string, unknown> | null;
   dotloop_api_payload: Record<string, unknown> | null;
+  docusign_api_payload: Record<string, unknown> | null;
   citations: VerificationCitation[];
   overall_confidence: number;
   pii_report: PIIReport | null;
   compliance_report: ComplianceReport | null;
   extraction_id?: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+export interface AggregateUsage {
+  total_extractions: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  avg_cost_per_extraction: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +157,11 @@ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 // Document operations
 // ---------------------------------------------------------------------------
 
-export async function fetchDocuments(_mode?: string): Promise<DocumentInfo[]> {
-  const resp = await fetch(`${API_BASE}/api/documents`);
+export async function fetchDocuments(mode?: string): Promise<DocumentInfo[]> {
+  const url = mode
+    ? `${API_BASE}/api/documents?mode=${encodeURIComponent(mode)}`
+    : `${API_BASE}/api/documents`;
+  const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Failed to fetch documents: ${resp.status}`);
   return resp.json();
 }
@@ -176,27 +193,44 @@ export async function uploadFile(file: File): Promise<DocumentInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Extraction via real SSE
+// Extraction via task-based SSE (survives browser close)
 // ---------------------------------------------------------------------------
 
-export function runExtraction(
+export interface StartExtractionResult {
+  task_id: string;
+  status: string;
+}
+
+export async function startExtraction(
   mode: string,
   filename: string,
+): Promise<StartExtractionResult> {
+  const resp = await fetch(`${API_BASE}/api/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, filename }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Extraction failed' }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export function subscribeToTask(
+  taskId: string,
   onEvent: (event: SSEEvent) => void,
 ): () => void {
   const controller = new AbortController();
 
   (async () => {
     try {
-      const resp = await fetch(`${API_BASE}/api/extract`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode, filename }),
+      const resp = await fetch(`${API_BASE}/api/extract/${taskId}/stream`, {
         signal: controller.signal,
       });
 
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: 'Extraction failed' }));
+        const err = await resp.json().catch(() => ({ detail: 'Stream failed' }));
         onEvent({ type: 'error', data: { message: err.detail || `HTTP ${resp.status}` } });
         return;
       }
@@ -218,11 +252,12 @@ export function runExtraction(
 
         // Split on double-newline (SSE event boundary)
         const parts = buffer.split('\n\n');
-        // Keep the last (possibly incomplete) chunk in the buffer
         buffer = parts.pop() || '';
 
         for (const part of parts) {
           if (!part.trim()) continue;
+          // Skip keepalive comments
+          if (part.trim().startsWith(':')) continue;
 
           let eventType = '';
           let eventData = '';
@@ -253,6 +288,63 @@ export function runExtraction(
   })();
 
   return () => controller.abort();
+}
+
+export interface TaskInfo {
+  task_id: string;
+  mode: string;
+  filename: string;
+  status: string;
+  event_count: number;
+}
+
+export async function fetchActiveTasks(): Promise<TaskInfo[]> {
+  const resp = await fetch(`${API_BASE}/api/tasks`);
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return (data.tasks || []).filter(
+    (t: TaskInfo) => t.status === 'pending' || t.status === 'running',
+  );
+}
+
+export async function fetchAllTasks(): Promise<TaskInfo[]> {
+  const resp = await fetch(`${API_BASE}/api/tasks`);
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return data.tasks || [];
+}
+
+// Legacy compatibility — runExtraction now uses task-based flow
+export function runExtraction(
+  mode: string,
+  filename: string,
+  onEvent: (event: SSEEvent) => void,
+): () => void {
+  let unsubscribe: (() => void) | null = null;
+
+  (async () => {
+    try {
+      const { task_id } = await startExtraction(mode, filename);
+      unsubscribe = subscribeToTask(task_id, onEvent);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      onEvent({ type: 'error', data: { message } });
+    }
+  })();
+
+  return () => {
+    if (unsubscribe) unsubscribe();
+  };
+}
+
+// ---------------------------------------------------------------------------
+// API Usage & Cost Tracking
+// ---------------------------------------------------------------------------
+
+export async function fetchAggregateUsage(): Promise<AggregateUsage> {
+  const resp = await fetch(`${API_BASE}/api/usage`);
+  if (!resp.ok) throw new Error(`Failed to fetch usage: ${resp.status}`);
+  return resp.json();
 }
 
 // ---------------------------------------------------------------------------
@@ -312,5 +404,112 @@ export async function syncToDotloop(
     throw new Error(err.detail || `Sync failed (${resp.status})`);
   }
 
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// DocuSign integration
+// ---------------------------------------------------------------------------
+
+export async function checkDocuSignStatus(): Promise<boolean> {
+  try {
+    const resp = await fetch(`${API_BASE}/api/docusign/status`);
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return data.configured === true;
+  } catch {
+    return false;
+  }
+}
+
+export function getDocuSignConnectUrl(): string {
+  return `${API_BASE}/api/docusign/oauth/connect`;
+}
+
+export interface DocuSignEnvelope {
+  envelopeId: string;
+  emailSubject: string;
+  status: string;
+  createdDateTime?: string;
+  statusChangedDateTime?: string;
+  sentDateTime?: string;
+  completedDateTime?: string;
+}
+
+export async function fetchDocuSignEnvelopes(): Promise<DocuSignEnvelope[]> {
+  const resp = await fetch(`${API_BASE}/api/docusign/envelopes`);
+  if (!resp.ok) throw new Error(`Failed to fetch envelopes: ${resp.status}`);
+  const data = await resp.json();
+  return data.envelopes || [];
+}
+
+export async function voidDocuSignEnvelope(envelopeId: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/api/docusign/envelopes/${envelopeId}`, {
+    method: 'DELETE',
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Delete failed' }));
+    throw new Error(err.detail || `Delete failed (${resp.status})`);
+  }
+}
+
+export interface DocuSignSyncResult {
+  envelope_id: string;
+  action: string;
+  errors: string[];
+  envelope_url?: string;
+}
+
+export async function syncToDocuSign(
+  extractionId: string,
+  envelopeId?: string,
+): Promise<DocuSignSyncResult> {
+  const resp = await fetch(`${API_BASE}/api/docusign/sync/${extractionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ envelope_id: envelopeId ?? null }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Sync failed' }));
+    throw new Error(err.detail || `Sync failed (${resp.status})`);
+  }
+
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Extraction cache
+// ---------------------------------------------------------------------------
+
+export interface CachedExtractionResponse {
+  cached: boolean;
+  extraction?: Record<string, unknown>;
+}
+
+export async function computeFileHash(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function checkCachedExtraction(
+  fileHash: string,
+  mode: string = 'real_estate',
+): Promise<CachedExtractionResponse> {
+  const resp = await fetch(
+    `${API_BASE}/api/extractions/cached?file_hash=${encodeURIComponent(fileHash)}&mode=${encodeURIComponent(mode)}`,
+  );
+  if (!resp.ok) return { cached: false };
+  return resp.json();
+}
+
+export async function clearExtractionCache(mode?: string): Promise<{ deleted: number }> {
+  const url = mode
+    ? `${API_BASE}/api/extractions/cache?mode=${encodeURIComponent(mode)}`
+    : `${API_BASE}/api/extractions/cache`;
+  const resp = await fetch(url, { method: 'DELETE' });
+  if (!resp.ok) throw new Error(`Failed to clear cache: ${resp.status}`);
   return resp.json();
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """FastAPI server wrapping the DocExtract pipeline with SSE streaming."""
 
+import hashlib
 import json
 import asyncio
 import logging
@@ -17,6 +18,8 @@ from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
 
 from pdf_converter import get_pdf_info, pdf_to_images, image_to_base64
+
+log = logging.getLogger(__name__)
 from verifier import compute_overall_confidence
 from pii_scanner import scan_all_pages
 from schemas import (
@@ -39,6 +42,15 @@ from dotloop_connector import (
     process_from_dotloop,
     handle_webhook as dotloop_handle_webhook,
     set_oauth_tokens,
+)
+from docusign_connector import (
+    is_configured as docusign_configured,
+    list_docusign_envelopes,
+    void_docusign_envelope,
+    sync_to_docusign,
+    process_from_docusign,
+    handle_webhook as docusign_handle_webhook,
+    set_oauth_tokens as docusign_set_oauth_tokens,
 )
 
 load_dotenv()
@@ -95,13 +107,24 @@ def sse_event(event: str, data: dict) -> str:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _classify_document(filename: str) -> str:
+    """Classify a PDF as 'gov' or 'real_estate' based on filename."""
+    lower = filename.lower()
+    gov_keywords = ("foia", "gov", "freedom", "fbi", "epa", "records_request")
+    if any(kw in lower for kw in gov_keywords):
+        return "gov"
+    return "real_estate"
+
+
 @app.get("/api/documents")
-async def list_documents() -> list[DocumentInfo]:
-    """List available PDF documents in test_docs/."""
+async def list_documents(mode: str | None = None) -> list[DocumentInfo]:
+    """List available PDF documents in test_docs/, optionally filtered by mode."""
     docs: list[DocumentInfo] = []
     if not TEST_DOCS_DIR.exists():
         return docs
     for pdf in sorted(TEST_DOCS_DIR.glob("*.pdf")):
+        if mode and _classify_document(pdf.name) != mode:
+            continue
         info = get_pdf_info(str(pdf))
         docs.append(DocumentInfo(
             name=pdf.name,
@@ -153,15 +176,49 @@ async def upload_document(
 
 @app.post("/api/extract")
 async def extract(request: ExtractRequest):
-    """Run the extraction pipeline and stream SSE progress events."""
+    """Start the extraction pipeline as a background task, return task_id.
+
+    The extraction runs independently of the HTTP connection.
+    Use GET /api/extract/{task_id}/stream to subscribe to SSE events.
+    """
+    from task_manager import create_task, get_active_task, TaskStatus
+
     pdf_path = TEST_DOCS_DIR / request.filename
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="Document not found")
     if request.mode not in ("real_estate", "gov"):
         raise HTTPException(status_code=400, detail="Invalid mode")
 
+    # Check for already-running task for this file+mode
+    existing = get_active_task(request.mode, request.filename)
+    if existing:
+        return {"task_id": existing.task_id, "status": existing.status.value}
+
+    # Create and launch background task
+    task = create_task(request.mode, request.filename)
+    asyncio_task = asyncio.create_task(
+        _run_extraction_task(task, request.mode, str(pdf_path))
+    )
+    task._asyncio_task = asyncio_task
+
+    return {"task_id": task.task_id, "status": "pending"}
+
+
+@app.get("/api/extract/{task_id}/stream")
+async def extract_stream(task_id: str):
+    """Reconnectable SSE stream for a background extraction task.
+
+    Replays all past events, then streams new ones in real time.
+    Disconnecting does NOT stop the extraction — reconnect to resume.
+    """
+    from task_manager import get_task
+
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
     return StreamingResponse(
-        extraction_stream(request.mode, str(pdf_path)),
+        _task_sse_stream(task),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -171,8 +228,91 @@ async def extract(request: ExtractRequest):
     )
 
 
-async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, None]:
-    """Generator that runs the pipeline and yields SSE events at each step."""
+@app.get("/api/extract/{task_id}/status")
+async def extract_task_status(task_id: str):
+    """Get current status of an extraction task."""
+    from task_manager import get_task
+
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task.task_id,
+        "mode": task.mode,
+        "filename": task.filename,
+        "status": task.status.value,
+        "event_count": len(task.events),
+    }
+
+
+@app.get("/api/tasks")
+async def list_extraction_tasks():
+    """List all extraction tasks."""
+    from task_manager import list_tasks
+    return {"tasks": list_tasks()}
+
+
+async def _task_sse_stream(task) -> AsyncGenerator[str, None]:
+    """SSE generator that replays past events and streams new ones."""
+    from task_manager import TaskStatus
+
+    cursor = 0
+    waiter = task.add_waiter()
+
+    try:
+        while True:
+            # Yield all events we haven't sent yet
+            while cursor < len(task.events):
+                ev = task.events[cursor]
+                yield sse_event(ev["type"], ev["data"])
+                cursor += 1
+
+            # If task is done, stop streaming
+            if task.status in (TaskStatus.COMPLETE, TaskStatus.ERROR):
+                break
+
+            # Wait for new events
+            waiter.clear()
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Send keepalive comment to prevent proxy timeouts
+                yield ": keepalive\n\n"
+    finally:
+        task.remove_waiter(waiter)
+
+
+async def _run_extraction_task(task, mode: str, pdf_path: str) -> None:
+    """Run the extraction pipeline as a background task, storing events."""
+    from task_manager import TaskStatus, cleanup_old_tasks
+
+    task.status = TaskStatus.RUNNING
+
+    def emit(event_type: str, data: dict) -> None:
+        task.append_event({"type": event_type, "data": data})
+
+    await _extraction_pipeline(mode, pdf_path, emit)
+
+    # Mark final status based on last event
+    if task.events and task.events[-1]["type"] == "error":
+        task.status = TaskStatus.ERROR
+    else:
+        task.status = TaskStatus.COMPLETE
+
+    cleanup_old_tasks()
+
+
+async def _extraction_pipeline(
+    mode: str, pdf_path: str, emit,
+) -> None:
+    """Core extraction pipeline logic, decoupled from SSE streaming.
+
+    Args:
+        mode: 'real_estate' or 'gov'
+        pdf_path: Absolute path to the PDF file
+        emit: Callable(event_type: str, data: dict) to publish events
+    """
     total_steps = 5  # Load, Convert, Extract, Validate, Output
     total_steps += 1  # Verify citations
     if mode == "real_estate":
@@ -183,25 +323,33 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
     current_step = 0
     _start_time = time.monotonic()
 
+    # Accumulate API token usage across all steps
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _add_usage(usage: dict) -> None:
+        for k in total_usage:
+            total_usage[k] += usage.get(k, 0)
+
     try:
         # --- Step 1: Load Document ---
         current_step += 1
-        yield sse_event("step", {
+        emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Load Document", "status": "running",
         })
-        await asyncio.sleep(0.1)  # Let the event flush
+        await asyncio.sleep(0.05)
 
         file_info = await asyncio.to_thread(get_pdf_info, pdf_path)
+        file_hash = hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()
 
-        yield sse_event("step_complete", {
+        emit("step_complete", {
             "step": current_step, "title": "Load Document", "status": "complete",
             "data": file_info,
         })
 
         # --- Step 2: Convert to Images ---
         current_step += 1
-        yield sse_event("step", {
+        emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Convert to Images", "status": "running",
         })
@@ -209,14 +357,14 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
         images = await asyncio.to_thread(pdf_to_images, pdf_path)
         images_b64 = [image_to_base64(img) for img in images]
 
-        yield sse_event("step_complete", {
+        emit("step_complete", {
             "step": current_step, "title": "Convert to Images", "status": "complete",
             "data": {"pages_converted": len(images)},
         })
 
         # --- Step 3: Neural OCR Extraction ---
         current_step += 1
-        yield sse_event("step", {
+        emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Neural OCR Extraction", "status": "running",
         })
@@ -224,22 +372,23 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
         engine = get_engine()
         use_file = engine.prefers_file_path
         if use_file:
-            raw_extraction = await asyncio.to_thread(
+            raw_extraction, extract_usage = await asyncio.to_thread(
                 engine.extract_from_file, pdf_path, mode,
             )
         else:
-            raw_extraction = await asyncio.to_thread(
+            raw_extraction, extract_usage = await asyncio.to_thread(
                 engine.extract, images_b64, mode,
             )
+        _add_usage(extract_usage)
 
-        yield sse_event("step_complete", {
+        emit("step_complete", {
             "step": current_step, "title": "Neural OCR Extraction", "status": "complete",
             "data": {"fields_extracted": len(raw_extraction)},
         })
 
         # --- Step 4: Validate Schema ---
         current_step += 1
-        yield sse_event("step", {
+        emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Validate Schema", "status": "running",
         })
@@ -280,40 +429,41 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
             except Exception:
                 pass
 
-        yield sse_event("extraction", {"validated_data": validated_data})
-        yield sse_event("validation", {
+        emit("extraction", {"validated_data": validated_data})
+        emit("validation", {
             "success": len(validation_errors) == 0,
             "errors": validation_errors,
         })
-        yield sse_event("step_complete", {
+        emit("step_complete", {
             "step": current_step, "title": "Validate Schema", "status": "complete",
             "data": {"success": len(validation_errors) == 0, "error_count": len(validation_errors)},
         })
 
         # --- Step 5: Verify Citations ---
         current_step += 1
-        yield sse_event("step", {
+        emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Verify Citations", "status": "running",
         })
 
         if use_file:
-            citations = await asyncio.to_thread(
+            citations, verify_usage = await asyncio.to_thread(
                 engine.verify_from_file, pdf_path, validated_data,
             )
         else:
-            citations = await asyncio.to_thread(
+            citations, verify_usage = await asyncio.to_thread(
                 engine.verify, images_b64, validated_data,
             )
+        _add_usage(verify_usage)
         overall_confidence = compute_overall_confidence(citations)
 
         citations_data = [c.model_dump(mode="json") for c in citations]
 
-        yield sse_event("citations", {
+        emit("citations", {
             "citations": citations_data,
             "overall_confidence": overall_confidence,
         })
-        yield sse_event("step_complete", {
+        emit("step_complete", {
             "step": current_step, "title": "Verify Citations", "status": "complete",
             "data": {"citation_count": len(citations), "overall_confidence": overall_confidence},
         })
@@ -322,7 +472,7 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
         compliance_report = None
         if mode == "real_estate":
             current_step += 1
-            yield sse_event("step", {
+            emit("step", {
                 "step": current_step, "total": total_steps,
                 "title": "Compliance Check", "status": "running",
             })
@@ -332,7 +482,7 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
                 transaction_type=(validated.transaction_type if validated else None),
             )
 
-            yield sse_event("compliance", {
+            emit("compliance", {
                 "jurisdiction_key": compliance_report.jurisdiction_key,
                 "jurisdiction_display": compliance_report.jurisdiction_display,
                 "jurisdiction_type": compliance_report.jurisdiction_type,
@@ -343,7 +493,7 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
                 "transaction_type": compliance_report.transaction_type,
                 "notes": compliance_report.notes,
             })
-            yield sse_event("step_complete", {
+            emit("step_complete", {
                 "step": current_step, "title": "Compliance Check", "status": "complete",
                 "data": {
                     "jurisdiction": compliance_report.jurisdiction_display,
@@ -357,27 +507,28 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
         pii_report = None
         if mode == "gov":
             current_step += 1
-            yield sse_event("step", {
+            emit("step", {
                 "step": current_step, "total": total_steps,
                 "title": "PII Scan", "status": "running",
             })
 
             if use_file:
-                page_texts = await asyncio.to_thread(
+                page_texts, ocr_usage = await asyncio.to_thread(
                     engine.ocr_raw_text_from_file, pdf_path,
                 )
             else:
-                page_texts = await asyncio.to_thread(
+                page_texts, ocr_usage = await asyncio.to_thread(
                     engine.ocr_raw_text, images_b64,
                 )
+            _add_usage(ocr_usage)
             pii_report = scan_all_pages(page_texts)
 
-            yield sse_event("pii", {
+            emit("pii", {
                 "findings": [f.model_dump(mode="json") for f in pii_report.findings],
                 "risk_score": pii_report.pii_risk_score,
                 "risk_level": pii_report.risk_level.value,
             })
-            yield sse_event("step_complete", {
+            emit("step_complete", {
                 "step": current_step, "title": "PII Scan", "status": "complete",
                 "data": {
                     "finding_count": len(pii_report.findings),
@@ -387,19 +538,30 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
 
         # --- Final Step: Output ---
         current_step += 1
-        yield sse_event("step", {
+        emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Output", "status": "running",
         })
 
         dotloop_api_payload = None
+        docusign_api_payload = None
         if mode == "real_estate":
             source = validated or lenient_validated
             if source:
                 try:
                     dotloop_api_payload = source.to_dotloop_api_format()
                 except Exception:
-                    pass  # Partial data couldn't be formatted — leave None
+                    pass
+                try:
+                    docusign_api_payload = source.to_docusign_api_format()
+                except Exception:
+                    pass
+
+        # Compute cost: GPT-4o pricing ($2.50/1M input, $10.00/1M output)
+        cost_usd = (
+            total_usage["prompt_tokens"] * 2.50 / 1_000_000
+            + total_usage["completion_tokens"] * 10.00 / 1_000_000
+        )
 
         result = ExtractionResult(
             mode=mode,
@@ -409,10 +571,15 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
             dotloop_data=validated_data if mode == "real_estate" else None,
             foia_data=validated_data if mode == "gov" else None,
             dotloop_api_payload=dotloop_api_payload,
+            docusign_api_payload=docusign_api_payload,
             citations=citations,
             overall_confidence=overall_confidence,
             pii_report=pii_report,
             compliance_report=compliance_report,
+            prompt_tokens=total_usage["prompt_tokens"],
+            completion_tokens=total_usage["completion_tokens"],
+            total_tokens=total_usage["total_tokens"],
+            cost_usd=round(cost_usd, 6),
         )
 
         # Write to dist/
@@ -429,6 +596,7 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
                 mode,
                 len(images),
                 Path(pdf_path).stat().st_size,
+                file_hash=file_hash,
             )
             ext_id = await save_extraction(
                 doc_id,
@@ -438,10 +606,9 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
             )
             extraction_id = str(ext_id)
         except Exception as db_err:
-            # DB save is best-effort — don't fail the extraction
-            logging.getLogger(__name__).warning("DB save failed: %s", db_err)
+            log.warning("DB save failed: %s", db_err)
 
-        yield sse_event("step_complete", {
+        emit("step_complete", {
             "step": current_step, "title": "Output", "status": "complete",
             "data": {"output_path": str(output_path)},
         })
@@ -449,10 +616,54 @@ async def extraction_stream(mode: str, pdf_path: str) -> AsyncGenerator[str, Non
         complete_data = result.model_dump(mode="json")
         if extraction_id:
             complete_data["extraction_id"] = extraction_id
-        yield sse_event("complete", complete_data)
+        emit("complete", complete_data)
 
     except Exception as e:
-        yield sse_event("error", {"message": str(e)})
+        emit("error", {"message": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Extraction Cache Endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/api/extractions/cached")
+async def check_cached_extraction(
+    file_hash: str = Query(...),
+    mode: str = Query("real_estate"),
+):
+    """Check if a document with this hash and mode has already been extracted."""
+    from db import DocumentRecord
+
+    doc = await DocumentRecord.find_one({"file_hash": file_hash, "mode": mode})
+    if not doc or not doc.extractions:
+        return {"cached": False}
+
+    # Return the latest extraction
+    from db_writer import get_extraction
+    ext_ref = f"{doc.id}:{len(doc.extractions) - 1}"
+    ext_data = await get_extraction(ext_ref)
+    if not ext_data:
+        return {"cached": False}
+
+    return {"cached": True, "extraction": ext_data}
+
+
+@app.delete("/api/extractions/cache")
+async def clear_extraction_cache(mode: str = Query(None)):
+    """Clear cached extractions, optionally filtered by mode."""
+    from db import DocumentRecord
+
+    filters = {}
+    if mode:
+        filters["mode"] = mode
+
+    docs = await DocumentRecord.find(filters).to_list()
+    deleted_count = 0
+    for doc in docs:
+        await doc.delete()
+        deleted_count += 1
+
+    return {"deleted": deleted_count, "mode": mode or "all"}
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +1002,249 @@ async def dotloop_webhook(payload: dict):
     """Receive Dotloop LOOP_UPDATED webhook events."""
     result = await dotloop_handle_webhook(payload)
     return result
+
+
+# ---------------------------------------------------------------------------
+# DocuSign Integration Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/docusign/status")
+async def docusign_status():
+    """Check whether DocuSign integration is configured."""
+    from docusign_connector import get_oauth_tokens, _jwt_available
+    configured = docusign_configured()  # May trigger JWT auth
+    tokens = get_oauth_tokens()  # Read after JWT may have set tokens
+    return {
+        "configured": configured,
+        "has_access_token": bool(tokens.get("access_token") or os.getenv("DOCUSIGN_ACCESS_TOKEN")),
+        "has_account_id": bool(tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID")),
+        "jwt_available": _jwt_available(),
+        "account_id": tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID", ""),
+    }
+
+
+@app.get("/api/docusign/envelopes")
+async def docusign_envelopes(
+    from_date: str | None = None,
+    status: str | None = None,
+    count: int = 50,
+):
+    """List recent envelopes from DocuSign."""
+    if not docusign_configured():
+        raise HTTPException(status_code=503, detail="DocuSign not configured")
+    # Default to all active statuses so drafts are included
+    if not status:
+        status = "created,sent,delivered,signed,completed"
+    try:
+        envelopes = await asyncio.to_thread(
+            list_docusign_envelopes, from_date, status, count
+        )
+        return {"envelopes": envelopes}
+    except Exception as e:
+        log.error("DocuSign envelope listing failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DocuSignSyncRequest(BaseModel):
+    envelope_id: str | None = None
+
+
+@app.post("/api/docusign/sync/{extraction_id}")
+async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSignSyncRequest()):
+    """Push a saved extraction to DocuSign as an envelope."""
+    if not docusign_configured():
+        raise HTTPException(status_code=503, detail="DocuSign not configured")
+    try:
+        result = await sync_to_docusign(extraction_id, envelope_id=body.envelope_id)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        # Construct envelope web URL
+        if result.get("envelope_id"):
+            base_url = os.getenv("DOCUSIGN_BASE_URL", "https://demo.docusign.net/restapi")
+            if "demo.docusign.net" in base_url:
+                portal_base = "https://appdemo.docusign.com"
+            else:
+                portal_base = "https://app.docusign.com"
+            result["envelope_url"] = f"{portal_base}/documents/details/{result['envelope_id']}"
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/docusign/envelopes/{envelope_id}")
+async def docusign_void_envelope(envelope_id: str):
+    """Void/discard a DocuSign envelope (drafts or sent)."""
+    if not docusign_configured():
+        raise HTTPException(status_code=503, detail="DocuSign not configured")
+    try:
+        await asyncio.to_thread(void_docusign_envelope, envelope_id)
+        return {"status": "voided", "envelope_id": envelope_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProcessFromDocuSignRequest(BaseModel):
+    sync_back: bool = False
+
+
+@app.post("/api/docusign/process/{envelope_id}")
+async def docusign_process(envelope_id: str, request: ProcessFromDocuSignRequest = ProcessFromDocuSignRequest()):
+    """Pull a PDF from a DocuSign envelope, extract, and optionally sync back."""
+    if not docusign_configured():
+        raise HTTPException(status_code=503, detail="DocuSign not configured")
+    try:
+        result = await process_from_docusign(envelope_id, request.sync_back)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# DocuSign OAuth Endpoints
+# ---------------------------------------------------------------------------
+
+DOCUSIGN_AUTH_SERVER = os.getenv("DOCUSIGN_AUTH_SERVER", "account-d.docusign.com")
+
+
+@app.get("/api/docusign/oauth/connect")
+async def docusign_oauth_connect():
+    """Redirect browser to DocuSign authorization page."""
+    client_id = os.getenv("DOCUSIGN_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=500, detail="DOCUSIGN_CLIENT_ID not configured")
+
+    redirect_uri = os.getenv(
+        "DOCUSIGN_REDIRECT_URI",
+        "http://localhost:8000/api/docusign/oauth/callback",
+    )
+    from urllib.parse import urlencode
+    auth_params = urlencode({
+        "response_type": "code",
+        "scope": "signature",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+    })
+    auth_url = f"https://{DOCUSIGN_AUTH_SERVER}/oauth/auth?{auth_params}"
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/api/docusign/oauth/callback")
+async def docusign_oauth_callback(code: str | None = None, error: str | None = None):
+    """Handle OAuth callback from DocuSign, exchange code for tokens."""
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+    if error:
+        return RedirectResponse(url=f"{frontend_url}?docusign_error={error}")
+
+    if not code:
+        raise HTTPException(status_code=400, detail="No authorization code received")
+
+    client_id = os.getenv("DOCUSIGN_CLIENT_ID")
+    client_secret = os.getenv("DOCUSIGN_CLIENT_SECRET")
+    redirect_uri = os.getenv(
+        "DOCUSIGN_REDIRECT_URI",
+        "http://localhost:8000/api/docusign/oauth/callback",
+    )
+
+    import httpx
+    try:
+        resp = httpx.post(
+            f"https://{DOCUSIGN_AUTH_SERVER}/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            auth=(client_id, client_secret),
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        token_data = resp.json()
+    except Exception as e:
+        logging.getLogger(__name__).error("DocuSign token exchange failed: %s", e)
+        return RedirectResponse(url=f"{frontend_url}?docusign_error=token_exchange_failed")
+
+    # Discover account_id from userinfo
+    account_id = None
+    try:
+        userinfo_resp = httpx.get(
+            f"https://{DOCUSIGN_AUTH_SERVER}/oauth/userinfo",
+            headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            timeout=15.0,
+        )
+        userinfo_resp.raise_for_status()
+        userinfo = userinfo_resp.json()
+        for acct in userinfo.get("accounts", []):
+            if acct.get("is_default"):
+                account_id = acct["account_id"]
+                break
+        if not account_id:
+            accounts = userinfo.get("accounts", [])
+            if accounts:
+                account_id = accounts[0]["account_id"]
+    except Exception as e:
+        logging.getLogger(__name__).warning("DocuSign userinfo failed: %s", e)
+
+    docusign_set_oauth_tokens(
+        access_token=token_data["access_token"],
+        refresh_token=token_data.get("refresh_token"),
+        account_id=account_id,
+    )
+
+    return RedirectResponse(url=f"{frontend_url}?docusign_connected=true")
+
+
+# ---------------------------------------------------------------------------
+# DocuSign Webhook
+# ---------------------------------------------------------------------------
+
+@app.post("/api/webhooks/docusign")
+async def docusign_webhook(payload: dict):
+    """Receive DocuSign Connect webhook events."""
+    result = await docusign_handle_webhook(payload)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# API Usage & Cost Tracking
+# ---------------------------------------------------------------------------
+
+@app.get("/api/usage")
+async def get_usage():
+    """Return aggregate API usage and cost across all extractions."""
+    from db import DocumentRecord
+
+    docs = await DocumentRecord.find_all().to_list()
+    total_extractions = 0
+    total_prompt = 0
+    total_completion = 0
+    total_tokens = 0
+    total_cost = 0.0
+
+    for doc in docs:
+        for ext in doc.extractions:
+            total_extractions += 1
+            total_prompt += ext.prompt_tokens
+            total_completion += ext.completion_tokens
+            total_tokens += ext.total_tokens
+            total_cost += ext.cost_usd
+
+    avg_cost = total_cost / total_extractions if total_extractions else 0.0
+
+    return {
+        "total_extractions": total_extractions,
+        "prompt_tokens": total_prompt,
+        "completion_tokens": total_completion,
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 6),
+        "avg_cost_per_extraction": round(avg_cost, 6),
+    }
 
 
 # ---------------------------------------------------------------------------
