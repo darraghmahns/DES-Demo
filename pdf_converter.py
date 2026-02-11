@@ -2,16 +2,10 @@
 
 import base64
 import io
-import os
 import sys
 from pathlib import Path
 
 from PIL import Image
-
-# Ensure Homebrew binaries (including poppler) are discoverable
-_HOMEBREW_BIN = "/opt/homebrew/bin"
-if _HOMEBREW_BIN not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = _HOMEBREW_BIN + ":" + os.environ.get("PATH", "")
 
 try:
     from pdf2image import convert_from_path

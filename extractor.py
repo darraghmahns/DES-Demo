@@ -92,25 +92,11 @@ Rules:
 OCR_SYSTEM_PROMPT = """You are an OCR engine. Extract ALL text from this document image exactly as it appears, preserving line breaks and formatting. Return ONLY the raw text, nothing else. Include every character, number, and symbol visible on the page."""
 
 
-EMPTY_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
-
-def _usage_dict(usage) -> dict:
-    """Extract token counts from an OpenAI Usage object."""
-    if not usage:
-        return dict(EMPTY_USAGE)
-    return {
-        "prompt_tokens": usage.prompt_tokens or 0,
-        "completion_tokens": usage.completion_tokens or 0,
-        "total_tokens": usage.total_tokens or 0,
-    }
-
-
 def extract_from_images(
     images_b64: list[str],
     mode: str,
     client: OpenAI,
-) -> tuple[dict, dict]:
+) -> dict:
     """Send document page images to GPT-4o Vision and get structured extraction.
 
     Args:
@@ -119,7 +105,7 @@ def extract_from_images(
         client: OpenAI client instance.
 
     Returns:
-        Tuple of (parsed JSON dict, usage dict with prompt/completion/total tokens).
+        Parsed JSON dict matching the target schema.
     """
     system_prompt = REAL_ESTATE_SYSTEM_PROMPT if mode == "real_estate" else GOV_SYSTEM_PROMPT
 
@@ -147,10 +133,10 @@ def extract_from_images(
         max_tokens=4096,
     )
 
-    return json.loads(response.choices[0].message.content), _usage_dict(response.usage)
+    return json.loads(response.choices[0].message.content)
 
 
-def extract_raw_text(images_b64: list[str], client: OpenAI) -> tuple[list[str], dict]:
+def extract_raw_text(images_b64: list[str], client: OpenAI) -> list[str]:
     """Extract raw text from document images for PII scanning.
 
     Args:
@@ -158,10 +144,9 @@ def extract_raw_text(images_b64: list[str], client: OpenAI) -> tuple[list[str], 
         client: OpenAI client instance.
 
     Returns:
-        Tuple of (list of text strings per page, aggregated usage dict).
+        List of text strings, one per page.
     """
     page_texts: list[str] = []
-    total_usage = dict(EMPTY_USAGE)
 
     for i, img_b64 in enumerate(images_b64):
         content = [
@@ -183,8 +168,5 @@ def extract_raw_text(images_b64: list[str], client: OpenAI) -> tuple[list[str], 
         )
 
         page_texts.append(response.choices[0].message.content)
-        u = _usage_dict(response.usage)
-        for k in total_usage:
-            total_usage[k] += u[k]
 
-    return page_texts, total_usage
+    return page_texts
