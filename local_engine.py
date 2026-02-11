@@ -36,7 +36,7 @@ from schemas import (
     FOIARequest,
     VerificationCitation,
 )
-from extractor import REAL_ESTATE_SYSTEM_PROMPT, GOV_SYSTEM_PROMPT, OCR_SYSTEM_PROMPT
+from extractor import REAL_ESTATE_SYSTEM_PROMPT, GOV_SYSTEM_PROMPT, OCR_SYSTEM_PROMPT, EMPTY_USAGE
 from verifier import VERIFICATION_SYSTEM_PROMPT
 
 log = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ class LocalEngine(OCREngine):
 
     # -- File-based methods (preferred) --------------------------------------
 
-    def extract_from_file(self, file_path: str, mode: str) -> dict:
+    def extract_from_file(self, file_path: str, mode: str) -> tuple[dict, dict]:
         """Extract structured data directly from a PDF file using Docling + Ollama."""
         markdown = self._convert_pdf(file_path)
         schema_cls = self._get_schema_for_mode(mode)
@@ -205,11 +205,11 @@ class LocalEngine(OCREngine):
             json_schema=schema_cls.model_json_schema(),
         )
 
-        return json.loads(raw_json)
+        return json.loads(raw_json), dict(EMPTY_USAGE)
 
     def verify_from_file(
         self, file_path: str, extracted_data: dict
-    ) -> list[VerificationCitation]:
+    ) -> tuple[list[VerificationCitation], dict]:
         """Verify extraction using the original PDF via Docling + Ollama."""
         markdown = self._convert_pdf(file_path)
 
@@ -267,15 +267,15 @@ class LocalEngine(OCREngine):
             except Exception:
                 continue
 
-        return citations
+        return citations, dict(EMPTY_USAGE)
 
-    def ocr_raw_text_from_file(self, file_path: str) -> list[str]:
+    def ocr_raw_text_from_file(self, file_path: str) -> tuple[list[str], dict]:
         """Extract raw text per page directly from a PDF file using Docling."""
-        return self._convert_pdf_per_page(file_path)
+        return self._convert_pdf_per_page(file_path), dict(EMPTY_USAGE)
 
     # -- Image-based methods (fallback, for server.py SSE path) --------------
 
-    def extract(self, images_b64: list[str], mode: str) -> dict:
+    def extract(self, images_b64: list[str], mode: str) -> tuple[dict, dict]:
         """Fallback: reconstruct PDF from images, then extract via Docling."""
         tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
         try:
@@ -285,7 +285,7 @@ class LocalEngine(OCREngine):
 
     def verify(
         self, images_b64: list[str], extracted_data: dict
-    ) -> list[VerificationCitation]:
+    ) -> tuple[list[VerificationCitation], dict]:
         """Fallback: reconstruct PDF from images, then verify via Docling."""
         tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
         try:
@@ -293,7 +293,7 @@ class LocalEngine(OCREngine):
         finally:
             os.unlink(tmp_pdf)
 
-    def ocr_raw_text(self, images_b64: list[str]) -> list[str]:
+    def ocr_raw_text(self, images_b64: list[str]) -> tuple[list[str], dict]:
         """Fallback: reconstruct PDF from images, then OCR via Docling."""
         tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
         try:

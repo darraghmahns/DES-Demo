@@ -31,6 +31,7 @@ class ExtractionRecord(BaseModel):
     mode: str = "real_estate"
     extracted_data: Optional[dict] = None
     dotloop_api_payload: Optional[dict] = None
+    docusign_api_payload: Optional[dict] = None
     validation_success: bool = True
     validation_errors: Optional[List[str]] = None
     overall_confidence: float = 0.0
@@ -38,6 +39,12 @@ class ExtractionRecord(BaseModel):
     extraction_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     duration_ms: Optional[int] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # API usage tracking
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float = 0.0
 
     # Embedded children (were separate tables in Postgres)
     citations: List[VerificationCitation] = Field(default_factory=list)
@@ -59,6 +66,7 @@ class DocumentRecord(Document):
     mode: str = "real_estate"  # real_estate | gov
     page_count: int = 0
     file_size_bytes: int = 0
+    file_hash: Optional[str] = None  # SHA-256 hex digest for cache identity
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     extractions: List[ExtractionRecord] = Field(default_factory=list)

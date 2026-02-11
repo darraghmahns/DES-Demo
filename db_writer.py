@@ -21,6 +21,7 @@ async def save_document(
     file_size_bytes: int,
     source: str = "upload",
     source_id: Optional[str] = None,
+    file_hash: Optional[str] = None,
 ) -> PydanticObjectId:
     """Insert a document record and return its ID."""
     doc = DocumentRecord(
@@ -30,6 +31,7 @@ async def save_document(
         mode=mode,
         page_count=page_count,
         file_size_bytes=file_size_bytes,
+        file_hash=file_hash,
     )
     await doc.insert()
     return doc.id
@@ -63,11 +65,17 @@ async def save_extraction(
         mode=result.mode,
         extracted_data=extracted_data,
         dotloop_api_payload=result.dotloop_api_payload,
+        docusign_api_payload=result.docusign_api_payload,
         validation_success=extracted_data is not None,
         overall_confidence=result.overall_confidence,
         pages_processed=result.pages_processed,
         extraction_timestamp=datetime.fromisoformat(result.extraction_timestamp),
         duration_ms=duration_ms,
+        # API usage tracking
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        cost_usd=result.cost_usd,
         # Citations, PII, and Compliance embed directly — no decomposition needed
         citations=result.citations,
         pii_report=result.pii_report,

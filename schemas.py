@@ -28,6 +28,11 @@ class PIIType(str, Enum):
     SSN = "SSN"
     PHONE = "PHONE"
     EMAIL = "EMAIL"
+    ADDRESS = "ADDRESS"
+    DATE_OF_BIRTH = "DATE_OF_BIRTH"
+    DRIVERS_LICENSE = "DRIVERS_LICENSE"
+    BANK_ACCOUNT = "BANK_ACCOUNT"
+    CREDIT_CARD = "CREDIT_CARD"
 
 
 class PIISeverity(str, Enum):
@@ -165,6 +170,88 @@ class DotloopLoopDetails(BaseModel):
                 for p in (self.participants or [])
             ],
         }
+
+    def to_docusign_api_format(self) -> dict:
+        """Serialize to DocuSign eSignature API format.
+
+        Returns a dict suitable for creating/updating a DocuSign envelope:
+        - emailSubject: Descriptive subject line
+        - customFields: Property, financial, and contract data as text custom fields
+        - recipients: Signers (buyers/sellers) and carbon copies (agents/brokers)
+        """
+        addr = self.property_address
+        fin = self.financials
+        dates = self.contract_dates
+
+        # Build a human-readable address string
+        street = f"{getattr(addr, 'street_number', '')} {getattr(addr, 'street_name', '')}".strip()
+        unit = getattr(addr, "unit_number", "") or ""
+        if unit:
+            street = f"{street} #{unit}"
+        city = getattr(addr, "city", "") or ""
+        state = getattr(addr, "state_or_province", "") or ""
+        zipcode = getattr(addr, "postal_code", "") or ""
+        full_address = f"{street}, {city}, {state} {zipcode}".strip(", ")
+
+        email_subject = f"Purchase Agreement: {full_address}" if full_address else f"Purchase Agreement: {getattr(self, 'loop_name', 'Untitled')}"
+
+        # Custom fields carry property/financial/contract data
+        text_custom_fields = [
+            {"name": "PropertyAddress", "value": full_address, "show": "true"},
+            {"name": "City", "value": city, "show": "true"},
+            {"name": "State", "value": state, "show": "true"},
+            {"name": "ZipCode", "value": zipcode, "show": "true"},
+            {"name": "County", "value": getattr(addr, "county", "") or "", "show": "true"},
+            {"name": "MLSNumber", "value": getattr(addr, "mls_number", "") or "", "show": "true"},
+            {"name": "ParcelTaxID", "value": getattr(addr, "parcel_tax_id", "") or "", "show": "true"},
+            {"name": "PurchasePrice", "value": str(getattr(fin, "purchase_price", "") or ""), "show": "true"},
+            {"name": "EarnestMoney", "value": str(getattr(fin, "earnest_money_amount", "") or ""), "show": "true"},
+            {"name": "EarnestMoneyHeldBy", "value": getattr(fin, "earnest_money_held_by", "") or "", "show": "true"},
+            {"name": "CommissionRate", "value": getattr(fin, "sale_commission_rate", "") or "", "show": "true"},
+            {"name": "ClosingDate", "value": getattr(dates, "closing_date", "") or "", "show": "true"},
+            {"name": "ContractDate", "value": getattr(dates, "contract_agreement_date", "") or "", "show": "true"},
+            {"name": "TransactionType", "value": getattr(self, "transaction_type", "PURCHASE_OFFER"), "show": "true"},
+        ]
+
+        # Recipients: signers are buyers/sellers, CCs are agents/brokers
+        signer_roles = {"BUYER", "SELLER"}
+        signers = []
+        carbon_copies = []
+        recipient_id = 1
+
+        for p in (self.participants or []):
+            role_val = p.role.value if hasattr(getattr(p, "role", None), "value") else str(getattr(p, "role", "OTHER") or "OTHER")
+            name = getattr(p, "full_name", "") or ""
+            email = getattr(p, "email", "") or ""
+
+            recipient = {
+                "name": name,
+                "email": email,
+                "recipientId": str(recipient_id),
+                "routingOrder": str(recipient_id),
+            }
+            recipient_id += 1
+
+            if role_val in signer_roles and email:
+                signers.append(recipient)
+            elif email:
+                carbon_copies.append(recipient)
+
+        result: dict = {
+            "emailSubject": email_subject,
+            "customFields": {
+                "textCustomFields": text_custom_fields,
+            },
+        }
+
+        if signers or carbon_copies:
+            result["recipients"] = {}
+            if signers:
+                result["recipients"]["signers"] = signers
+            if carbon_copies:
+                result["recipients"]["carbonCopies"] = carbon_copies
+
+        return result
 
     model_config = {
         "json_schema_extra": {
@@ -376,6 +463,9 @@ class ExtractionResult(BaseModel):
     # Dotloop API-ready format (populated for real_estate mode)
     dotloop_api_payload: Optional[dict] = None
 
+    # DocuSign API-ready format (populated for real_estate mode)
+    docusign_api_payload: Optional[dict] = None
+
     # Verification
     citations: List[VerificationCitation] = Field(default_factory=list)
     overall_confidence: float = Field(ge=0.0, le=1.0, default=0.0)
@@ -385,3 +475,9 @@ class ExtractionResult(BaseModel):
 
     # Compliance (real_estate mode)
     compliance_report: Optional[ComplianceReport] = None
+
+    # API usage tracking
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float = 0.0

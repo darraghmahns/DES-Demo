@@ -38,7 +38,7 @@ class OCREngine(ABC):
         return False
 
     @abstractmethod
-    def extract(self, images_b64: list[str], mode: str) -> dict:
+    def extract(self, images_b64: list[str], mode: str) -> tuple[dict, dict]:
         """Extract structured data from document page images.
 
         Args:
@@ -46,11 +46,11 @@ class OCREngine(ABC):
             mode: 'real_estate' or 'gov'.
 
         Returns:
-            Parsed dict matching the target schema (DotloopLoopDetails or FOIARequest).
+            Tuple of (parsed dict matching target schema, usage dict with token counts).
         """
         ...
 
-    def extract_from_file(self, file_path: str, mode: str) -> dict:
+    def extract_from_file(self, file_path: str, mode: str) -> tuple[dict, dict]:
         """Extract structured data directly from a PDF file.
 
         Engines that set prefers_file_path=True should override this.
@@ -61,7 +61,7 @@ class OCREngine(ABC):
     @abstractmethod
     def verify(
         self, images_b64: list[str], extracted_data: dict
-    ) -> list[VerificationCitation]:
+    ) -> tuple[list[VerificationCitation], dict]:
         """Verify extraction by citing source locations for each value.
 
         Args:
@@ -69,13 +69,13 @@ class OCREngine(ABC):
             extracted_data: The previously extracted data dict.
 
         Returns:
-            List of VerificationCitation objects.
+            Tuple of (list of VerificationCitation objects, usage dict with token counts).
         """
         ...
 
     def verify_from_file(
         self, file_path: str, extracted_data: dict
-    ) -> list[VerificationCitation]:
+    ) -> tuple[list[VerificationCitation], dict]:
         """Verify extraction using the original PDF file.
 
         Engines that set prefers_file_path=True should override this.
@@ -84,18 +84,18 @@ class OCREngine(ABC):
         raise NotImplementedError(f"{self.name} engine does not support file-based verification")
 
     @abstractmethod
-    def ocr_raw_text(self, images_b64: list[str]) -> list[str]:
+    def ocr_raw_text(self, images_b64: list[str]) -> tuple[list[str], dict]:
         """Extract raw text from images for PII scanning.
 
         Args:
             images_b64: List of base64-encoded PNG strings.
 
         Returns:
-            List of raw text strings, one per page.
+            Tuple of (list of raw text strings one per page, usage dict with token counts).
         """
         ...
 
-    def ocr_raw_text_from_file(self, file_path: str) -> list[str]:
+    def ocr_raw_text_from_file(self, file_path: str) -> tuple[list[str], dict]:
         """Extract raw text directly from a PDF file.
 
         Engines that set prefers_file_path=True should override this.

@@ -17,6 +17,8 @@ frontend/dist/
 # Environment & secrets
 .env
 .env.*
+.docusign_tokens.json
+docusign_private.pem
 
 # Output (keep dist/.gitkeep trackable)
 dist/*.json
