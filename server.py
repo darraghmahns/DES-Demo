@@ -39,6 +39,7 @@ from db_writer import save_document, save_extraction, get_extraction
 from dotloop_connector import (
     is_configured as dotloop_configured,
     list_dotloop_loops,
+    archive_dotloop_loop,
     sync_to_dotloop,
     process_from_dotloop,
     handle_webhook as dotloop_handle_webhook,
@@ -1112,6 +1113,41 @@ async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user
         return result
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/dotloop/loops/{loop_id}")
+async def dotloop_archive_loop(loop_id: int, user=Depends(get_optional_user)):
+    """Archive a single Dotloop loop."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    try:
+        result = await asyncio.to_thread(archive_dotloop_loop, loop_id, user_tokens=user_tokens)
+        return {"status": "archived", "loop_id": loop_id, "detail": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/dotloop/loops")
+async def dotloop_archive_all_loops(user=Depends(get_optional_user)):
+    """Archive all Dotloop loops."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    try:
+        loops = await asyncio.to_thread(list_dotloop_loops, None, 100, user_tokens=user_tokens)
+        results = []
+        for loop in loops:
+            lid = loop.get("loopId")
+            if lid:
+                try:
+                    await asyncio.to_thread(archive_dotloop_loop, lid, user_tokens=user_tokens)
+                    results.append({"loop_id": lid, "result": "archived"})
+                except Exception as e:
+                    results.append({"loop_id": lid, "result": str(e)})
+        return {"archived": len(results), "details": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

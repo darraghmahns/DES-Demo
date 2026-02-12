@@ -15,6 +15,7 @@ import {
   syncToDocuSign,
   voidDocuSignEnvelope,
   deleteAllDocuSignEnvelopes,
+  archiveAllDotloopLoops,
   getDocuSignConnectUrl,
   fetchDocuSignEnvelopes,
   fetchAggregateUsage,
@@ -559,6 +560,16 @@ function App() {
       setSelectedEnvelopeId(null);
     } catch (err) {
       setDocusignSyncError(err instanceof Error ? err.message : 'Delete all failed');
+    }
+  }
+
+  async function handleArchiveAllLoops() {
+    try {
+      await archiveAllDotloopLoops();
+      setDotloopLoops([]);
+      setSelectedLoopId(null);
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : 'Archive all failed');
     }
   }
 
@@ -1135,7 +1146,23 @@ function App() {
             <div className="dotloop-section">
               {!syncResult && !syncError && (
                 <div className="dotloop-loop-selector">
-                  <label className="dotloop-label">Target Loop</label>
+                  <label className="dotloop-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span>Target Loop</span>
+                    {dotloopLoops.length > 0 && (
+                      <button
+                        className="docusign-delete-btn"
+                        title="Archive all loops"
+                        style={{ fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}
+                        onClick={() => {
+                          if (confirm('Archive all Dotloop loops?')) {
+                            handleArchiveAllLoops();
+                          }
+                        }}
+                      >
+                        Archive All
+                      </button>
+                    )}
+                  </label>
                   {loadingLoops ? (
                     <div style={{ padding: 8, textAlign: 'center' }}>
                       <span className="spinner" />
