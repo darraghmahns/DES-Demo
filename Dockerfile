@@ -10,9 +10,10 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# System deps (poppler for pdf2image)
+# System deps (poppler for pdf2image, ca-certificates for MongoDB Atlas TLS)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends poppler-utils && \
+    apt-get install -y --no-install-recommends poppler-utils ca-certificates && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Python deps (prod — excludes heavy docling/ollama for ENGINE=openai)
