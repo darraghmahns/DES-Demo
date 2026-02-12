@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from dotloop_client import DotloopClient, DotloopAPIError
+from db import DocumentRecord
 from db_writer import get_extraction, save_document, save_extraction
 from ocr_engine import get_engine
 from schemas import DotloopLoopDetails, ExtractionResult
@@ -55,15 +56,27 @@ def clear_oauth_tokens() -> None:
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
-def is_configured() -> bool:
-    """Return True if Dotloop tokens are available (env or OAuth)."""
+def is_configured(user_tokens: dict | None = None) -> bool:
+    """Return True if Dotloop tokens are available.
+
+    Priority: user_tokens > module-level OAuth > env vars.
+    """
+    if user_tokens and user_tokens.get("access_token"):
+        return True
     return bool(os.getenv("DOTLOOP_API_TOKEN") or _oauth_tokens.get("access_token"))
 
 
-def get_dotloop_client() -> DotloopClient:
-    """Factory: build a DotloopClient, preferring OAuth tokens over env vars."""
-    api_token = _oauth_tokens.get("access_token") or os.getenv("DOTLOOP_API_TOKEN")
-    refresh_token = _oauth_tokens.get("refresh_token") or os.getenv("DOTLOOP_REFRESH_TOKEN")
+def get_dotloop_client(user_tokens: dict | None = None) -> DotloopClient:
+    """Factory: build a DotloopClient.
+
+    Priority: user_tokens > module-level OAuth > env vars.
+    """
+    if user_tokens and user_tokens.get("access_token"):
+        api_token = user_tokens["access_token"]
+        refresh_token = user_tokens.get("refresh_token")
+    else:
+        api_token = _oauth_tokens.get("access_token") or os.getenv("DOTLOOP_API_TOKEN")
+        refresh_token = _oauth_tokens.get("refresh_token") or os.getenv("DOTLOOP_REFRESH_TOKEN")
     return DotloopClient(
         api_token=api_token,
         refresh_token=refresh_token,
@@ -84,7 +97,12 @@ def _get_profile_id() -> int:
 # Flow A: Push extraction to Dotloop
 # ---------------------------------------------------------------------------
 
-async def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dict[str, Any]:
+async def sync_to_dotloop(
+    extraction_id: str,
+    loop_id: int | None = None,
+    upload_document: bool = True,
+    user_tokens: dict | None = None,
+) -> dict[str, Any]:
     """Push a saved extraction to Dotloop as a loop.
 
     Steps:
@@ -93,14 +111,16 @@ async def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dic
       3. Use specified loop, find existing, or create new
       4. Update loop details
       5. Add participants (skip duplicates by email)
+      6. Upload source PDF document (if available and upload_document=True)
 
     Args:
         extraction_id: Extraction reference string (doc_id:index).
         loop_id: If provided, sync to this existing loop instead of
             creating/finding one automatically.
+        upload_document: If True, upload the source PDF to the loop.
 
     Returns:
-        Dict with loop_id, loop_url, action, and errors list.
+        Dict with loop_id, loop_url, action, document_uploaded, and errors list.
     """
     ext = await get_extraction(extraction_id)
     if not ext:
@@ -119,7 +139,7 @@ async def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dic
     loop_details = payload.get("loopDetails", {})
     participants = payload.get("participants", [])
 
-    with get_dotloop_client() as client:
+    with get_dotloop_client(user_tokens=user_tokens) as client:
         # --- Create, find, or use specified loop ---
         if loop_id:
             # User selected an existing loop
@@ -197,10 +217,54 @@ async def sync_to_dotloop(extraction_id: str, loop_id: int | None = None) -> dic
                     errors.append(f"Failed to add {p.get('fullName')}: {e.message}")
                     log.warning("Participant add failed: %s", e.message)
 
+        # --- Upload source PDF document ---
+        document_uploaded = False
+        document_name: str | None = None
+
+        if upload_document:
+            try:
+                # Look up the parent DocumentRecord to get file_path
+                doc_record = await DocumentRecord.get(ext["document_id"])
+                file_path = doc_record.file_path if doc_record else None
+
+                if file_path and Path(file_path).exists():
+                    folder = client.find_or_create_folder(
+                        profile_id, loop_id, "Extracted Documents"
+                    )
+                    folder_id = folder["id"]
+                    client.upload_document(
+                        profile_id=profile_id,
+                        loop_id=loop_id,
+                        folder_id=folder_id,
+                        file_path=file_path,
+                        file_name=doc_record.filename,
+                    )
+                    document_uploaded = True
+                    document_name = doc_record.filename
+                    log.info(
+                        "Uploaded document %s to folder %s in loop %s",
+                        doc_record.filename, folder_id, loop_id,
+                    )
+                elif file_path:
+                    errors.append(
+                        f"Source PDF not found on disk at {file_path} — document not uploaded"
+                    )
+                    log.warning("Source PDF missing: %s", file_path)
+                else:
+                    log.info("No file_path stored for extraction — skipping document upload")
+            except DotloopAPIError as e:
+                errors.append(f"Failed to upload document: {e.message}")
+                log.warning("Document upload failed: %s", e.message)
+            except Exception as e:
+                errors.append(f"Failed to upload document: {e}")
+                log.warning("Document upload failed: %s", e)
+
     return {
         "loop_id": str(loop_id),
         "loop_url": loop_url,
         "action": action,
+        "document_uploaded": document_uploaded,
+        "document_name": document_name,
         "errors": errors,
     }
 
@@ -213,6 +277,7 @@ async def process_from_dotloop(
     profile_id: int | None = None,
     loop_id: int = 0,
     sync_back: bool = False,
+    user_tokens: dict | None = None,
 ) -> dict[str, Any]:
     """Download a PDF from a Dotloop loop, run OCR extraction, and save.
 
@@ -235,7 +300,7 @@ async def process_from_dotloop(
     if not profile_id:
         profile_id = _get_profile_id()
 
-    with get_dotloop_client() as client:
+    with get_dotloop_client(user_tokens=user_tokens) as client:
         # Get loop info
         loop = client.get_loop(profile_id, loop_id)
         loop_name = loop.get("name", f"loop-{loop_id}")
@@ -274,14 +339,14 @@ async def process_from_dotloop(
         engine = get_engine()
         mode = "real_estate"
 
-        # Extract
+        # Extract (engine methods return (result, usage) tuples)
         if engine.prefers_file_path:
-            raw_extraction = engine.extract_from_file(tmp_path, mode)
+            raw_extraction, _extract_usage = engine.extract_from_file(tmp_path, mode)
         else:
             from pdf_converter import pdf_to_images, image_to_base64
             images = pdf_to_images(tmp_path)
             images_b64 = [image_to_base64(img) for img in images]
-            raw_extraction = engine.extract(images_b64, mode)
+            raw_extraction, _extract_usage = engine.extract(images_b64, mode)
 
         # Validate
         validated = DotloopLoopDetails.model_validate(raw_extraction)
@@ -289,9 +354,9 @@ async def process_from_dotloop(
 
         # Verify citations
         if engine.prefers_file_path:
-            citations = engine.verify_from_file(tmp_path, validated_data)
+            citations, _verify_usage = engine.verify_from_file(tmp_path, validated_data)
         else:
-            citations = engine.verify(images_b64, validated_data)  # type: ignore[possibly-undefined]
+            citations, _verify_usage = engine.verify(images_b64, validated_data)  # type: ignore[possibly-undefined]
 
         overall_confidence = compute_overall_confidence(citations)
 
@@ -354,6 +419,7 @@ async def process_from_dotloop(
 def list_dotloop_loops(
     profile_id: int | None = None,
     batch_size: int = 20,
+    user_tokens: dict | None = None,
 ) -> list[dict[str, Any]]:
     """List recent loops from Dotloop.
 
@@ -367,7 +433,7 @@ def list_dotloop_loops(
     if not profile_id:
         profile_id = _get_profile_id()
 
-    with get_dotloop_client() as client:
+    with get_dotloop_client(user_tokens=user_tokens) as client:
         result = client.list_loops(profile_id, batch_size=batch_size)
         return result.get("data", [])
 
@@ -375,6 +441,167 @@ def list_dotloop_loops(
 # ---------------------------------------------------------------------------
 # Webhook handler
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Loop detail + document listing
+# ---------------------------------------------------------------------------
+
+def get_loop_with_details(
+    loop_id: int,
+    profile_id: int | None = None,
+    user_tokens: dict | None = None,
+) -> dict[str, Any]:
+    """Get full loop metadata including details, participants, and document list.
+
+    Returns a unified dict with:
+      - Loop metadata (id, name, transactionType, status, loopUrl)
+      - Loop details (property address, financials, dates)
+      - Participants list
+      - Documents list (across all folders)
+
+    This is the "loop viewer" endpoint that powers the comparison UI.
+    """
+    if not profile_id:
+        profile_id = _get_profile_id()
+
+    with get_dotloop_client(user_tokens=user_tokens) as client:
+        # Core loop info
+        loop = client.get_loop(profile_id, loop_id)
+
+        # Structured details (property, financials, dates, etc.)
+        details = client.get_loop_details(profile_id, loop_id)
+
+        # Participants
+        try:
+            participants = client.list_participants(profile_id, loop_id)
+        except DotloopAPIError:
+            participants = []
+
+        # Documents from all folders
+        documents: list[dict[str, Any]] = []
+        try:
+            folders = client.list_folders(
+                profile_id, loop_id, include_documents=True,
+            )
+            for folder in folders:
+                folder_name = folder.get("name", "")
+                folder_id = folder.get("id")
+                for doc in folder.get("documents", []):
+                    documents.append({
+                        "id": doc.get("id"),
+                        "name": doc.get("name", ""),
+                        "folder_id": folder_id,
+                        "folder_name": folder_name,
+                    })
+        except DotloopAPIError:
+            pass
+
+    # Build unified response
+    property_address = details.get("Property Address", {})
+    financials = details.get("Financials", {})
+    contract_dates = details.get("Contract Dates", {})
+
+    return {
+        "id": loop.get("id"),
+        "name": loop.get("name", ""),
+        "transaction_type": loop.get("transactionType", ""),
+        "status": loop.get("status", ""),
+        "loop_url": loop.get("loopUrl", ""),
+        "created": loop.get("created", ""),
+        "updated": loop.get("updated", ""),
+        "property_address": {
+            "street_number": property_address.get("Street Number", ""),
+            "street_name": property_address.get("Street Name", ""),
+            "city": property_address.get("City", ""),
+            "state": property_address.get("State/Prov", ""),
+            "postal_code": property_address.get("Zip/Postal Code", ""),
+            "county": property_address.get("County", ""),
+            "unit": property_address.get("Unit Number", ""),
+        },
+        "financials": {
+            "purchase_price": financials.get("Purchase/Sale Price", ""),
+            "earnest_money": financials.get("Earnest Money Amount", ""),
+            "commission_rate": financials.get("Sale Commission Rate", ""),
+        },
+        "contract_dates": {
+            "closing_date": contract_dates.get("Closing Date", ""),
+            "offer_date": contract_dates.get("Offer Date", ""),
+            "offer_expiration": contract_dates.get("Offer Expiration Date", ""),
+            "inspection_date": contract_dates.get("Inspection Date", ""),
+        },
+        "participants": [
+            {
+                "id": p.get("id"),
+                "full_name": p.get("fullName", ""),
+                "email": p.get("email", ""),
+                "role": p.get("role", ""),
+            }
+            for p in participants
+        ],
+        "documents": documents,
+        "details_raw": details,
+    }
+
+
+def search_loops(
+    query: str,
+    profile_id: int | None = None,
+    batch_size: int = 50,
+    user_tokens: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Search loops by name or property address (client-side filter).
+
+    Dotloop's API doesn't support server-side address search, so we
+    pull recent loops and filter by name/address match.
+
+    Args:
+        query: Search string to match against loop name and property address.
+        profile_id: Dotloop profile ID (falls back to env).
+        batch_size: Number of loops to scan (max 100).
+
+    Returns:
+        List of matching loop summary dicts.
+    """
+    if not profile_id:
+        profile_id = _get_profile_id()
+
+    query_lower = query.strip().lower()
+
+    with get_dotloop_client(user_tokens=user_tokens) as client:
+        result = client.list_loops(
+            profile_id,
+            batch_size=min(batch_size, 100),
+            sort="updated:desc",
+            include_details=True,
+        )
+        loops = result.get("data", [])
+
+    matches: list[dict[str, Any]] = []
+    for loop in loops:
+        loop_name = (loop.get("name") or "").lower()
+        # Also check property address in loop details
+        details = loop.get("loopDetails", {})
+        prop_addr = details.get("Property Address", {})
+        addr_str = " ".join(str(v) for v in prop_addr.values()).lower()
+
+        if query_lower in loop_name or query_lower in addr_str:
+            matches.append({
+                "id": loop.get("id"),
+                "name": loop.get("name", ""),
+                "transaction_type": loop.get("transactionType", ""),
+                "status": loop.get("status", ""),
+                "loop_url": loop.get("loopUrl", ""),
+                "updated": loop.get("updated", ""),
+                "property_address": {
+                    "street_number": prop_addr.get("Street Number", ""),
+                    "street_name": prop_addr.get("Street Name", ""),
+                    "city": prop_addr.get("City", ""),
+                    "state": prop_addr.get("State/Prov", ""),
+                },
+            })
+
+    return matches
+
 
 async def handle_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     """Handle a Dotloop webhook event.

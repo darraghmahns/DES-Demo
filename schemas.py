@@ -476,8 +476,69 @@ class ExtractionResult(BaseModel):
     # Compliance (real_estate mode)
     compliance_report: Optional[ComplianceReport] = None
 
+    # Document type classification
+    document_type: Optional[str] = Field(
+        default=None,
+        description="Classified document type (PURCHASE_OFFER, COUNTEROFFER, etc.)",
+    )
+
     # API usage tracking
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     cost_usd: float = 0.0
+
+
+# =============================================================================
+# Document Type Classification
+# =============================================================================
+
+
+class DocumentType(str, Enum):
+    """Classification of real estate document types."""
+    PURCHASE_OFFER = "PURCHASE_OFFER"
+    COUNTEROFFER = "COUNTEROFFER"
+    INSPECTION_NOTICE = "INSPECTION_NOTICE"
+    INSPECTION_RESPONSE = "INSPECTION_RESPONSE"
+    ADDENDUM = "ADDENDUM"
+    AMENDMENT = "AMENDMENT"
+    LISTING_AGREEMENT = "LISTING_AGREEMENT"
+    UNKNOWN = "UNKNOWN"
+
+
+# =============================================================================
+# Comparison Models
+# =============================================================================
+
+
+class FieldSignificance(str, Enum):
+    """How important a field change is for decision-making."""
+    CRITICAL = "critical"
+    MAJOR = "major"
+    MINOR = "minor"
+
+
+class ComparisonFieldDelta(BaseModel):
+    """A single field that differs between two documents."""
+    field_path: str = Field(description="Dot-separated path (e.g., 'financials.purchase_price')")
+    field_label: str = Field(description="Human-readable label (e.g., 'Purchase Price')")
+    original_value: Optional[str] = None
+    new_value: Optional[str] = None
+    change_type: str = Field(description="'modified', 'added', or 'removed'")
+    significance: FieldSignificance = Field(default=FieldSignificance.MINOR)
+
+
+class ComparisonResult(BaseModel):
+    """Result of comparing two document extractions."""
+    comparison_id: str = Field(description="Unique comparison ID")
+    from_extraction_id: str = Field(description="Extraction ID of the original document")
+    to_extraction_id: str = Field(description="Extraction ID of the compared document")
+    from_source: Optional[str] = None
+    to_source: Optional[str] = None
+    deltas: List[ComparisonFieldDelta] = Field(default_factory=list)
+    summary: str = Field(default="", description="Natural language summary of changes")
+    critical_count: int = 0
+    major_count: int = 0
+    minor_count: int = 0
+    total_changes: int = 0
+    comparison_timestamp: str = Field(default="")

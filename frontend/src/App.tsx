@@ -20,7 +20,19 @@ import {
   computeFileHash,
   checkCachedExtraction,
   clearExtractionCache,
+  searchDotloopLoops,
+  fetchLoopDetail,
+  fetchEnvelopeDetail,
+  extractBatch,
+  compareExtractions,
+  fetchExtractions,
+  setAuthTokenProvider,
 } from './api';
+
+// Clerk auth — only active when VITE_CLERK_PUBLISHABLE_KEY is set
+import { useAuth, SignedIn, SignedOut, SignIn, UserButton, OrganizationSwitcher } from '@clerk/clerk-react';
+
+const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 import type {
   DocumentInfo,
   VerificationCitation,
@@ -35,6 +47,12 @@ import type {
   DocuSignSyncResult,
   DocuSignEnvelope,
   AggregateUsage,
+  LoopDetail,
+  EnvelopeDetail,
+  ComparisonResult,
+  FieldSignificance,
+  BatchSource,
+  ExtractionSummary,
 } from './api';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +60,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 type Mode = 'real_estate' | 'gov';
+type ViewId = 'extraction' | 'loops' | 'compare';
 type StepStatus = 'pending' | 'running' | 'complete' | 'error';
 type TabId = 'extraction' | 'citations' | 'compliance' | 'pii' | 'json';
 
@@ -120,9 +139,18 @@ function flattenObject(
 // App
 // ---------------------------------------------------------------------------
 
+function AuthTokenWiring() {
+  const { getToken } = useAuth();
+  useEffect(() => {
+    setAuthTokenProvider(() => getToken());
+  }, [getToken]);
+  return null;
+}
+
 function App() {
   // Core
   const [mode, setMode] = useState<Mode>('real_estate');
+  const [activeView, setActiveView] = useState<ViewId>('extraction');
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const [loadingDocs, setLoadingDocs] = useState(true);
@@ -183,6 +211,10 @@ function App() {
   // Cache
   const [isCached, setIsCached] = useState(false);
   const [checkingCache, setCheckingCache] = useState(false);
+
+  // Comparison
+  const [compareFromId, setCompareFromId] = useState('');
+  const [compareToId, setCompareToId] = useState('');
 
   // ---------------------------------------------------------------------------
   // Core helpers
@@ -700,8 +732,31 @@ function App() {
 
   // --- Render ---
 
-  return (
-    <div className="app">
+  // Auth gate: when Clerk is enabled, show sign-in for unauthenticated users
+  if (CLERK_ENABLED) {
+    return (
+      <>
+        <AuthTokenWiring />
+        <SignedOut>
+          <div className="auth-gate">
+            <div className="auth-gate-inner">
+              <span className="auth-gate-title">D.E.S.</span>
+              <span className="auth-gate-subtitle">Document Extract System</span>
+              <SignIn />
+            </div>
+          </div>
+        </SignedOut>
+        <SignedIn>
+          {renderMainApp()}
+        </SignedIn>
+      </>
+    );
+  }
+
+  return renderMainApp();
+
+  /* eslint-disable-next-line no-unreachable */
+  function renderMainApp() { return (<div className="app">
       {/* Header */}
       <header className="header">
         <div className="header-left">
@@ -720,11 +775,63 @@ function App() {
               Government
             </button>
           </div>
+          {mode === 'real_estate' && (
+            <div className="view-toggle">
+              <button
+                className={`view-btn ${activeView === 'extraction' ? 'active' : ''}`}
+                onClick={() => setActiveView('extraction')}
+              >
+                Extract
+              </button>
+              <button
+                className={`view-btn ${activeView === 'loops' ? 'active' : ''}`}
+                onClick={() => setActiveView('loops')}
+              >
+                Loops
+              </button>
+              <button
+                className={`view-btn ${activeView === 'compare' ? 'active' : ''}`}
+                onClick={() => setActiveView('compare')}
+              >
+                Compare
+              </button>
+            </div>
+          )}
         </div>
-        <span className="header-subtitle">Neural OCR + Pydantic Validation</span>
+        <div className="header-right">
+          <span className="header-subtitle">Neural OCR + Pydantic Validation</span>
+          {CLERK_ENABLED && (
+            <div className="header-auth">
+              <OrganizationSwitcher />
+              <UserButton />
+            </div>
+          )}
+        </div>
       </header>
 
-      <div className="main">
+      {/* Loops Browser View */}
+      {activeView === 'loops' && mode === 'real_estate' && (
+        <LoopBrowser
+          dotloopConfigured={dotloopConfigured}
+          docusignConfigured={docusignConfigured}
+          onCompare={(fromId, toId) => {
+            setCompareFromId(fromId);
+            setCompareToId(toId);
+            setActiveView('compare');
+          }}
+        />
+      )}
+
+      {/* Comparison View */}
+      {activeView === 'compare' && mode === 'real_estate' && (
+        <ComparisonView
+          initialFromId={compareFromId}
+          initialToId={compareToId}
+        />
+      )}
+
+      {/* Extraction View (original) */}
+      {(activeView === 'extraction' || mode === 'gov') && <div className="main">
         {/* Left Panel */}
         <div className="left-panel">
           {/* Upload Section */}
@@ -1057,6 +1164,9 @@ function App() {
                 <div className="dotloop-success">
                   <span className="dotloop-check">&#x2713;</span>
                   {syncResult.action} loop in Dotloop
+                  {syncResult.document_uploaded && syncResult.document_name && (
+                    <span className="dotloop-doc-uploaded"> &middot; Uploaded {syncResult.document_name}</span>
+                  )}
                   {syncResult.loop_url && (
                     <a href={syncResult.loop_url} target="_blank" rel="noopener noreferrer" className="dotloop-link">
                       Open in Dotloop &#x2192;
@@ -1311,9 +1421,9 @@ function App() {
             )}
           </div>
         </div>
-      </div>
+      </div>}
     </div>
-  );
+  ); }
 }
 
 // ---------------------------------------------------------------------------
@@ -1595,5 +1705,683 @@ function JSONOutput({ data }: { data: ExtractionResult }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Loop Browser — unified Dotloop + DocuSign browser
+// ---------------------------------------------------------------------------
+
+interface LoopBrowserProps {
+  dotloopConfigured: boolean;
+  docusignConfigured: boolean;
+  onCompare: (fromId: string, toId: string) => void;
+}
+
+interface UnifiedLoopItem {
+  id: string;
+  source: 'dotloop' | 'docusign';
+  name: string;
+  propertyAddress?: string;
+  transactionType?: string;
+  status?: string;
+  updated?: string;
+  documentCount?: number;
+}
+
+function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopBrowserProps) {
+  const [items, setItems] = useState<UnifiedLoopItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
+  const [expandedItem, setExpandedItem] = useState<string | null>(null);
+  const [loopDetail, setLoopDetail] = useState<LoopDetail | null>(null);
+  const [envelopeDetail, setEnvelopeDetail] = useState<EnvelopeDetail | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [extractionIds, setExtractionIds] = useState<Record<string, string>>({});
+  const [extractError, setExtractError] = useState<string | null>(null);
+
+  // Load initial items
+  useEffect(() => {
+    loadItems();
+  }, [dotloopConfigured, docusignConfigured]);
+
+  async function loadItems() {
+    setLoading(true);
+    const unified: UnifiedLoopItem[] = [];
+
+    try {
+      if (dotloopConfigured) {
+        const loops = await fetchDotloopLoops();
+        for (const loop of loops) {
+          unified.push({
+            id: `dl-${loop.id}`,
+            source: 'dotloop',
+            name: loop.name,
+            transactionType: loop.transactionType,
+            status: loop.status,
+            updated: loop.updated,
+          });
+        }
+      }
+    } catch { /* ignore */ }
+
+    try {
+      if (docusignConfigured) {
+        const envelopes = await fetchDocuSignEnvelopes();
+        for (const env of envelopes) {
+          unified.push({
+            id: `ds-${env.envelopeId}`,
+            source: 'docusign',
+            name: env.emailSubject || 'Untitled',
+            status: env.status,
+            updated: env.createdDateTime,
+          });
+        }
+      }
+    } catch { /* ignore */ }
+
+    setItems(unified);
+    setLoading(false);
+  }
+
+  async function handleSearch() {
+    if (!searchQuery.trim()) {
+      loadItems();
+      return;
+    }
+    setSearching(true);
+    const unified: UnifiedLoopItem[] = [];
+    const q = searchQuery.trim().toLowerCase();
+
+    try {
+      if (dotloopConfigured) {
+        const loops = await searchDotloopLoops(searchQuery);
+        for (const loop of loops) {
+          unified.push({
+            id: `dl-${loop.id}`,
+            source: 'dotloop',
+            name: loop.name,
+            transactionType: loop.transactionType,
+            status: loop.status,
+            updated: loop.updated,
+          });
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Client-side filter DocuSign
+    try {
+      if (docusignConfigured) {
+        const envelopes = await fetchDocuSignEnvelopes();
+        for (const env of envelopes) {
+          const subject = (env.emailSubject || '').toLowerCase();
+          if (subject.includes(q)) {
+            unified.push({
+              id: `ds-${env.envelopeId}`,
+              source: 'docusign',
+              name: env.emailSubject || 'Untitled',
+              status: env.status,
+              updated: env.createdDateTime,
+            });
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    setItems(unified);
+    setSearching(false);
+  }
+
+  async function handleExpand(item: UnifiedLoopItem) {
+    if (expandedItem === item.id) {
+      setExpandedItem(null);
+      setLoopDetail(null);
+      setEnvelopeDetail(null);
+      return;
+    }
+    setExpandedItem(item.id);
+    setLoadingDetail(true);
+    setLoopDetail(null);
+    setEnvelopeDetail(null);
+
+    try {
+      if (item.source === 'dotloop') {
+        const rawId = parseInt(item.id.replace('dl-', ''));
+        const detail = await fetchLoopDetail(rawId);
+        setLoopDetail(detail);
+      } else {
+        const rawId = item.id.replace('ds-', '');
+        const detail = await fetchEnvelopeDetail(rawId);
+        setEnvelopeDetail(detail);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingDetail(false);
+    }
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleExtractSelected() {
+    if (selectedItems.size === 0) return;
+    setExtracting(true);
+    setExtractError(null);
+
+    const sources: BatchSource[] = [];
+    for (const id of selectedItems) {
+      if (id.startsWith('dl-')) {
+        sources.push({ type: 'dotloop', id: id.replace('dl-', '') });
+      } else if (id.startsWith('ds-')) {
+        sources.push({ type: 'docusign', id: id.replace('ds-', '') });
+      }
+    }
+
+    try {
+      const result = await extractBatch(sources);
+      const newIds: Record<string, string> = { ...extractionIds };
+      for (const r of result.results) {
+        const src = r.source as Record<string, string>;
+        const key = src.type === 'dotloop' ? `dl-${src.id}` : `ds-${src.id}`;
+        if (r.extraction_id) {
+          newIds[key] = r.extraction_id as string;
+        }
+      }
+      setExtractionIds(newIds);
+    } catch (err) {
+      setExtractError(err instanceof Error ? err.message : 'Extraction failed');
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function handleCompare() {
+    const selected = [...selectedItems];
+    if (selected.length !== 2) return;
+    const fromId = extractionIds[selected[0]];
+    const toId = extractionIds[selected[1]];
+    if (!fromId || !toId) return;
+    onCompare(fromId, toId);
+  }
+
+  const canCompare = selectedItems.size === 2 &&
+    [...selectedItems].every(id => extractionIds[id]);
+
+  return (
+    <div className="loops-browser">
+      <div className="loops-toolbar">
+        <div className="loops-search">
+          <input
+            type="text"
+            className="loops-search-input"
+            placeholder="Search by property address or name..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+          />
+          <button
+            className="loops-search-btn"
+            onClick={handleSearch}
+            disabled={searching}
+          >
+            {searching ? <span className="spinner" /> : 'Search'}
+          </button>
+        </div>
+        <div className="loops-actions">
+          {selectedItems.size > 0 && (
+            <button
+              className="loops-extract-btn"
+              onClick={handleExtractSelected}
+              disabled={extracting}
+            >
+              {extracting ? (
+                <><span className="spinner" /> Extracting...</>
+              ) : (
+                <>Extract Selected ({selectedItems.size})</>
+              )}
+            </button>
+          )}
+          {canCompare && (
+            <button className="loops-compare-btn" onClick={handleCompare}>
+              Compare Selected
+            </button>
+          )}
+        </div>
+      </div>
+
+      {extractError && (
+        <div className="loops-error">{extractError}</div>
+      )}
+
+      {!dotloopConfigured && !docusignConfigured && (
+        <div className="loops-empty">
+          <div className="loops-empty-icon">&#x1F517;</div>
+          <div>Connect Dotloop or DocuSign to browse your loops and envelopes</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <a href={getDotloopConnectUrl()} className="dotloop-connect-btn" style={{ flex: 1 }}>
+              Connect Dotloop
+            </a>
+            <a href={getDocuSignConnectUrl()} className="dotloop-connect-btn" style={{ flex: 1 }}>
+              Connect DocuSign
+            </a>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="loops-loading"><span className="spinner" /> Loading...</div>
+      ) : items.length === 0 ? (
+        <div className="loops-empty">
+          <div className="loops-empty-icon">&mdash;</div>
+          <div>{searchQuery ? 'No results found' : 'No loops or envelopes found'}</div>
+        </div>
+      ) : (
+        <div className="loops-list">
+          {items.map(item => (
+            <div key={item.id} className={`loops-item ${selectedItems.has(item.id) ? 'selected' : ''}`}>
+              <div className="loops-item-row">
+                <input
+                  type="checkbox"
+                  className="doc-checkbox"
+                  checked={selectedItems.has(item.id)}
+                  onChange={() => toggleSelect(item.id)}
+                  onClick={e => e.stopPropagation()}
+                />
+                <div
+                  className="loops-item-content"
+                  onClick={() => handleExpand(item)}
+                >
+                  <span className={`loops-source-badge ${item.source}`}>
+                    {item.source === 'dotloop' ? 'DL' : 'DS'}
+                  </span>
+                  <div className="loops-item-info">
+                    <div className="loops-item-name">{item.name}</div>
+                    <div className="loops-item-meta">
+                      {item.transactionType && <span>{item.transactionType}</span>}
+                      {item.status && (
+                        <span className={`loops-status-badge ${item.status?.toLowerCase()}`}>
+                          {item.status}
+                        </span>
+                      )}
+                      {item.updated && (
+                        <span className="loops-item-date">
+                          {new Date(item.updated).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {extractionIds[item.id] && (
+                    <span className="doc-status-badge complete" title="Extracted">&#x2713;</span>
+                  )}
+                  <span className="loops-expand-icon">
+                    {expandedItem === item.id ? '\u25B2' : '\u25BC'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Expanded detail */}
+              {expandedItem === item.id && (
+                <div className="loops-detail">
+                  {loadingDetail ? (
+                    <div style={{ padding: 12, textAlign: 'center' }}><span className="spinner" /></div>
+                  ) : loopDetail ? (
+                    <LoopDetailPanel detail={loopDetail} />
+                  ) : envelopeDetail ? (
+                    <EnvelopeDetailPanel detail={envelopeDetail} />
+                  ) : (
+                    <div style={{ padding: 12, color: 'var(--text-muted)' }}>Failed to load details</div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LoopDetailPanel({ detail }: { detail: LoopDetail }) {
+  const addr = detail.property_address;
+  const addressStr = addr
+    ? [addr.street_number, addr.street_name, addr.city, addr.state_or_province, addr.postal_code]
+        .filter(Boolean).join(', ')
+    : null;
+
+  return (
+    <div className="loop-detail-panel">
+      {addressStr && (
+        <div className="loop-detail-field">
+          <span className="loop-detail-label">Property</span>
+          <span className="loop-detail-value">{addressStr}</span>
+        </div>
+      )}
+      {detail.transaction_type && (
+        <div className="loop-detail-field">
+          <span className="loop-detail-label">Type</span>
+          <span className="loop-detail-value">{detail.transaction_type}</span>
+        </div>
+      )}
+      {detail.financials && Object.keys(detail.financials).length > 0 && (
+        <div className="loop-detail-section">
+          <div className="loop-detail-section-title">Financials</div>
+          {Object.entries(detail.financials).map(([k, v]) => v != null && (
+            <div key={k} className="loop-detail-field">
+              <span className="loop-detail-label">{k.replace(/_/g, ' ')}</span>
+              <span className="loop-detail-value">{String(v)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {detail.participants && detail.participants.length > 0 && (
+        <div className="loop-detail-section">
+          <div className="loop-detail-section-title">Participants</div>
+          {detail.participants.map((p, i) => (
+            <div key={i} className="loop-detail-field">
+              <span className="loop-detail-label">{p.role || 'Unknown'}</span>
+              <span className="loop-detail-value">{p.name || p.email || '—'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {detail.documents && detail.documents.length > 0 && (
+        <div className="loop-detail-section">
+          <div className="loop-detail-section-title">Documents ({detail.documents.length})</div>
+          {detail.documents.map((doc, i) => (
+            <div key={i} className="loop-detail-doc">
+              <span className="doc-icon" style={{ fontSize: 14 }}>PDF</span>
+              <span>{doc.name}</span>
+              {doc.folder && <span className="loop-detail-folder">{doc.folder}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EnvelopeDetailPanel({ detail }: { detail: EnvelopeDetail }) {
+  return (
+    <div className="loop-detail-panel">
+      <div className="loop-detail-field">
+        <span className="loop-detail-label">Status</span>
+        <span className={`docusign-status-badge ${detail.status}`}>{detail.status}</span>
+      </div>
+      {detail.created && (
+        <div className="loop-detail-field">
+          <span className="loop-detail-label">Created</span>
+          <span className="loop-detail-value">{new Date(detail.created).toLocaleString()}</span>
+        </div>
+      )}
+      {detail.recipients && detail.recipients.length > 0 && (
+        <div className="loop-detail-section">
+          <div className="loop-detail-section-title">Recipients</div>
+          {detail.recipients.map((r, i) => (
+            <div key={i} className="loop-detail-field">
+              <span className="loop-detail-label">{String(r.role || r.recipientType || 'Signer')}</span>
+              <span className="loop-detail-value">{String(r.name || r.email || '—')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {detail.documents && detail.documents.length > 0 && (
+        <div className="loop-detail-section">
+          <div className="loop-detail-section-title">Documents ({detail.documents.length})</div>
+          {detail.documents.map((doc, i) => (
+            <div key={i} className="loop-detail-doc">
+              <span className="doc-icon" style={{ fontSize: 14 }}>PDF</span>
+              <span>{String(doc.name || 'Untitled')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Comparison View — side-by-side delta table
+// ---------------------------------------------------------------------------
+
+interface ComparisonViewProps {
+  initialFromId: string;
+  initialToId: string;
+}
+
+function formatExtractionLabel(ext: ExtractionSummary): string {
+  const badge = ext.source === 'dotloop' ? 'DL: ' : ext.source === 'docusign' ? 'DS: ' : '';
+  const conf = Math.round(ext.overall_confidence * 100);
+  return `${badge}${ext.filename} (${ext.pages_processed}p, ${conf}%)`;
+}
+
+function ComparisonView({ initialFromId, initialToId }: ComparisonViewProps) {
+  const [fromId, setFromId] = useState(initialFromId);
+  const [toId, setToId] = useState(initialToId);
+  const [extractions, setExtractions] = useState<ExtractionSummary[]>([]);
+  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [filterSig, setFilterSig] = useState<FieldSignificance | 'all'>('all');
+
+  // Load available extractions for dropdowns
+  useEffect(() => {
+    fetchExtractions('real_estate')
+      .then(setExtractions)
+      .catch(() => {}); // silent fail — dropdowns just stay empty
+  }, []);
+
+  useEffect(() => {
+    setFromId(initialFromId);
+    setToId(initialToId);
+  }, [initialFromId, initialToId]);
+
+  // Auto-compare if both IDs are provided
+  useEffect(() => {
+    if (fromId && toId) {
+      runComparison();
+    }
+  }, []);
+
+  async function runComparison() {
+    if (!fromId || !toId) {
+      setError('Please select both documents');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setComparison(null);
+
+    try {
+      const result = await compareExtractions(fromId, toId);
+      setComparison(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Comparison failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const filteredDeltas = comparison?.deltas.filter(d =>
+    filterSig === 'all' || d.significance === filterSig
+  ) || [];
+
+  return (
+    <div className="comparison-view">
+      {/* Document selector bar */}
+      <div className="comparison-inputs">
+        <div className="comparison-input-group">
+          <label className="comparison-input-label">Base Document (From)</label>
+          <select
+            className="comparison-select"
+            value={fromId}
+            onChange={(e) => setFromId(e.target.value)}
+          >
+            <option value="">Select a document...</option>
+            {extractions.map(ext => (
+              <option key={ext.id} value={ext.id} disabled={ext.id === toId}>
+                {formatExtractionLabel(ext)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="comparison-arrow">&#x2192;</div>
+        <div className="comparison-input-group">
+          <label className="comparison-input-label">Compare To</label>
+          <select
+            className="comparison-select"
+            value={toId}
+            onChange={(e) => setToId(e.target.value)}
+          >
+            <option value="">Select a document...</option>
+            {extractions.map(ext => (
+              <option key={ext.id} value={ext.id} disabled={ext.id === fromId}>
+                {formatExtractionLabel(ext)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          className="comparison-run-btn"
+          onClick={runComparison}
+          disabled={loading || !fromId || !toId}
+        >
+          {loading ? <span className="spinner" /> : 'Compare'}
+        </button>
+      </div>
+
+      {error && <div className="comparison-error">{error}</div>}
+
+      {comparison && (
+        <>
+          {/* Summary banner */}
+          <div className={`comparison-summary ${comparison.critical_count > 0 ? 'has-critical' : comparison.major_count > 0 ? 'has-major' : 'all-minor'}`}>
+            <div className="comparison-summary-text">{comparison.summary}</div>
+            <div className="comparison-summary-counts">
+              <div className="comparison-summary-sources">
+                {comparison.from_source && <span className="comparison-source-label">From: {comparison.from_source}</span>}
+                {comparison.to_source && <span className="comparison-source-label">To: {comparison.to_source}</span>}
+              </div>
+              <span className="comparison-count critical">{comparison.critical_count} Critical</span>
+              <span className="comparison-count major">{comparison.major_count} Major</span>
+              <span className="comparison-count minor">{comparison.minor_count} Minor</span>
+              <span className="comparison-count total">{comparison.total_changes} Total</span>
+            </div>
+          </div>
+
+          {/* Filter tabs */}
+          <div className="comparison-filters">
+            <button
+              className={`comparison-filter-btn ${filterSig === 'all' ? 'active' : ''}`}
+              onClick={() => setFilterSig('all')}
+            >
+              All ({comparison.total_changes})
+            </button>
+            <button
+              className={`comparison-filter-btn critical ${filterSig === 'critical' ? 'active' : ''}`}
+              onClick={() => setFilterSig('critical')}
+            >
+              Critical ({comparison.critical_count})
+            </button>
+            <button
+              className={`comparison-filter-btn major ${filterSig === 'major' ? 'active' : ''}`}
+              onClick={() => setFilterSig('major')}
+            >
+              Major ({comparison.major_count})
+            </button>
+            <button
+              className={`comparison-filter-btn minor ${filterSig === 'minor' ? 'active' : ''}`}
+              onClick={() => setFilterSig('minor')}
+            >
+              Minor ({comparison.minor_count})
+            </button>
+          </div>
+
+          {/* Delta table */}
+          <div className="comparison-table-container">
+            <table className="data-table comparison-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 80 }}>Severity</th>
+                  <th>Field</th>
+                  <th>Original</th>
+                  <th style={{ width: 30 }}></th>
+                  <th>New Value</th>
+                  <th style={{ width: 80 }}>Change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredDeltas.map((delta, i) => (
+                  <tr key={i} className={`comparison-row ${delta.significance}`}>
+                    <td>
+                      <span className={`comparison-sig-badge ${delta.significance}`}>
+                        {delta.significance}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="field-name">{delta.field_label}</span>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                        {delta.field_path}
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`comparison-value ${delta.change_type === 'removed' ? 'removed' : delta.change_type === 'modified' ? 'from' : ''}`}>
+                        {delta.original_value ?? '\u2014'}
+                      </span>
+                    </td>
+                    <td className="comparison-arrow-cell">
+                      {delta.change_type === 'added' ? '+' :
+                       delta.change_type === 'removed' ? '\u2212' : '\u2192'}
+                    </td>
+                    <td>
+                      <span className={`comparison-value ${delta.change_type === 'added' ? 'added' : delta.change_type === 'modified' ? 'to' : ''}`}>
+                        {delta.new_value ?? '\u2014'}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`comparison-change-badge ${delta.change_type}`}>
+                        {delta.change_type}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {filteredDeltas.length === 0 && (
+                  <tr>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: 24, color: 'var(--text-muted)' }}>
+                      {comparison.total_changes === 0
+                        ? 'No differences found between these documents'
+                        : 'No changes match this filter'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {!comparison && !loading && !error && (
+        <div className="comparison-empty">
+          <div className="loops-empty-icon">&#x2194;</div>
+          <div>Select two documents to compare</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+            {extractions.length > 0
+              ? 'Choose documents from the dropdowns above, or use the Loops tab to extract new ones'
+              : 'Use the Loops tab or Extract tab to process documents first'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 export default App;

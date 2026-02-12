@@ -154,6 +154,22 @@ export type SSEEvent =
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
 // ---------------------------------------------------------------------------
+// Auth token provider — set by App.tsx via useAuth().getToken
+// ---------------------------------------------------------------------------
+
+let _getAuthToken: (() => Promise<string | null>) | null = null;
+
+export function setAuthTokenProvider(getter: () => Promise<string | null>) {
+  _getAuthToken = getter;
+}
+
+async function authHeaders(): Promise<HeadersInit> {
+  if (!_getAuthToken) return {};
+  const token = await _getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// ---------------------------------------------------------------------------
 // Document operations
 // ---------------------------------------------------------------------------
 
@@ -161,7 +177,7 @@ export async function fetchDocuments(mode?: string): Promise<DocumentInfo[]> {
   const url = mode
     ? `${API_BASE}/api/documents?mode=${encodeURIComponent(mode)}`
     : `${API_BASE}/api/documents`;
-  const resp = await fetch(url);
+  const resp = await fetch(url, { headers: { ...await authHeaders() } });
   if (!resp.ok) throw new Error(`Failed to fetch documents: ${resp.status}`);
   return resp.json();
 }
@@ -176,6 +192,7 @@ export async function uploadFile(file: File): Promise<DocumentInfo> {
 
   const resp = await fetch(`${API_BASE}/api/upload?mode=real_estate`, {
     method: 'POST',
+    headers: { ...await authHeaders() },
     body: form,
   });
 
@@ -207,7 +224,7 @@ export async function startExtraction(
 ): Promise<StartExtractionResult> {
   const resp = await fetch(`${API_BASE}/api/extract`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
     body: JSON.stringify({ mode, filename }),
   });
   if (!resp.ok) {
@@ -227,6 +244,7 @@ export function subscribeToTask(
     try {
       const resp = await fetch(`${API_BASE}/api/extract/${taskId}/stream`, {
         signal: controller.signal,
+        headers: { ...await authHeaders() },
       });
 
       if (!resp.ok) {
@@ -299,7 +317,7 @@ export interface TaskInfo {
 }
 
 export async function fetchActiveTasks(): Promise<TaskInfo[]> {
-  const resp = await fetch(`${API_BASE}/api/tasks`);
+  const resp = await fetch(`${API_BASE}/api/tasks`, { headers: { ...await authHeaders() } });
   if (!resp.ok) return [];
   const data = await resp.json();
   return (data.tasks || []).filter(
@@ -308,7 +326,7 @@ export async function fetchActiveTasks(): Promise<TaskInfo[]> {
 }
 
 export async function fetchAllTasks(): Promise<TaskInfo[]> {
-  const resp = await fetch(`${API_BASE}/api/tasks`);
+  const resp = await fetch(`${API_BASE}/api/tasks`, { headers: { ...await authHeaders() } });
   if (!resp.ok) return [];
   const data = await resp.json();
   return data.tasks || [];
@@ -342,7 +360,7 @@ export function runExtraction(
 // ---------------------------------------------------------------------------
 
 export async function fetchAggregateUsage(): Promise<AggregateUsage> {
-  const resp = await fetch(`${API_BASE}/api/usage`);
+  const resp = await fetch(`${API_BASE}/api/usage`, { headers: { ...await authHeaders() } });
   if (!resp.ok) throw new Error(`Failed to fetch usage: ${resp.status}`);
   return resp.json();
 }
@@ -353,7 +371,7 @@ export async function fetchAggregateUsage(): Promise<AggregateUsage> {
 
 export async function checkDotloopStatus(): Promise<boolean> {
   try {
-    const resp = await fetch(`${API_BASE}/api/dotloop/status`);
+    const resp = await fetch(`${API_BASE}/api/dotloop/status`, { headers: { ...await authHeaders() } });
     if (!resp.ok) return false;
     const data = await resp.json();
     return data.configured === true;
@@ -376,7 +394,7 @@ export interface DotloopLoop {
 }
 
 export async function fetchDotloopLoops(): Promise<DotloopLoop[]> {
-  const resp = await fetch(`${API_BASE}/api/dotloop/loops`);
+  const resp = await fetch(`${API_BASE}/api/dotloop/loops`, { headers: { ...await authHeaders() } });
   if (!resp.ok) throw new Error(`Failed to fetch loops: ${resp.status}`);
   const data = await resp.json();
   return data.loops || [];
@@ -386,17 +404,23 @@ export interface DotloopSyncResult {
   loop_id: string;
   loop_url: string | null;
   action: string;
+  document_uploaded: boolean;
+  document_name: string | null;
   errors: string[];
 }
 
 export async function syncToDotloop(
   extractionId: string,
   loopId?: number,
+  uploadDocument: boolean = true,
 ): Promise<DotloopSyncResult> {
   const resp = await fetch(`${API_BASE}/api/dotloop/sync/${extractionId}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ loop_id: loopId ?? null }),
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({
+      loop_id: loopId ?? null,
+      upload_document: uploadDocument,
+    }),
   });
 
   if (!resp.ok) {
@@ -413,7 +437,7 @@ export async function syncToDotloop(
 
 export async function checkDocuSignStatus(): Promise<boolean> {
   try {
-    const resp = await fetch(`${API_BASE}/api/docusign/status`);
+    const resp = await fetch(`${API_BASE}/api/docusign/status`, { headers: { ...await authHeaders() } });
     if (!resp.ok) return false;
     const data = await resp.json();
     return data.configured === true;
@@ -437,7 +461,7 @@ export interface DocuSignEnvelope {
 }
 
 export async function fetchDocuSignEnvelopes(): Promise<DocuSignEnvelope[]> {
-  const resp = await fetch(`${API_BASE}/api/docusign/envelopes`);
+  const resp = await fetch(`${API_BASE}/api/docusign/envelopes`, { headers: { ...await authHeaders() } });
   if (!resp.ok) throw new Error(`Failed to fetch envelopes: ${resp.status}`);
   const data = await resp.json();
   return data.envelopes || [];
@@ -446,6 +470,7 @@ export async function fetchDocuSignEnvelopes(): Promise<DocuSignEnvelope[]> {
 export async function voidDocuSignEnvelope(envelopeId: string): Promise<void> {
   const resp = await fetch(`${API_BASE}/api/docusign/envelopes/${envelopeId}`, {
     method: 'DELETE',
+    headers: { ...await authHeaders() },
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: 'Delete failed' }));
@@ -466,7 +491,7 @@ export async function syncToDocuSign(
 ): Promise<DocuSignSyncResult> {
   const resp = await fetch(`${API_BASE}/api/docusign/sync/${extractionId}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
     body: JSON.stringify({ envelope_id: envelopeId ?? null }),
   });
 
@@ -500,6 +525,7 @@ export async function checkCachedExtraction(
 ): Promise<CachedExtractionResponse> {
   const resp = await fetch(
     `${API_BASE}/api/extractions/cached?file_hash=${encodeURIComponent(fileHash)}&mode=${encodeURIComponent(mode)}`,
+    { headers: { ...await authHeaders() } },
   );
   if (!resp.ok) return { cached: false };
   return resp.json();
@@ -509,7 +535,167 @@ export async function clearExtractionCache(mode?: string): Promise<{ deleted: nu
   const url = mode
     ? `${API_BASE}/api/extractions/cache?mode=${encodeURIComponent(mode)}`
     : `${API_BASE}/api/extractions/cache`;
-  const resp = await fetch(url, { method: 'DELETE' });
+  const resp = await fetch(url, { method: 'DELETE', headers: { ...await authHeaders() } });
   if (!resp.ok) throw new Error(`Failed to clear cache: ${resp.status}`);
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Loop Browser — Dotloop loop details & search
+// ---------------------------------------------------------------------------
+
+export interface LoopDocument {
+  name: string;
+  id?: number;
+  folder?: string;
+}
+
+export interface LoopDetail {
+  loop_id: number;
+  name: string;
+  transaction_type?: string;
+  status?: string;
+  loop_url?: string;
+  updated?: string;
+  property_address?: Record<string, string | null>;
+  financials?: Record<string, unknown>;
+  contract_dates?: Record<string, string | null>;
+  participants?: Array<Record<string, string | null>>;
+  documents?: LoopDocument[];
+}
+
+export interface EnvelopeDetail {
+  envelope_id: string;
+  email_subject?: string;
+  status: string;
+  created?: string;
+  sent?: string;
+  completed?: string;
+  recipients?: Array<Record<string, unknown>>;
+  documents?: Array<Record<string, unknown>>;
+  custom_fields?: Record<string, string>;
+}
+
+export async function fetchLoopDetail(loopId: number, profileId?: number): Promise<LoopDetail> {
+  let url = `${API_BASE}/api/dotloop/loops/${loopId}`;
+  if (profileId) url += `?profile_id=${profileId}`;
+  const resp = await fetch(url, { headers: { ...await authHeaders() } });
+  if (!resp.ok) throw new Error(`Failed to fetch loop detail: ${resp.status}`);
+  return resp.json();
+}
+
+export async function searchDotloopLoops(query: string, profileId?: number): Promise<DotloopLoop[]> {
+  let url = `${API_BASE}/api/dotloop/loops/search?q=${encodeURIComponent(query)}`;
+  if (profileId) url += `&profile_id=${profileId}`;
+  const resp = await fetch(url, { headers: { ...await authHeaders() } });
+  if (!resp.ok) throw new Error(`Failed to search loops: ${resp.status}`);
+  const data = await resp.json();
+  return data.loops || [];
+}
+
+export async function fetchEnvelopeDetail(envelopeId: string): Promise<EnvelopeDetail> {
+  const resp = await fetch(`${API_BASE}/api/docusign/envelopes/${envelopeId}`, { headers: { ...await authHeaders() } });
+  if (!resp.ok) throw new Error(`Failed to fetch envelope detail: ${resp.status}`);
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Batch Extraction from Dotloop/DocuSign sources
+// ---------------------------------------------------------------------------
+
+export interface BatchSource {
+  type: 'dotloop' | 'docusign';
+  id: string;
+}
+
+export interface BatchExtractResult {
+  results: Array<Record<string, unknown>>;
+  extraction_ids: string[];
+  total: number;
+  succeeded: number;
+}
+
+export async function extractBatch(sources: BatchSource[]): Promise<BatchExtractResult> {
+  const resp = await fetch(`${API_BASE}/api/extract-batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({ sources }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Batch extraction failed' }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Extraction Listing (for comparison dropdowns)
+// ---------------------------------------------------------------------------
+
+export interface ExtractionSummary {
+  id: string;
+  document_id: string;
+  filename: string;
+  source: string;
+  source_id: string | null;
+  mode: string;
+  engine: string;
+  overall_confidence: number;
+  pages_processed: number;
+  created_at: string | null;
+}
+
+export async function fetchExtractions(mode?: string): Promise<ExtractionSummary[]> {
+  let url = `${API_BASE}/api/extractions`;
+  if (mode) url += `?mode=${encodeURIComponent(mode)}`;
+  const resp = await fetch(url, { headers: { ...await authHeaders() } });
+  if (!resp.ok) throw new Error(`Failed to fetch extractions: ${resp.status}`);
+  const data = await resp.json();
+  return data.extractions || [];
+}
+
+// ---------------------------------------------------------------------------
+// Comparison Engine
+// ---------------------------------------------------------------------------
+
+export type FieldSignificance = 'critical' | 'major' | 'minor';
+export type ChangeType = 'added' | 'removed' | 'modified';
+
+export interface ComparisonFieldDelta {
+  field_path: string;
+  field_label: string;
+  original_value: string | null;
+  new_value: string | null;
+  change_type: ChangeType;
+  significance: FieldSignificance;
+}
+
+export interface ComparisonResult {
+  comparison_id: string;
+  from_extraction_id: string;
+  to_extraction_id: string;
+  from_source: string | null;
+  to_source: string | null;
+  deltas: ComparisonFieldDelta[];
+  summary: string;
+  critical_count: number;
+  major_count: number;
+  minor_count: number;
+  total_changes: number;
+  comparison_timestamp: string;
+}
+
+export async function compareExtractions(
+  fromExtractionId: string,
+  toExtractionId: string,
+): Promise<ComparisonResult> {
+  const resp = await fetch(
+    `${API_BASE}/api/comparisons?from_extraction_id=${encodeURIComponent(fromExtractionId)}&to_extraction_id=${encodeURIComponent(toExtractionId)}`,
+    { method: 'POST', headers: { ...await authHeaders() } },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Comparison failed' }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
   return resp.json();
 }

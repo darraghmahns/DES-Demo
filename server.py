@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
@@ -33,8 +33,9 @@ from schemas import (
 )
 from ocr_engine import get_engine
 from compliance_engine import run_compliance_check, async_run_compliance_check
+from auth import get_optional_user, get_current_user, sign_oauth_state, verify_oauth_state, AUTH_ENABLED
 from db import init_db, close_db
-from db_writer import save_document, save_extraction
+from db_writer import save_document, save_extraction, get_extraction
 from dotloop_connector import (
     is_configured as dotloop_configured,
     list_dotloop_loops,
@@ -57,9 +58,11 @@ load_dotenv()
 
 app = FastAPI(title="DocExtract API", version="1.0.0")
 
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,6 +76,26 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await close_db()
+
+
+def _user_dotloop_tokens(user) -> dict | None:
+    """Extract Dotloop token dict from UserRecord, or None."""
+    if not user or not getattr(user, "dotloop_tokens", None):
+        return None
+    t = user.dotloop_tokens
+    return {"access_token": t.access_token, "refresh_token": t.refresh_token}
+
+
+def _user_docusign_tokens(user) -> dict | None:
+    """Extract DocuSign token dict from UserRecord, or None."""
+    if not user or not getattr(user, "docusign_tokens", None):
+        return None
+    t = user.docusign_tokens
+    return {
+        "access_token": t.access_token,
+        "refresh_token": t.refresh_token,
+        "account_id": t.account_id,
+    }
 
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_docs"
@@ -156,6 +179,7 @@ async def get_document(name: str):
 async def upload_document(
     file: UploadFile = File(...),
     mode: str = Query("real_estate"),
+    user=Depends(get_optional_user),
 ):
     """Upload a PDF document for extraction."""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -175,7 +199,7 @@ async def upload_document(
 
 
 @app.post("/api/extract")
-async def extract(request: ExtractRequest):
+async def extract(request: ExtractRequest, user=Depends(get_optional_user)):
     """Start the extraction pipeline as a background task, return task_id.
 
     The extraction runs independently of the HTTP connection.
@@ -195,9 +219,11 @@ async def extract(request: ExtractRequest):
         return {"task_id": existing.task_id, "status": existing.status.value}
 
     # Create and launch background task
+    user_id = user.clerk_user_id if user else None
+    org_id = user.org_id if user else None
     task = create_task(request.mode, request.filename)
     asyncio_task = asyncio.create_task(
-        _run_extraction_task(task, request.mode, str(pdf_path))
+        _run_extraction_task(task, request.mode, str(pdf_path), user_id=user_id, org_id=org_id)
     )
     task._asyncio_task = asyncio_task
 
@@ -205,7 +231,7 @@ async def extract(request: ExtractRequest):
 
 
 @app.get("/api/extract/{task_id}/stream")
-async def extract_stream(task_id: str):
+async def extract_stream(task_id: str, user=Depends(get_optional_user)):
     """Reconnectable SSE stream for a background extraction task.
 
     Replays all past events, then streams new ones in real time.
@@ -283,7 +309,7 @@ async def _task_sse_stream(task) -> AsyncGenerator[str, None]:
         task.remove_waiter(waiter)
 
 
-async def _run_extraction_task(task, mode: str, pdf_path: str) -> None:
+async def _run_extraction_task(task, mode: str, pdf_path: str, user_id: str | None = None, org_id: str | None = None) -> None:
     """Run the extraction pipeline as a background task, storing events."""
     from task_manager import TaskStatus, cleanup_old_tasks
 
@@ -292,7 +318,7 @@ async def _run_extraction_task(task, mode: str, pdf_path: str) -> None:
     def emit(event_type: str, data: dict) -> None:
         task.append_event({"type": event_type, "data": data})
 
-    await _extraction_pipeline(mode, pdf_path, emit)
+    await _extraction_pipeline(mode, pdf_path, emit, user_id=user_id, org_id=org_id)
 
     # Mark final status based on last event
     if task.events and task.events[-1]["type"] == "error":
@@ -305,6 +331,7 @@ async def _run_extraction_task(task, mode: str, pdf_path: str) -> None:
 
 async def _extraction_pipeline(
     mode: str, pdf_path: str, emit,
+    user_id: str | None = None, org_id: str | None = None,
 ) -> None:
     """Core extraction pipeline logic, decoupled from SSE streaming.
 
@@ -597,6 +624,9 @@ async def _extraction_pipeline(
                 len(images),
                 Path(pdf_path).stat().st_size,
                 file_hash=file_hash,
+                file_path=str(Path(pdf_path).resolve()),
+                user_id=user_id,
+                org_id=org_id,
             )
             ext_id = await save_extraction(
                 doc_id,
@@ -649,13 +679,23 @@ async def check_cached_extraction(
 
 
 @app.delete("/api/extractions/cache")
-async def clear_extraction_cache(mode: str = Query(None)):
-    """Clear cached extractions, optionally filtered by mode."""
+async def clear_extraction_cache(mode: str = Query(None), user=Depends(get_optional_user)):
+    """Clear cached extractions, optionally filtered by mode. Scoped to user/org."""
     from db import DocumentRecord
 
-    filters = {}
+    filters: dict = {}
     if mode:
         filters["mode"] = mode
+
+    # Scope to user's org or own documents
+    if user:
+        if user.org_id:
+            filters["org_id"] = user.org_id
+        else:
+            filters["$or"] = [
+                {"user_id": user.clerk_user_id},
+                {"user_id": None},
+            ]
 
     docs = await DocumentRecord.find(filters).to_list()
     deleted_count = 0
@@ -664,6 +704,118 @@ async def clear_extraction_cache(mode: str = Query(None)):
         deleted_count += 1
 
     return {"deleted": deleted_count, "mode": mode or "all"}
+
+
+@app.get("/api/extractions")
+async def get_extractions(mode: str | None = None, limit: int = Query(50), user=Depends(get_optional_user)):
+    """List recent extractions with metadata for dropdown selection."""
+    from db_writer import list_extractions
+    user_id = user.clerk_user_id if user else None
+    org_id = user.org_id if user else None
+    results = await list_extractions(mode=mode, limit=limit, user_id=user_id, org_id=org_id)
+    return {"extractions": results}
+
+
+# ---------------------------------------------------------------------------
+# Batch Extraction (Multi-Source)
+# ---------------------------------------------------------------------------
+
+
+class BatchSource(BaseModel):
+    type: str  # "dotloop" or "docusign"
+    id: str    # loop_id or envelope_id
+
+
+class BatchExtractRequest(BaseModel):
+    sources: list[BatchSource]
+
+
+@app.post("/api/extract-batch")
+async def extract_batch(request: BatchExtractRequest, user=Depends(get_optional_user)):
+    """Extract from multiple Dotloop loops / DocuSign envelopes in parallel.
+
+    Runs process_from_dotloop / process_from_docusign concurrently and
+    returns a list of extraction results (or errors) for each source.
+    """
+    if not request.sources:
+        raise HTTPException(status_code=400, detail="No sources provided")
+    if len(request.sources) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 sources per batch")
+
+    dl_tokens = _user_dotloop_tokens(user)
+    ds_tokens = _user_docusign_tokens(user)
+
+    async def _process_one(source: BatchSource) -> dict:
+        try:
+            if source.type == "dotloop":
+                if not dotloop_configured(user_tokens=dl_tokens):
+                    return {"source": source.model_dump(), "error": "Dotloop not configured"}
+                result = await process_from_dotloop(loop_id=int(source.id), user_tokens=dl_tokens)
+                return {"source": source.model_dump(), **result}
+            elif source.type == "docusign":
+                if not docusign_configured(user_tokens=ds_tokens):
+                    return {"source": source.model_dump(), "error": "DocuSign not configured"}
+                result = await process_from_docusign(envelope_id=source.id, user_tokens=ds_tokens)
+                return {"source": source.model_dump(), **result}
+            else:
+                return {"source": source.model_dump(), "error": f"Unknown source type: {source.type}"}
+        except Exception as e:
+            return {"source": source.model_dump(), "error": str(e)}
+
+    results = await asyncio.gather(
+        *[_process_one(s) for s in request.sources],
+        return_exceptions=False,
+    )
+
+    extraction_ids = [
+        r.get("extraction_id") for r in results if r.get("extraction_id")
+    ]
+
+    return {
+        "results": results,
+        "extraction_ids": extraction_ids,
+        "total": len(request.sources),
+        "succeeded": len(extraction_ids),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Comparison Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/comparisons")
+async def create_comparison(
+    from_extraction_id: str = Query(..., description="Extraction ID of the base document"),
+    to_extraction_id: str = Query(..., description="Extraction ID of the document to compare"),
+    user=Depends(get_optional_user),
+):
+    """Compare two document extractions and return field-level deltas.
+
+    Designed for Julie's workflow: comparing an offer with a counteroffer,
+    or an inspection notice with an inspection response.
+    """
+    from comparison_engine import compare_extractions
+
+    # Load both extractions from DB
+    from_data = await get_extraction(from_extraction_id)
+    if not from_data:
+        raise HTTPException(status_code=404, detail=f"Extraction {from_extraction_id} not found")
+
+    to_data = await get_extraction(to_extraction_id)
+    if not to_data:
+        raise HTTPException(status_code=404, detail=f"Extraction {to_extraction_id} not found")
+
+    result = compare_extractions(
+        from_data=from_data,
+        to_data=to_data,
+        from_extraction_id=from_extraction_id,
+        to_extraction_id=to_extraction_id,
+        from_source=from_data.get("source_file"),
+        to_source=to_data.get("source_file"),
+    )
+
+    return result.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------
@@ -717,7 +869,7 @@ class ScoutRequest(BaseModel):
 
 
 @app.post("/api/scout/research")
-async def scout_research(request: ScoutRequest):
+async def scout_research(request: ScoutRequest, user=Depends(get_optional_user)):
     """Trigger AI Scout research for a jurisdiction.
 
     Runs the two-pass GPT-4o pipeline (research → verify) and saves results
@@ -802,7 +954,7 @@ async def scout_get_result(result_id: str):
 
 
 @app.put("/api/scout/results/{result_id}/verify")
-async def scout_verify_result(result_id: str, verified_by: str = Query("admin")):
+async def scout_verify_result(result_id: str, verified_by: str = Query("admin"), user=Depends(get_optional_user)):
     """Mark a scout result as verified and activate it for compliance checks."""
     from scout_models import ScoutResult
     from bson import ObjectId
@@ -864,34 +1016,75 @@ async def scout_reject_result(result_id: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/dotloop/status")
-async def dotloop_status():
-    """Check whether Dotloop integration is configured."""
-    return {"configured": dotloop_configured()}
+async def dotloop_status(user=Depends(get_optional_user)):
+    """Check whether Dotloop integration is configured for this user."""
+    user_tokens = _user_dotloop_tokens(user)
+    return {"configured": dotloop_configured(user_tokens=user_tokens)}
 
 
 @app.get("/api/dotloop/loops")
-async def dotloop_loops(profile_id: int | None = None, batch_size: int = 20):
+async def dotloop_loops(profile_id: int | None = None, batch_size: int = 20, user=Depends(get_optional_user)):
     """List recent loops from Dotloop."""
-    if not dotloop_configured():
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
-        loops = await asyncio.to_thread(list_dotloop_loops, profile_id, batch_size)
+        loops = await asyncio.to_thread(list_dotloop_loops, profile_id, batch_size, user_tokens=user_tokens)
         return {"loops": loops}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dotloop/loops/search")
+async def dotloop_search_loops(
+    q: str = Query(..., description="Search query for loop name or property address"),
+    profile_id: int | None = None,
+    user=Depends(get_optional_user),
+):
+    """Search Dotloop loops by name or property address."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    from dotloop_connector import search_loops
+    try:
+        matches = await asyncio.to_thread(search_loops, q, profile_id, user_tokens=user_tokens)
+        return {"loops": matches, "query": q}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dotloop/loops/{loop_id}")
+async def dotloop_loop_detail(loop_id: int, profile_id: int | None = None, user=Depends(get_optional_user)):
+    """Get full loop detail including property, participants, and documents."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    from dotloop_connector import get_loop_with_details
+    try:
+        detail = await asyncio.to_thread(get_loop_with_details, loop_id, profile_id, user_tokens=user_tokens)
+        return detail
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 class DotloopSyncRequest(BaseModel):
     loop_id: int | None = None
+    upload_document: bool = True
 
 
 @app.post("/api/dotloop/sync/{extraction_id}")
-async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyncRequest()):
+async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyncRequest(), user=Depends(get_optional_user)):
     """Push a saved extraction to Dotloop as a loop."""
-    if not dotloop_configured():
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
-        result = await sync_to_dotloop(extraction_id, loop_id=body.loop_id)
+        result = await sync_to_dotloop(
+            extraction_id,
+            loop_id=body.loop_id,
+            upload_document=body.upload_document,
+            user_tokens=user_tokens,
+        )
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -907,12 +1100,13 @@ class ProcessFromDotloopRequest(BaseModel):
 
 
 @app.post("/api/dotloop/process/{loop_id}")
-async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest):
+async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user=Depends(get_optional_user)):
     """Pull a PDF from a Dotloop loop, extract, and optionally sync back."""
-    if not dotloop_configured():
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
-        result = await process_from_dotloop(request.profile_id, loop_id, request.sync_back)
+        result = await process_from_dotloop(request.profile_id, loop_id, request.sync_back, user_tokens=user_tokens)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -930,7 +1124,7 @@ DOTLOOP_AUTH_BASE = "https://auth.dotloop.com"
 
 
 @app.get("/api/dotloop/oauth/connect")
-async def dotloop_oauth_connect():
+async def dotloop_oauth_connect(user=Depends(get_optional_user)):
     """Redirect browser to Dotloop authorization page."""
     client_id = os.getenv("DOTLOOP_CLIENT_ID")
     if not client_id:
@@ -940,17 +1134,29 @@ async def dotloop_oauth_connect():
         "DOTLOOP_REDIRECT_URI",
         "http://localhost:8000/api/dotloop/oauth/callback",
     )
+
+    # Include signed state with user ID so callback can store tokens on the right user
+    state_param = ""
+    if user and AUTH_ENABLED:
+        state = sign_oauth_state(user.clerk_user_id)
+        state_param = f"&state={state}"
+
     auth_url = (
         f"{DOTLOOP_AUTH_BASE}/oauth/authorize"
         f"?response_type=code"
         f"&client_id={client_id}"
         f"&redirect_uri={redirect_uri}"
+        f"{state_param}"
     )
     return RedirectResponse(url=auth_url)
 
 
 @app.get("/api/dotloop/oauth/callback")
-async def dotloop_oauth_callback(code: str | None = None, error: str | None = None):
+async def dotloop_oauth_callback(
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
+):
     """Handle OAuth callback from Dotloop, exchange code for tokens."""
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
@@ -985,6 +1191,23 @@ async def dotloop_oauth_callback(code: str | None = None, error: str | None = No
         logging.getLogger(__name__).error("Dotloop token exchange failed: %s", e)
         return RedirectResponse(url=f"{frontend_url}?dotloop_error=token_exchange_failed")
 
+    # If we have a signed state, store tokens on the user's record
+    if state and AUTH_ENABLED:
+        try:
+            clerk_user_id = verify_oauth_state(state)
+            from db import UserRecord, OAuthTokenSet
+            user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+            if user:
+                user.dotloop_tokens = OAuthTokenSet(
+                    access_token=token_data["access_token"],
+                    refresh_token=token_data.get("refresh_token"),
+                )
+                await user.save()
+                log.info("Stored Dotloop tokens on user %s", clerk_user_id)
+        except HTTPException:
+            log.warning("Invalid OAuth state in Dotloop callback, falling back to module-level storage")
+
+    # Always store module-level as fallback (for webhooks, etc.)
     set_oauth_tokens(
         access_token=token_data["access_token"],
         refresh_token=token_data.get("refresh_token"),
@@ -1009,17 +1232,30 @@ async def dotloop_webhook(payload: dict):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/docusign/status")
-async def docusign_status():
-    """Check whether DocuSign integration is configured."""
+async def docusign_status(user=Depends(get_optional_user)):
+    """Check whether DocuSign integration is configured for this user."""
     from docusign_connector import get_oauth_tokens, _jwt_available
-    configured = docusign_configured()  # May trigger JWT auth
-    tokens = get_oauth_tokens()  # Read after JWT may have set tokens
+    user_tokens = _user_docusign_tokens(user)
+    configured = docusign_configured(user_tokens=user_tokens)
+    tokens = get_oauth_tokens()
     return {
         "configured": configured,
-        "has_access_token": bool(tokens.get("access_token") or os.getenv("DOCUSIGN_ACCESS_TOKEN")),
-        "has_account_id": bool(tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID")),
+        "has_access_token": bool(
+            (user_tokens and user_tokens.get("access_token"))
+            or tokens.get("access_token")
+            or os.getenv("DOCUSIGN_ACCESS_TOKEN")
+        ),
+        "has_account_id": bool(
+            (user_tokens and user_tokens.get("account_id"))
+            or tokens.get("account_id")
+            or os.getenv("DOCUSIGN_ACCOUNT_ID")
+        ),
         "jwt_available": _jwt_available(),
-        "account_id": tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID", ""),
+        "account_id": (
+            (user_tokens or {}).get("account_id")
+            or tokens.get("account_id")
+            or os.getenv("DOCUSIGN_ACCOUNT_ID", "")
+        ),
     }
 
 
@@ -1028,20 +1264,36 @@ async def docusign_envelopes(
     from_date: str | None = None,
     status: str | None = None,
     count: int = 50,
+    user=Depends(get_optional_user),
 ):
     """List recent envelopes from DocuSign."""
-    if not docusign_configured():
+    user_tokens = _user_docusign_tokens(user)
+    if not docusign_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="DocuSign not configured")
     # Default to all active statuses so drafts are included
     if not status:
         status = "created,sent,delivered,signed,completed"
     try:
         envelopes = await asyncio.to_thread(
-            list_docusign_envelopes, from_date, status, count
+            list_docusign_envelopes, from_date, status, count, user_tokens=user_tokens
         )
         return {"envelopes": envelopes}
     except Exception as e:
         log.error("DocuSign envelope listing failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/docusign/envelopes/{envelope_id}")
+async def docusign_envelope_detail(envelope_id: str, user=Depends(get_optional_user)):
+    """Get full envelope detail including recipients and documents."""
+    user_tokens = _user_docusign_tokens(user)
+    if not docusign_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="DocuSign not configured")
+    from docusign_connector import get_envelope_with_details
+    try:
+        detail = await asyncio.to_thread(get_envelope_with_details, envelope_id, user_tokens=user_tokens)
+        return detail
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1050,12 +1302,13 @@ class DocuSignSyncRequest(BaseModel):
 
 
 @app.post("/api/docusign/sync/{extraction_id}")
-async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSignSyncRequest()):
+async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSignSyncRequest(), user=Depends(get_optional_user)):
     """Push a saved extraction to DocuSign as an envelope."""
-    if not docusign_configured():
+    user_tokens = _user_docusign_tokens(user)
+    if not docusign_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="DocuSign not configured")
     try:
-        result = await sync_to_docusign(extraction_id, envelope_id=body.envelope_id)
+        result = await sync_to_docusign(extraction_id, envelope_id=body.envelope_id, user_tokens=user_tokens)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         # Construct envelope web URL
@@ -1074,12 +1327,13 @@ async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSign
 
 
 @app.delete("/api/docusign/envelopes/{envelope_id}")
-async def docusign_void_envelope(envelope_id: str):
+async def docusign_void_envelope(envelope_id: str, user=Depends(get_optional_user)):
     """Void/discard a DocuSign envelope (drafts or sent)."""
-    if not docusign_configured():
+    user_tokens = _user_docusign_tokens(user)
+    if not docusign_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="DocuSign not configured")
     try:
-        await asyncio.to_thread(void_docusign_envelope, envelope_id)
+        await asyncio.to_thread(void_docusign_envelope, envelope_id, user_tokens=user_tokens)
         return {"status": "voided", "envelope_id": envelope_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1090,12 +1344,13 @@ class ProcessFromDocuSignRequest(BaseModel):
 
 
 @app.post("/api/docusign/process/{envelope_id}")
-async def docusign_process(envelope_id: str, request: ProcessFromDocuSignRequest = ProcessFromDocuSignRequest()):
+async def docusign_process(envelope_id: str, request: ProcessFromDocuSignRequest = ProcessFromDocuSignRequest(), user=Depends(get_optional_user)):
     """Pull a PDF from a DocuSign envelope, extract, and optionally sync back."""
-    if not docusign_configured():
+    user_tokens = _user_docusign_tokens(user)
+    if not docusign_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="DocuSign not configured")
     try:
-        result = await process_from_docusign(envelope_id, request.sync_back)
+        result = await process_from_docusign(envelope_id, request.sync_back, user_tokens=user_tokens)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -1113,7 +1368,7 @@ DOCUSIGN_AUTH_SERVER = os.getenv("DOCUSIGN_AUTH_SERVER", "account-d.docusign.com
 
 
 @app.get("/api/docusign/oauth/connect")
-async def docusign_oauth_connect():
+async def docusign_oauth_connect(user=Depends(get_optional_user)):
     """Redirect browser to DocuSign authorization page."""
     client_id = os.getenv("DOCUSIGN_CLIENT_ID")
     if not client_id:
@@ -1124,18 +1379,26 @@ async def docusign_oauth_connect():
         "http://localhost:8000/api/docusign/oauth/callback",
     )
     from urllib.parse import urlencode
-    auth_params = urlencode({
+    params: dict = {
         "response_type": "code",
         "scope": "signature",
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-    })
-    auth_url = f"https://{DOCUSIGN_AUTH_SERVER}/oauth/auth?{auth_params}"
+    }
+    # Include signed state with user ID so callback can store tokens on the right user
+    if user and AUTH_ENABLED:
+        params["state"] = sign_oauth_state(user.clerk_user_id)
+
+    auth_url = f"https://{DOCUSIGN_AUTH_SERVER}/oauth/auth?{urlencode(params)}"
     return RedirectResponse(url=auth_url)
 
 
 @app.get("/api/docusign/oauth/callback")
-async def docusign_oauth_callback(code: str | None = None, error: str | None = None):
+async def docusign_oauth_callback(
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
+):
     """Handle OAuth callback from DocuSign, exchange code for tokens."""
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
@@ -1191,6 +1454,24 @@ async def docusign_oauth_callback(code: str | None = None, error: str | None = N
     except Exception as e:
         logging.getLogger(__name__).warning("DocuSign userinfo failed: %s", e)
 
+    # If we have a signed state, store tokens on the user's record
+    if state and AUTH_ENABLED:
+        try:
+            clerk_user_id = verify_oauth_state(state)
+            from db import UserRecord, OAuthTokenSet
+            user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+            if user:
+                user.docusign_tokens = OAuthTokenSet(
+                    access_token=token_data["access_token"],
+                    refresh_token=token_data.get("refresh_token"),
+                    account_id=account_id,
+                )
+                await user.save()
+                log.info("Stored DocuSign tokens on user %s", clerk_user_id)
+        except HTTPException:
+            log.warning("Invalid OAuth state in DocuSign callback, falling back to module-level storage")
+
+    # Always store module-level as fallback (for webhooks, etc.)
     docusign_set_oauth_tokens(
         access_token=token_data["access_token"],
         refresh_token=token_data.get("refresh_token"),

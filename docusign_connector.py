@@ -163,8 +163,13 @@ def _obtain_jwt_token() -> str | None:
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
-def is_configured() -> bool:
-    """Return True if DocuSign tokens are available (env, OAuth, or JWT)."""
+def is_configured(user_tokens: dict | None = None) -> bool:
+    """Return True if DocuSign tokens are available.
+
+    Priority: user_tokens > module-level OAuth > env vars > JWT.
+    """
+    if user_tokens and user_tokens.get("access_token"):
+        return True
     if os.getenv("DOCUSIGN_ACCESS_TOKEN") or _oauth_tokens.get("access_token"):
         return True
     # Try JWT auto-auth if prerequisites are met
@@ -174,15 +179,19 @@ def is_configured() -> bool:
     return False
 
 
-def get_docusign_client() -> DocuSignClient:
-    """Factory: build a DocuSignClient, preferring OAuth tokens over env vars.
+def get_docusign_client(user_tokens: dict | None = None) -> DocuSignClient:
+    """Factory: build a DocuSignClient.
 
-    If no access token is available but JWT prerequisites are met,
-    automatically obtains a token via JWT grant.
+    Priority: user_tokens > module-level OAuth > env vars > JWT.
     """
-    access_token = _oauth_tokens.get("access_token") or os.getenv("DOCUSIGN_ACCESS_TOKEN")
-    refresh_token = _oauth_tokens.get("refresh_token") or os.getenv("DOCUSIGN_REFRESH_TOKEN")
-    account_id = _oauth_tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID")
+    if user_tokens and user_tokens.get("access_token"):
+        access_token = user_tokens["access_token"]
+        refresh_token = user_tokens.get("refresh_token")
+        account_id = user_tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID")
+    else:
+        access_token = _oauth_tokens.get("access_token") or os.getenv("DOCUSIGN_ACCESS_TOKEN")
+        refresh_token = _oauth_tokens.get("refresh_token") or os.getenv("DOCUSIGN_REFRESH_TOKEN")
+        account_id = _oauth_tokens.get("account_id") or os.getenv("DOCUSIGN_ACCOUNT_ID")
 
     # Auto-obtain token via JWT if none available
     if not access_token and _jwt_available():
@@ -218,6 +227,7 @@ def get_docusign_client() -> DocuSignClient:
 async def sync_to_docusign(
     extraction_id: str,
     envelope_id: str | None = None,
+    user_tokens: dict | None = None,
 ) -> dict[str, Any]:
     """Push a saved extraction to DocuSign as an envelope.
 
@@ -250,7 +260,7 @@ async def sync_to_docusign(
     custom_fields = payload.get("customFields")
     recipients = payload.get("recipients")
 
-    with get_docusign_client() as client:
+    with get_docusign_client(user_tokens=user_tokens) as client:
         if envelope_id:
             # Update existing envelope
             action = "Updated"
@@ -306,6 +316,7 @@ async def sync_to_docusign(
 async def process_from_docusign(
     envelope_id: str,
     sync_back: bool = False,
+    user_tokens: dict | None = None,
 ) -> dict[str, Any]:
     """Download a PDF from a DocuSign envelope, run OCR extraction, and save.
 
@@ -323,7 +334,7 @@ async def process_from_docusign(
     Returns:
         Dict with extraction_id, document_id, envelope_id.
     """
-    with get_docusign_client() as client:
+    with get_docusign_client(user_tokens=user_tokens) as client:
         # Get envelope info
         envelope = client.get_envelope(envelope_id)
         envelope_subject = envelope.get("emailSubject", f"envelope-{envelope_id}")
@@ -340,14 +351,14 @@ async def process_from_docusign(
         engine = get_engine()
         mode = "real_estate"
 
-        # Extract
+        # Extract (engine methods return (result, usage) tuples)
         if engine.prefers_file_path:
-            raw_extraction = engine.extract_from_file(tmp_path, mode)
+            raw_extraction, _extract_usage = engine.extract_from_file(tmp_path, mode)
         else:
             from pdf_converter import pdf_to_images, image_to_base64
             images = pdf_to_images(tmp_path)
             images_b64 = [image_to_base64(img) for img in images]
-            raw_extraction = engine.extract(images_b64, mode)
+            raw_extraction, _extract_usage = engine.extract(images_b64, mode)
 
         # Validate
         validated = DotloopLoopDetails.model_validate(raw_extraction)
@@ -355,9 +366,9 @@ async def process_from_docusign(
 
         # Verify citations
         if engine.prefers_file_path:
-            citations = engine.verify_from_file(tmp_path, validated_data)
+            citations, _verify_usage = engine.verify_from_file(tmp_path, validated_data)
         else:
-            citations = engine.verify(images_b64, validated_data)  # type: ignore[possibly-undefined]
+            citations, _verify_usage = engine.verify(images_b64, validated_data)  # type: ignore[possibly-undefined]
 
         overall_confidence = compute_overall_confidence(citations)
 
@@ -405,7 +416,7 @@ async def process_from_docusign(
 
         # Optionally sync back
         if sync_back:
-            sync_result = await sync_to_docusign(str(ext_id))
+            sync_result = await sync_to_docusign(str(ext_id), user_tokens=user_tokens)
             response["synced_back"] = True
             response["sync_result"] = sync_result
 
@@ -423,6 +434,7 @@ def list_docusign_envelopes(
     from_date: str | None = None,
     status: str | None = None,
     count: int = 20,
+    user_tokens: dict | None = None,
 ) -> list[dict[str, Any]]:
     """List recent envelopes from DocuSign.
 
@@ -434,7 +446,7 @@ def list_docusign_envelopes(
     Returns:
         List of envelope dicts.
     """
-    with get_docusign_client() as client:
+    with get_docusign_client(user_tokens=user_tokens) as client:
         result = client.list_envelopes(
             from_date=from_date,
             status=status,
@@ -449,12 +461,100 @@ def list_docusign_envelopes(
         return envelopes
 
 
+def get_envelope_with_details(
+    envelope_id: str,
+    user_tokens: dict | None = None,
+) -> dict[str, Any]:
+    """Get full envelope metadata including recipients and documents.
+
+    Returns a unified dict with:
+      - Envelope metadata (id, subject, status, created/sent dates)
+      - Recipients (signers, carbon copies)
+      - Documents list
+      - Custom fields (property/financial data if set)
+
+    This is the "envelope viewer" endpoint that powers the comparison UI.
+    """
+    with get_docusign_client(user_tokens=user_tokens) as client:
+        # Core envelope info with recipients
+        envelope = client.get_envelope(
+            envelope_id,
+            include="recipients,custom_fields,documents",
+        )
+
+        # Document listing
+        try:
+            docs_response = client.list_documents(envelope_id)
+            documents = docs_response.get("envelopeDocuments", [])
+        except DocuSignAPIError:
+            documents = []
+
+    # Parse recipients
+    recipients_raw = envelope.get("recipients", {})
+    signers = [
+        {
+            "name": s.get("name", ""),
+            "email": s.get("email", ""),
+            "role": s.get("roleName", "signer"),
+            "status": s.get("status", ""),
+        }
+        for s in recipients_raw.get("signers", [])
+    ]
+    carbon_copies = [
+        {
+            "name": c.get("name", ""),
+            "email": c.get("email", ""),
+            "role": "carbon_copy",
+            "status": c.get("status", ""),
+        }
+        for c in recipients_raw.get("carbonCopies", [])
+    ]
+
+    # Parse custom fields for property data
+    custom_fields = envelope.get("customFields", {})
+    text_fields = {
+        f.get("name", ""): f.get("value", "")
+        for f in custom_fields.get("textCustomFields", [])
+    }
+
+    return {
+        "id": envelope.get("envelopeId", envelope_id),
+        "subject": envelope.get("emailSubject", ""),
+        "status": envelope.get("status", ""),
+        "created_date": envelope.get("createdDateTime", ""),
+        "sent_date": envelope.get("sentDateTime", ""),
+        "completed_date": envelope.get("completedDateTime", ""),
+        "property_address": {
+            "street": text_fields.get("Property Address", ""),
+            "city": text_fields.get("City", ""),
+            "state": text_fields.get("State", ""),
+            "postal_code": text_fields.get("Zip Code", ""),
+        },
+        "financials": {
+            "purchase_price": text_fields.get("Purchase Price", ""),
+        },
+        "recipients": signers + carbon_copies,
+        "documents": [
+            {
+                "id": d.get("documentId"),
+                "name": d.get("name", ""),
+                "type": d.get("type", ""),
+                "pages": d.get("pages", ""),
+            }
+            for d in documents
+            if d.get("documentId") != "certificate"  # Exclude signing certificate
+        ],
+        "custom_fields": text_fields,
+    }
+
+
 def void_docusign_envelope(
     envelope_id: str,
     reason: str = "Voided from D.E.S.",
+    user_tokens: dict | None = None,
 ) -> dict[str, Any]:
     """Void/discard a DocuSign envelope (works for drafts and sent envelopes)."""
-    with get_docusign_client() as client:
+    with get_docusign_client(user_tokens=user_tokens) as client:
         result = client.void_envelope(envelope_id, reason=reason)
         log.info("Voided DocuSign envelope: %s", envelope_id)
         return result

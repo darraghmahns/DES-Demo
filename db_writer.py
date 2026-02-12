@@ -22,16 +22,22 @@ async def save_document(
     source: str = "upload",
     source_id: Optional[str] = None,
     file_hash: Optional[str] = None,
+    file_path: Optional[str] = None,
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
 ) -> PydanticObjectId:
     """Insert a document record and return its ID."""
     doc = DocumentRecord(
         filename=filename,
+        file_path=file_path,
         source=source,
         source_id=source_id,
         mode=mode,
         page_count=page_count,
         file_size_bytes=file_size_bytes,
         file_hash=file_hash,
+        user_id=user_id,
+        org_id=org_id,
     )
     await doc.insert()
     return doc.id
@@ -106,6 +112,8 @@ async def get_extraction(extraction_ref: str) -> dict | None:
     data = ext.model_dump()
     data["id"] = extraction_ref
     data["document_id"] = str(doc.id)
+    data["filename"] = doc.filename
+    data["file_path"] = doc.file_path
 
     # Flatten timestamps to ISO strings for JSON serialization
     if isinstance(data.get("extraction_timestamp"), datetime):
@@ -116,12 +124,32 @@ async def get_extraction(extraction_ref: str) -> dict | None:
     return data
 
 
-async def list_extractions(mode: str | None = None, limit: int = 50) -> list[dict]:
-    """List recent extractions with basic metadata."""
-    query = DocumentRecord.find()
-    if mode:
-        query = query.find(DocumentRecord.mode == mode)
+async def list_extractions(
+    mode: str | None = None,
+    limit: int = 50,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> list[dict]:
+    """List recent extractions with basic metadata.
 
+    Scoping rules:
+    - org_id set → show all documents for that brokerage
+    - user_id set (no org) → show user's own + legacy (user_id=None)
+    - neither → show all (admin / dev mode)
+    """
+    filters: dict = {}
+    if mode:
+        filters["mode"] = mode
+
+    if org_id:
+        filters["org_id"] = org_id
+    elif user_id:
+        filters["$or"] = [
+            {"user_id": user_id},
+            {"user_id": None},
+        ]
+
+    query = DocumentRecord.find(filters)
     docs = await query.sort(-DocumentRecord.uploaded_at).limit(limit).to_list()
 
     results = []
@@ -130,6 +158,9 @@ async def list_extractions(mode: str | None = None, limit: int = 50) -> list[dic
             results.append({
                 "id": f"{doc.id}:{idx}",
                 "document_id": str(doc.id),
+                "filename": doc.filename,
+                "source": doc.source,
+                "source_id": doc.source_id,
                 "mode": ext.mode,
                 "engine": ext.engine,
                 "overall_confidence": ext.overall_confidence,
