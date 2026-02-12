@@ -179,9 +179,9 @@ def main():
 
     with console.status("[bold green]Running neural OCR extraction...", spinner="dots"):
         if use_file:
-            raw_extraction = engine.extract_from_file(str(input_path), args.mode)
+            raw_extraction, extract_usage = engine.extract_from_file(str(input_path), args.mode)
         else:
-            raw_extraction = engine.extract(images_b64, args.mode)
+            raw_extraction, extract_usage = engine.extract(images_b64, args.mode)
 
     if args.verbose:
         console.print("\n[dim]Raw API response:[/]")
@@ -231,9 +231,9 @@ def main():
 
         with console.status("[bold green]Verifying extraction sources...", spinner="dots"):
             if use_file:
-                citations = engine.verify_from_file(str(input_path), validated_data)
+                citations, verify_usage = engine.verify_from_file(str(input_path), validated_data)
             else:
-                citations = engine.verify(images_b64, validated_data)
+                citations, verify_usage = engine.verify(images_b64, validated_data)
 
         overall_confidence = compute_overall_confidence(citations)
 
@@ -254,9 +254,9 @@ def main():
 
         with console.status("[bold green]Extracting text for PII analysis...", spinner="dots"):
             if use_file:
-                page_texts = engine.ocr_raw_text_from_file(str(input_path))
+                page_texts, ocr_usage = engine.ocr_raw_text_from_file(str(input_path))
             else:
-                page_texts = engine.ocr_raw_text(images_b64)
+                page_texts, ocr_usage = engine.ocr_raw_text(images_b64)
 
         pii_report = scan_all_pages(page_texts)
 

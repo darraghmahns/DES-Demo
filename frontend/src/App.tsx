@@ -14,6 +14,7 @@ import {
   checkDocuSignStatus,
   syncToDocuSign,
   voidDocuSignEnvelope,
+  deleteAllDocuSignEnvelopes,
   getDocuSignConnectUrl,
   fetchDocuSignEnvelopes,
   fetchAggregateUsage,
@@ -548,6 +549,16 @@ function App() {
       if (selectedEnvelopeId === envelopeId) setSelectedEnvelopeId(null);
     } catch (err) {
       setDocusignSyncError(err instanceof Error ? err.message : 'Delete failed');
+    }
+  }
+
+  async function handleDeleteAllEnvelopes() {
+    try {
+      await deleteAllDocuSignEnvelopes();
+      setDocusignEnvelopes([]);
+      setSelectedEnvelopeId(null);
+    } catch (err) {
+      setDocusignSyncError(err instanceof Error ? err.message : 'Delete all failed');
     }
   }
 
@@ -1203,12 +1214,28 @@ function App() {
           {mode === 'real_estate' && docusignConfigured && (
             <div className="dotloop-section">
               <div className="dotloop-loop-selector">
-                <label className="dotloop-label">
-                  DocuSign Envelopes
-                  {!loadingEnvelopes && docusignEnvelopes.length > 0 && (
-                    <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>
-                      ({docusignEnvelopes.length})
-                    </span>
+                <label className="dotloop-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>
+                    DocuSign Envelopes
+                    {!loadingEnvelopes && docusignEnvelopes.length > 0 && (
+                      <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>
+                        ({docusignEnvelopes.length})
+                      </span>
+                    )}
+                  </span>
+                  {docusignEnvelopes.length > 0 && (
+                    <button
+                      className="docusign-delete-btn"
+                      title="Delete all envelopes"
+                      style={{ fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}
+                      onClick={() => {
+                        if (confirm('Delete all DocuSign envelopes?')) {
+                          handleDeleteAllEnvelopes();
+                        }
+                      }}
+                    >
+                      Delete All
+                    </button>
                   )}
                 </label>
                 {loadingEnvelopes ? (
