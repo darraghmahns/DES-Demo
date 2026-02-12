@@ -15,9 +15,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends poppler-utils && \
     rm -rf /var/lib/apt/lists/*
 
-# Python deps
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Python deps (prod — excludes heavy docling/ollama for ENGINE=openai)
+COPY requirements-prod.txt ./
+RUN pip install --no-cache-dir -r requirements-prod.txt
 
 # App source
 COPY *.py ./
