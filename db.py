@@ -85,8 +85,15 @@ _client: Optional[AsyncMongoClient] = None
 async def init_db():
     """Connect to MongoDB Atlas and register Beanie document models."""
     global _client
-    _client = AsyncMongoClient(MONGODB_URI)
-    await init_beanie(database=_client[DB_NAME], document_models=[DocumentRecord, ScoutResult])
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        _client = AsyncMongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
+        await init_beanie(database=_client[DB_NAME], document_models=[DocumentRecord, ScoutResult])
+        log.info("MongoDB connected: %s", DB_NAME)
+    except Exception as e:
+        log.error("MongoDB connection failed (server will start without DB): %s", e)
+        _client = None
 
 
 async def close_db():

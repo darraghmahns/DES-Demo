@@ -334,10 +334,24 @@ class DocuSignClient:
         return self._handle_response(resp)
 
     def void_envelope(self, envelope_id: str, reason: str = "Voided") -> dict[str, Any]:
-        """Void an in-process envelope."""
+        """Void an in-process envelope (must be in 'sent' or 'delivered' state)."""
         payload = {"status": "voided", "voidedReason": reason}
         resp = self._client.put(
             self._account_path(f"/envelopes/{envelope_id}"), json=payload
+        )
+        return self._handle_response(resp)
+
+    def delete_envelope(self, envelope_id: str) -> dict[str, Any]:
+        """Delete a draft envelope (must be in 'created' state)."""
+        resp = self._client.delete(
+            self._account_path(f"/envelopes/{envelope_id}")
+        )
+        return self._handle_response(resp)
+
+    def get_envelope(self, envelope_id: str) -> dict[str, Any]:
+        """Get envelope details including status."""
+        resp = self._client.get(
+            self._account_path(f"/envelopes/{envelope_id}")
         )
         return self._handle_response(resp)
 

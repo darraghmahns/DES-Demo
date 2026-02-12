@@ -449,14 +449,25 @@ def list_docusign_envelopes(
         return envelopes
 
 
-def void_docusign_envelope(
+def remove_docusign_envelope(
     envelope_id: str,
-    reason: str = "Voided from D.E.S.",
+    reason: str = "Removed from D.E.S.",
 ) -> dict[str, Any]:
-    """Void/discard a DocuSign envelope (works for drafts and sent envelopes)."""
+    """Remove a DocuSign envelope — voids sent/delivered, deletes drafts."""
     with get_docusign_client() as client:
-        result = client.void_envelope(envelope_id, reason=reason)
-        log.info("Voided DocuSign envelope: %s", envelope_id)
+        envelope = client.get_envelope(envelope_id)
+        status = envelope.get("status", "").lower()
+
+        if status in ("sent", "delivered"):
+            result = client.void_envelope(envelope_id, reason=reason)
+            log.info("Voided DocuSign envelope %s (was %s)", envelope_id, status)
+        elif status == "created":
+            result = client.delete_envelope(envelope_id)
+            log.info("Deleted draft DocuSign envelope %s", envelope_id)
+        else:
+            log.warning("Cannot remove envelope %s in '%s' state", envelope_id, status)
+            return {"status": status, "envelope_id": envelope_id, "action": "skipped"}
+
         return result
 
 
