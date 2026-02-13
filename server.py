@@ -9,7 +9,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
@@ -33,6 +33,7 @@ from schemas import (
 )
 from ocr_engine import get_engine
 from compliance_engine import run_compliance_check, async_run_compliance_check
+import property_prefill
 from auth import get_optional_user, get_current_user, sign_oauth_state, verify_oauth_state, AUTH_ENABLED
 from db import init_db, close_db
 from db_writer import save_document, save_extraction, get_extraction
@@ -344,6 +345,8 @@ async def _extraction_pipeline(
     total_steps += 1  # Verify citations
     if mode == "real_estate":
         total_steps += 1  # Compliance check
+        if property_prefill.is_configured():
+            total_steps += 1  # Property enrichment
     if mode == "gov":
         total_steps += 1  # PII scan
 
@@ -495,7 +498,47 @@ async def _extraction_pipeline(
             "data": {"citation_count": len(citations), "overall_confidence": overall_confidence},
         })
 
-        # --- Step 6 (real_estate): Compliance Check ---
+        # --- Property Enrichment (real_estate, when Regrid configured) ---
+        property_enrichment_data = None
+        if mode == "real_estate" and property_prefill.is_configured():
+            current_step += 1
+            emit("step", {
+                "step": current_step, "total": total_steps,
+                "title": "Property Enrichment", "status": "running",
+            })
+
+            addr = (validated_data or {}).get("property_address", {})
+            enrichment = await property_prefill.enrich_property(addr if isinstance(addr, dict) else {})
+
+            if enrichment and enrichment.parcel_id:
+                # Auto-populate parcel_tax_id if the extraction didn't capture it
+                if validated_data and isinstance(validated_data.get("property_address"), dict):
+                    if not validated_data["property_address"].get("parcel_tax_id"):
+                        validated_data["property_address"]["parcel_tax_id"] = enrichment.parcel_id
+
+            property_enrichment_data = enrichment
+            log.info("Property enrichment result: match_quality=%s, parcel_id=%s",
+                     enrichment.match_quality if enrichment else "none",
+                     enrichment.parcel_id if enrichment else None)
+
+            emit("property_enrichment", {
+                "match_quality": enrichment.match_quality if enrichment else "none",
+                "parcel_id": enrichment.parcel_id if enrichment else None,
+                "assessed_total": enrichment.assessed_total if enrichment else None,
+                "year_built": enrichment.year_built if enrichment else None,
+                "lot_size_acres": enrichment.lot_size_acres if enrichment else None,
+                "zoning": enrichment.zoning if enrichment else None,
+                "owner_name": enrichment.owner_name if enrichment else None,
+            })
+            emit("step_complete", {
+                "step": current_step, "title": "Property Enrichment", "status": "complete",
+                "data": {
+                    "match_quality": enrichment.match_quality if enrichment else "none",
+                    "parcel_id": enrichment.parcel_id if enrichment else None,
+                },
+            })
+
+        # --- Compliance Check (real_estate) ---
         compliance_report = None
         if mode == "real_estate":
             current_step += 1
@@ -507,6 +550,7 @@ async def _extraction_pipeline(
             compliance_report = await async_run_compliance_check(
                 validated_data or {},
                 transaction_type=(validated.transaction_type if validated else None),
+                org_id=org_id,
             )
 
             emit("compliance", {
@@ -603,6 +647,7 @@ async def _extraction_pipeline(
             overall_confidence=overall_confidence,
             pii_report=pii_report,
             compliance_report=compliance_report,
+            property_enrichment=property_enrichment_data,
             prompt_tokens=total_usage["prompt_tokens"],
             completion_tokens=total_usage["completion_tokens"],
             total_tokens=total_usage["total_tokens"],
@@ -841,11 +886,16 @@ async def standalone_compliance_check(
     county: str = Query(""),
     city: str = Query(""),
     transaction_type: str = Query(None),
+    org_id: str = Query(None),
+    user=Depends(get_optional_user),
 ):
     """Standalone compliance check without an extraction — for public API.
 
     Uses async DB-first lookup so AI Scout results are automatically included.
+    When *org_id* is provided (or inferred from the authenticated user),
+    brokerage-specific requirements are layered on top.
     """
+    effective_org_id = org_id or (getattr(user, "org_id", None) if user else None)
     report = await async_run_compliance_check(
         {"property_address": {
             "state_or_province": state,
@@ -853,8 +903,185 @@ async def standalone_compliance_check(
             "city": city,
         }},
         transaction_type=transaction_type,
+        org_id=effective_org_id,
     )
     return report.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# Property Enrichment Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/property/status")
+async def property_enrichment_status():
+    """Check if the Regrid property enrichment API is configured."""
+    return {"configured": property_prefill.is_configured()}
+
+
+@app.get("/api/property/lookup")
+async def property_lookup(
+    street: str = Query(..., description="Street address (e.g., '4738 Ridgeline Ct')"),
+    city: str = Query(...),
+    state: str = Query(...),
+    zip: str = Query("", alias="zip"),
+    user=Depends(get_optional_user),
+):
+    """Manual property/parcel lookup by address via Regrid API."""
+    if not property_prefill.is_configured():
+        raise HTTPException(status_code=503, detail="Property enrichment not configured (REGRID_API_KEY missing)")
+
+    enrichment = await property_prefill.enrich_property({
+        "street_number": "",
+        "street_name": street,  # Pass full street as street_name; prefill handles it
+        "city": city,
+        "state_or_province": state,
+        "postal_code": zip,
+    })
+
+    if not enrichment:
+        raise HTTPException(status_code=404, detail="No parcel found for this address")
+
+    return enrichment.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# Brokerage Profile Endpoints
+# ---------------------------------------------------------------------------
+
+
+class BrokerageProfilePayload(BaseModel):
+    name: str
+    license_number: Optional[str] = None
+    license_state: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    active_markets: List[str] = []
+
+
+class BrokerageRequirementPayload(BaseModel):
+    name: str
+    code: Optional[str] = None
+    category: str = "FORM"
+    description: str = ""
+    authority: Optional[str] = None
+    fee: Optional[str] = None
+    url: Optional[str] = None
+    status: str = "REQUIRED"
+    notes: Optional[str] = None
+
+
+class BrokerageDefaultsPayload(BaseModel):
+    default_commission_rate: Optional[str] = None
+    preferred_title_company: Optional[str] = None
+    preferred_escrow_company: Optional[str] = None
+    default_earnest_money_pct: Optional[float] = None
+    required_insurance_providers: List[str] = []
+
+
+def _require_admin(user):
+    """Raise 403 if user is not an admin with an org_id."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not getattr(user, "org_id", None):
+        raise HTTPException(status_code=400, detail="No organization set — join or create one first")
+    if getattr(user, "role", "agent") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+
+@app.get("/api/brokerage/profile")
+async def get_brokerage_profile(user=Depends(get_current_user)):
+    """Get the brokerage profile for the current user's organization."""
+    from db import BrokerageProfile
+
+    if not getattr(user, "org_id", None):
+        raise HTTPException(status_code=400, detail="No organization set")
+    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
+    if not profile:
+        return {"exists": False, "org_id": user.org_id}
+    return profile.model_dump(mode="json")
+
+
+@app.put("/api/brokerage/profile")
+async def upsert_brokerage_profile(payload: BrokerageProfilePayload, user=Depends(get_current_user)):
+    """Create or update the brokerage profile for the current org (admin only)."""
+    from db import BrokerageProfile
+
+    _require_admin(user)
+    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
+    now = datetime.now(timezone.utc)
+    if profile:
+        profile.name = payload.name
+        profile.license_number = payload.license_number
+        profile.license_state = payload.license_state
+        profile.address = payload.address
+        profile.phone = payload.phone
+        profile.active_markets = payload.active_markets
+        profile.updated_at = now
+        await profile.save()
+    else:
+        profile = BrokerageProfile(
+            org_id=user.org_id,
+            name=payload.name,
+            license_number=payload.license_number,
+            license_state=payload.license_state,
+            address=payload.address,
+            phone=payload.phone,
+            active_markets=payload.active_markets,
+            created_at=now,
+            updated_at=now,
+        )
+        await profile.insert()
+    return profile.model_dump(mode="json")
+
+
+@app.post("/api/brokerage/requirements")
+async def add_brokerage_requirement(payload: BrokerageRequirementPayload, user=Depends(get_current_user)):
+    """Add a custom compliance requirement to the brokerage profile (admin only)."""
+    from db import BrokerageProfile
+
+    _require_admin(user)
+    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Create a brokerage profile first")
+    req = payload.model_dump()
+    req["source"] = "BROKERAGE"
+    profile.custom_requirements.append(req)
+    profile.updated_at = datetime.now(timezone.utc)
+    await profile.save()
+    return {"index": len(profile.custom_requirements) - 1, "requirement": req}
+
+
+@app.delete("/api/brokerage/requirements/{index}")
+async def remove_brokerage_requirement(index: int, user=Depends(get_current_user)):
+    """Remove a custom compliance requirement by index (admin only)."""
+    from db import BrokerageProfile
+
+    _require_admin(user)
+    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Brokerage profile not found")
+    if index < 0 or index >= len(profile.custom_requirements):
+        raise HTTPException(status_code=400, detail=f"Invalid index {index} — {len(profile.custom_requirements)} requirements exist")
+    removed = profile.custom_requirements.pop(index)
+    profile.updated_at = datetime.now(timezone.utc)
+    await profile.save()
+    return {"removed": removed, "remaining": len(profile.custom_requirements)}
+
+
+@app.put("/api/brokerage/defaults")
+async def update_brokerage_defaults(payload: BrokerageDefaultsPayload, user=Depends(get_current_user)):
+    """Update brokerage default settings (admin only)."""
+    from db import BrokerageProfile, BrokerageDefaultSettings
+
+    _require_admin(user)
+    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Create a brokerage profile first")
+    profile.defaults = BrokerageDefaultSettings(**payload.model_dump())
+    profile.updated_at = datetime.now(timezone.utc)
+    await profile.save()
+    return profile.defaults.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------
@@ -1155,13 +1382,15 @@ async def dotloop_oauth_connect(user=Depends(get_optional_user)):
 async def dotloop_oauth_callback(
     code: str | None = None,
     error: str | None = None,
+    error_description: str | None = None,
     state: str | None = None,
 ):
     """Handle OAuth callback from Dotloop, exchange code for tokens."""
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
     if error:
-        return RedirectResponse(url=f"{frontend_url}?dotloop_error={error}")
+        desc = error_description or error
+        return RedirectResponse(url=f"{frontend_url}?dotloop_error={desc}")
 
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")

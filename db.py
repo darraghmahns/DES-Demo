@@ -50,6 +50,7 @@ class ExtractionRecord(BaseModel):
     citations: List[VerificationCitation] = Field(default_factory=list)
     pii_report: Optional[PIIReport] = None
     compliance_report: Optional[ComplianceReport] = None
+    property_enrichment: Optional[dict] = None  # PropertyEnrichment.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,41 @@ class UserRecord(Document):
         ]
 
 
+class BrokerageDefaultSettings(BaseModel):
+    """Brokerage-wide defaults applied to new transactions."""
+
+    default_commission_rate: Optional[str] = None  # e.g., "6%"
+    preferred_title_company: Optional[str] = None
+    preferred_escrow_company: Optional[str] = None
+    default_earnest_money_pct: Optional[float] = None  # e.g., 2.5 (percent)
+    required_insurance_providers: List[str] = Field(default_factory=list)
+
+
+class BrokerageProfile(Document):
+    """Brokerage-level compliance profile — one per Clerk Organization."""
+
+    org_id: str  # Clerk Organization ID (unique)
+    name: str  # Brokerage display name
+    license_number: Optional[str] = None  # State broker license
+    license_state: Optional[str] = None  # State of licensure
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    active_markets: List[str] = Field(default_factory=list)  # State codes: ["MT", "CA"]
+
+    # Brokerage-specific compliance rules (layered on top of jurisdiction)
+    custom_requirements: List[dict] = Field(default_factory=list)
+    # Each dict follows ComplianceRequirement schema + source="BROKERAGE"
+
+    defaults: Optional[BrokerageDefaultSettings] = None
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Settings:
+        name = "brokerage_profiles"
+        indexes = ["org_id"]
+
+
 class DocumentRecord(Document):
     """A processed PDF document — top-level MongoDB collection."""
 
@@ -120,7 +156,7 @@ async def init_db():
     """Connect to MongoDB Atlas and register Beanie document models."""
     global _client
     _client = AsyncMongoClient(MONGODB_URI)
-    await init_beanie(database=_client[DB_NAME], document_models=[DocumentRecord, UserRecord, ScoutResult])
+    await init_beanie(database=_client[DB_NAME], document_models=[DocumentRecord, UserRecord, ScoutResult, BrokerageProfile])
 
 
 async def close_db():

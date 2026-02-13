@@ -62,6 +62,13 @@ class ComplianceOverallStatus(str, Enum):
     UNKNOWN_JURISDICTION = "UNKNOWN_JURISDICTION"
 
 
+class RequirementSource(str, Enum):
+    """Where a compliance requirement originated."""
+    JURISDICTION = "JURISDICTION"  # From SEED_RULES or AI Scout
+    BROKERAGE = "BROKERAGE"  # From BrokerageProfile.custom_requirements
+    AI_SCOUT = "AI_SCOUT"  # From ScoutResult (future)
+
+
 # =============================================================================
 # Dotloop-Compatible Models (Real Estate)
 # =============================================================================
@@ -403,6 +410,7 @@ class ComplianceRequirement(BaseModel):
     url: Optional[str] = Field(default=None, description="Reference URL for more info")
     status: RequirementStatus = Field(default=RequirementStatus.REQUIRED)
     notes: Optional[str] = Field(default=None, description="Additional context or caveats")
+    source: RequirementSource = Field(default=RequirementSource.JURISDICTION, description="Where this requirement originated")
 
 
 class ComplianceReport(BaseModel):
@@ -427,6 +435,31 @@ class ComplianceReport(BaseModel):
             1 for r in self.requirements
             if r.status in (RequirementStatus.REQUIRED, RequirementStatus.LIKELY_REQUIRED)
         )
+
+
+# =============================================================================
+# Property Enrichment Models (Cadastral / Assessor Data)
+# =============================================================================
+
+
+class PropertyEnrichment(BaseModel):
+    """Enriched property data from cadastral/assessor lookup (e.g., Regrid)."""
+    parcel_id: Optional[str] = Field(default=None, description="Parcel number / APN")
+    apn: Optional[str] = Field(default=None, description="Assessor's Parcel Number (unformatted)")
+    owner_name: Optional[str] = Field(default=None, description="Current owner on record")
+    lot_size_sqft: Optional[float] = Field(default=None, description="Lot size in square feet")
+    lot_size_acres: Optional[float] = Field(default=None, description="Lot size in acres")
+    year_built: Optional[int] = Field(default=None, description="Year structure was built")
+    assessed_total: Optional[float] = Field(default=None, description="Total assessed value (USD)")
+    assessed_land: Optional[float] = Field(default=None, description="Assessed land value (USD)")
+    assessed_improvement: Optional[float] = Field(default=None, description="Assessed improvement value (USD)")
+    zoning: Optional[str] = Field(default=None, description="Zoning designation")
+    land_use: Optional[str] = Field(default=None, description="Land use description")
+    latitude: Optional[float] = Field(default=None, description="Parcel centroid latitude")
+    longitude: Optional[float] = Field(default=None, description="Parcel centroid longitude")
+    source: str = Field(default="regrid", description="Data provider")
+    lookup_timestamp: Optional[str] = Field(default=None, description="ISO 8601 timestamp of lookup")
+    match_quality: str = Field(default="none", description="Match quality: exact | fuzzy | none")
 
 
 # =============================================================================
@@ -475,6 +508,9 @@ class ExtractionResult(BaseModel):
 
     # Compliance (real_estate mode)
     compliance_report: Optional[ComplianceReport] = None
+
+    # Property enrichment (real_estate mode — cadastral/assessor data)
+    property_enrichment: Optional[PropertyEnrichment] = None
 
     # Document type classification
     document_type: Optional[str] = Field(

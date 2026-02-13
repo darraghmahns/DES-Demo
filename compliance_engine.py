@@ -25,6 +25,7 @@ from schemas import (
     ComplianceReport,
     ComplianceRequirement,
     RequirementCategory,
+    RequirementSource,
     RequirementStatus,
 )
 
@@ -650,14 +651,47 @@ async def async_lookup_requirements(
     return lookup_requirements(jurisdiction_key, state)
 
 
+async def lookup_brokerage_requirements(org_id: Optional[str]) -> list[dict[str, Any]]:
+    """Fetch custom compliance requirements from the brokerage profile.
+
+    Returns a list of requirement dicts (ComplianceRequirement-compatible)
+    with source tagged as BROKERAGE.  Returns empty list if no profile or
+    no custom requirements are configured.
+    """
+    if not org_id:
+        return []
+    try:
+        from db import BrokerageProfile
+
+        profile = await BrokerageProfile.find_one({"org_id": org_id})
+        if not profile or not profile.custom_requirements:
+            return []
+        reqs: list[dict[str, Any]] = []
+        for r in profile.custom_requirements:
+            # Ensure every brokerage requirement is tagged with source=BROKERAGE
+            req = dict(r)  # shallow copy to avoid mutating the stored doc
+            req.setdefault("source", RequirementSource.BROKERAGE.value)
+            reqs.append(req)
+        log.info(
+            "Loaded %d brokerage requirements for org %s", len(reqs), org_id,
+        )
+        return reqs
+    except Exception:
+        log.exception("Error loading brokerage requirements for org %s", org_id)
+        return []
+
+
 async def async_run_compliance_check(
     extracted_data: dict[str, Any],
     transaction_type: Optional[str] = None,
+    org_id: Optional[str] = None,
 ) -> ComplianceReport:
     """Async compliance check — uses DB-first lookup for AI Scout results.
 
     Same logic as run_compliance_check() but uses async_lookup_requirements()
-    to check MongoDB before falling back to SEED_RULES.
+    to check MongoDB before falling back to SEED_RULES.  When *org_id* is
+    provided, brokerage-specific requirements are merged on top of the
+    jurisdiction rules.
     """
     addr = extracted_data.get("property_address", {})
     if isinstance(addr, dict):
@@ -681,8 +715,13 @@ async def async_run_compliance_check(
     key, display, jtype = resolve_jurisdiction(state, county, city)
     log.info("Resolved jurisdiction: %s (%s, type=%s)", key, display, jtype)
 
-    # Async DB-first lookup
+    # Async DB-first lookup (jurisdiction rules)
     rules, matched_key = await async_lookup_requirements(key, state)
+
+    # Merge brokerage-specific requirements on top of jurisdiction rules
+    brokerage_rules = await lookup_brokerage_requirements(org_id)
+    if brokerage_rules:
+        rules = rules + brokerage_rules
 
     if not rules:
         log.info("No compliance rules found for jurisdiction: %s", key)
