@@ -82,10 +82,14 @@ async def save_extraction(
         completion_tokens=result.completion_tokens,
         total_tokens=result.total_tokens,
         cost_usd=result.cost_usd,
-        # Citations, PII, and Compliance embed directly — no decomposition needed
+        # Citations, PII, Compliance, and Property Enrichment embed directly
         citations=result.citations,
         pii_report=result.pii_report,
         compliance_report=result.compliance_report,
+        property_enrichment=(
+            result.property_enrichment.model_dump(mode="json")
+            if result.property_enrichment else None
+        ),
     )
 
     doc.extractions.append(extraction)

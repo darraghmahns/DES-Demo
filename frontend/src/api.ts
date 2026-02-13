@@ -136,6 +136,16 @@ export interface ComplianceEvent {
   notes: string | null;
 }
 
+export interface PropertyEnrichmentEvent {
+  match_quality: string;
+  parcel_id: string | null;
+  assessed_total: number | null;
+  year_built: number | null;
+  lot_size_acres: number | null;
+  zoning: string | null;
+  owner_name: string | null;
+}
+
 export type SSEEvent =
   | { type: 'step'; data: StepEvent }
   | { type: 'step_complete'; data: StepCompleteEvent }
@@ -144,6 +154,7 @@ export type SSEEvent =
   | { type: 'citations'; data: CitationsEvent }
   | { type: 'pii'; data: PIIEvent }
   | { type: 'compliance'; data: ComplianceEvent }
+  | { type: 'property_enrichment'; data: PropertyEnrichmentEvent }
   | { type: 'complete'; data: ExtractionResult }
   | { type: 'error'; data: { message: string } };
 
@@ -718,6 +729,58 @@ export async function compareExtractions(
   );
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: 'Comparison failed' }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// Property Enrichment (Cadastral / Regrid)
+// ---------------------------------------------------------------------------
+
+export async function checkPropertyEnrichmentStatus(): Promise<boolean> {
+  try {
+    const resp = await fetch(`${API_BASE}/api/property/status`, { headers: { ...await authHeaders() } });
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return data.configured === true;
+  } catch {
+    return false;
+  }
+}
+
+export interface PropertyLookupResult {
+  parcel_id: string | null;
+  apn: string | null;
+  owner_name: string | null;
+  lot_size_sqft: number | null;
+  lot_size_acres: number | null;
+  year_built: number | null;
+  assessed_total: number | null;
+  assessed_land: number | null;
+  assessed_improvement: number | null;
+  zoning: string | null;
+  land_use: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  source: string;
+  lookup_timestamp: string | null;
+  match_quality: string;
+}
+
+export async function lookupProperty(
+  street: string,
+  city: string,
+  state: string,
+  zip?: string,
+): Promise<PropertyLookupResult> {
+  const params = new URLSearchParams({ street, city, state });
+  if (zip) params.set('zip', zip);
+  const resp = await fetch(`${API_BASE}/api/property/lookup?${params}`, {
+    headers: { ...await authHeaders() },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Property lookup failed' }));
     throw new Error(err.detail || `HTTP ${resp.status}`);
   }
   return resp.json();

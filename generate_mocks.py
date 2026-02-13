@@ -909,6 +909,316 @@ def create_purchase_agreement_3():
     print(f"  Created: {output_path}")
 
 
+def create_dallas_purchase():
+    """Generate a Dallas TX purchase agreement for Regrid integration testing."""
+    output_path = OUTPUT_DIR / "sample_dallas_purchase.pdf"
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=letter,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+        leftMargin=1 * inch,
+        rightMargin=1 * inch,
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "ContractTitle4",
+        parent=styles["Heading1"],
+        fontSize=16,
+        alignment=TA_CENTER,
+        spaceAfter=6,
+        textColor=colors.HexColor("#1a1a2e"),
+    )
+    subtitle_style = ParagraphStyle(
+        "ContractSubtitle4",
+        parent=styles["Normal"],
+        fontSize=10,
+        alignment=TA_CENTER,
+        spaceAfter=18,
+        textColor=colors.grey,
+    )
+    section_style = ParagraphStyle(
+        "SectionHeader4",
+        parent=styles["Heading2"],
+        fontSize=12,
+        spaceBefore=14,
+        spaceAfter=6,
+        textColor=colors.HexColor("#16213e"),
+        borderWidth=0,
+        borderPadding=0,
+    )
+    body_style = ParagraphStyle(
+        "ContractBody4",
+        parent=styles["Normal"],
+        fontSize=10,
+        leading=14,
+        alignment=TA_JUSTIFY,
+        spaceAfter=8,
+    )
+    small_style = ParagraphStyle(
+        "SmallText4",
+        parent=styles["Normal"],
+        fontSize=8,
+        leading=10,
+        textColor=colors.grey,
+    )
+
+    story = []
+
+    # === PAGE 1: Header & Parties ===
+    story.append(Paragraph("RESIDENTIAL PURCHASE AGREEMENT", title_style))
+    story.append(Paragraph("State of Texas \u2014 TREC Standard Form", subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#1a1a2e")))
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("SECTION 1: PARTIES TO THE AGREEMENT", section_style))
+    story.append(Paragraph(
+        'This Residential Purchase Agreement ("Agreement") is entered into as of '
+        "<b>February 10, 2025</b> by and between the following parties:",
+        body_style,
+    ))
+
+    parties_data = [
+        ["", "Name(s)", "Role"],
+        ["BUYER(S):", "James R. Thompson & Maria L. Thompson", "Purchaser"],
+        ["SELLER(S):", "Robert A. Chen & Susan K. Chen", "Vendor"],
+    ]
+    parties_table = Table(parties_data, colWidths=[1.2 * inch, 3.5 * inch, 1.3 * inch])
+    parties_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f5")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+    ]))
+    story.append(Spacer(1, 8))
+    story.append(parties_table)
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("SECTION 2: PROPERTY DESCRIPTION", section_style))
+    story.append(Paragraph(
+        "The Seller agrees to sell and the Buyer agrees to purchase the following described "
+        "real property, together with all improvements, fixtures, and appurtenances:",
+        body_style,
+    ))
+
+    prop_data = [
+        ["Street Address:", "5818 Diana Dr"],
+        ["City:", "Dallas"],
+        ["State:", "Texas (TX)"],
+        ["ZIP Code:", "75043"],
+        ["County:", "Dallas"],
+        ["MLS Number:", "TX-2025-88412"],
+        ["Parcel/Tax ID:", "26447580030140000"],
+        ["Legal Description:", "Lot 14, Block 3, Northeast Dallas, Dallas County, TX"],
+    ]
+    prop_table = Table(prop_data, colWidths=[1.8 * inch, 4.2 * inch])
+    prop_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#333333")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f8f8fc")),
+    ]))
+    story.append(Spacer(1, 8))
+    story.append(prop_table)
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph(
+        "The property is being sold in its present, as-is condition, subject to the inspection "
+        "contingencies outlined in Section 5 of this Agreement. Buyer acknowledges that Buyer "
+        "has had the opportunity to inspect the property and accepts its current condition unless "
+        "otherwise specified herein.",
+        body_style,
+    ))
+
+    story.append(PageBreak())
+
+    # === PAGE 2: Financial Terms & Dates ===
+    story.append(Paragraph("SECTION 3: PURCHASE PRICE AND FINANCIAL TERMS", section_style))
+
+    fin_data = [
+        ["Purchase Price:", "$485,000.00"],
+        ["Earnest Money Deposit:", "$12,000.00"],
+        ["Earnest Money Held By:", "Lone Star Title Company"],
+        ["Deposit Due Within:", "3 business days of acceptance"],
+        ["Financing Type:", "Conventional Mortgage"],
+        ["Down Payment:", "$97,000.00 (20%)"],
+        ["Loan Amount:", "$388,000.00"],
+    ]
+    fin_table = Table(fin_data, colWidths=[2.2 * inch, 3.8 * inch])
+    fin_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f8f8fc")),
+    ]))
+    story.append(Spacer(1, 8))
+    story.append(fin_table)
+
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        "The Buyer shall secure financing within thirty (30) days of the effective date of this "
+        "Agreement. If Buyer is unable to secure financing under the terms described above, "
+        "Buyer may terminate this Agreement and the earnest money deposit shall be returned in "
+        "full to the Buyer.",
+        body_style,
+    ))
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("SECTION 4: IMPORTANT DATES", section_style))
+
+    dates_data = [
+        ["Offer Date:", "02/10/2025"],
+        ["Offer Expiration:", "02/14/2025 at 5:00 PM CST"],
+        ["Inspection Deadline:", "02/24/2025"],
+        ["Appraisal Deadline:", "03/03/2025"],
+        ["Financing Contingency:", "03/12/2025"],
+        ["Closing Date:", "03/28/2025"],
+        ["Possession Date:", "At closing, upon recording of deed"],
+    ]
+    dates_table = Table(dates_data, colWidths=[2.2 * inch, 3.8 * inch])
+    dates_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f8f8fc")),
+    ]))
+    story.append(Spacer(1, 8))
+    story.append(dates_table)
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("SECTION 5: INSPECTION CONTINGENCY", section_style))
+    story.append(Paragraph(
+        "Buyer shall have until the Inspection Deadline to conduct any and all inspections of "
+        "the property at Buyer\u2019s expense. Buyer may, at Buyer\u2019s sole discretion, terminate this "
+        "Agreement if inspections reveal material defects. Upon termination under this section, "
+        "the earnest money deposit shall be returned to the Buyer in full.",
+        body_style,
+    ))
+    story.append(Paragraph(
+        "Buyer may request repairs from Seller. Seller may accept, reject, or counter any "
+        "repair request. If the parties cannot reach agreement on repairs by the Inspection "
+        "Deadline, either party may terminate this Agreement.",
+        body_style,
+    ))
+
+    story.append(PageBreak())
+
+    # === PAGE 3: Agent Info & Signatures ===
+    story.append(Paragraph("SECTION 6: REAL ESTATE AGENTS AND BROKERAGES", section_style))
+
+    agent_data = [
+        ["", "Name", "Brokerage", "Phone", "Email"],
+        [
+            "Listing Agent:",
+            "Jennifer Walsh",
+            "Keller Williams Realty",
+            "(214) 555-0234",
+            "j.walsh@kwdallas.com",
+        ],
+        [
+            "Buying Agent:",
+            "David Martinez",
+            "RE/MAX Dallas",
+            "(972) 555-0891",
+            "d.martinez@remaxdfw.com",
+        ],
+    ]
+    agent_table = Table(
+        agent_data,
+        colWidths=[1.1 * inch, 1.3 * inch, 1.2 * inch, 1.2 * inch, 1.8 * inch],
+    )
+    agent_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f5")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+    ]))
+    story.append(Spacer(1, 8))
+    story.append(agent_table)
+
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        "Sale Commission Rate: 6% of the purchase price, to be split equally between "
+        "the listing and buying brokerages (3% each).",
+        body_style,
+    ))
+
+    story.append(Spacer(1, 24))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#1a1a2e")))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("SECTION 7: SIGNATURES", section_style))
+    story.append(Paragraph(
+        "By signing below, the parties acknowledge that they have read, understand, and agree "
+        "to all terms and conditions of this Residential Purchase Agreement.",
+        body_style,
+    ))
+    story.append(Spacer(1, 20))
+
+    sig_data = [
+        ["Buyer: ______________________________", "Date: _______________"],
+        ["James R. Thompson", ""],
+        ["", ""],
+        ["Buyer: ______________________________", "Date: _______________"],
+        ["Maria L. Thompson", ""],
+        ["", ""],
+        ["Seller: ______________________________", "Date: _______________"],
+        ["Robert A. Chen", ""],
+        ["", ""],
+        ["Seller: ______________________________", "Date: _______________"],
+        ["Susan K. Chen", ""],
+    ]
+    sig_table = Table(sig_data, colWidths=[3.5 * inch, 2.5 * inch])
+    sig_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("FONTNAME", (0, 1), (0, 1), "Helvetica-Oblique"),
+        ("FONTNAME", (0, 4), (0, 4), "Helvetica-Oblique"),
+        ("FONTNAME", (0, 7), (0, 7), "Helvetica-Oblique"),
+        ("FONTNAME", (0, 10), (0, 10), "Helvetica-Oblique"),
+        ("TEXTCOLOR", (0, 1), (0, 1), colors.grey),
+        ("TEXTCOLOR", (0, 4), (0, 4), colors.grey),
+        ("TEXTCOLOR", (0, 7), (0, 7), colors.grey),
+        ("TEXTCOLOR", (0, 10), (0, 10), colors.grey),
+    ]))
+    story.append(sig_table)
+
+    story.append(Spacer(1, 20))
+    story.append(Paragraph(
+        "This agreement constitutes the entire understanding between the parties and supersedes "
+        "all prior negotiations, representations, and agreements. This agreement may only be "
+        "modified in writing signed by all parties.",
+        small_style,
+    ))
+
+    doc.build(story)
+    print(f"  Created: {output_path}")
+
+
 def create_foia_request_2():
     """Generate a second FOIA request — EPA environmental records."""
     output_path = OUTPUT_DIR / "sample_epa_foia.pdf"
@@ -1128,6 +1438,7 @@ def main():
     create_purchase_agreement()
     create_purchase_agreement_2()
     create_purchase_agreement_3()
+    create_dallas_purchase()
     create_foia_request()
     create_foia_request_2()
     create_foia_request_3()

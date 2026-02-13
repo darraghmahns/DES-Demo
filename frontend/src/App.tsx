@@ -29,6 +29,7 @@ import {
   compareExtractions,
   fetchExtractions,
   setAuthTokenProvider,
+  checkPropertyEnrichmentStatus,
 } from './api';
 
 // Clerk auth — only active when VITE_CLERK_PUBLISHABLE_KEY is set
@@ -55,6 +56,7 @@ import type {
   FieldSignificance,
   BatchSource,
   ExtractionSummary,
+  PropertyEnrichmentEvent,
 } from './api';
 
 // ---------------------------------------------------------------------------
@@ -72,7 +74,7 @@ interface PipelineStep {
   status: StepStatus;
 }
 
-function getSteps(mode: Mode): PipelineStep[] {
+function getSteps(mode: Mode, propertyEnrichmentEnabled = false): PipelineStep[] {
   const base: PipelineStep[] = [
     { num: 1, title: 'Load Document', status: 'pending' },
     { num: 2, title: 'Convert to Images', status: 'pending' },
@@ -80,6 +82,9 @@ function getSteps(mode: Mode): PipelineStep[] {
     { num: 4, title: 'Validate Schema', status: 'pending' },
     { num: 5, title: 'Verify Citations', status: 'pending' },
   ];
+  if (mode === 'real_estate' && propertyEnrichmentEnabled) {
+    base.push({ num: base.length + 1, title: 'Property Enrichment', status: 'pending' });
+  }
   if (mode === 'real_estate') {
     base.push({ num: base.length + 1, title: 'Compliance Check', status: 'pending' });
   }
@@ -198,6 +203,10 @@ function App() {
   const [selectedLoopId, setSelectedLoopId] = useState<number | null>(null);
   const [loadingLoops, setLoadingLoops] = useState(false);
 
+  // Property Enrichment (Cadastral)
+  const [propertyEnrichmentConfigured, setPropertyEnrichmentConfigured] = useState(false);
+  const [propertyEnrichment, setPropertyEnrichment] = useState<PropertyEnrichmentEvent | null>(null);
+
   // DocuSign
   const [docusignConfigured, setDocusignConfigured] = useState(false);
   const [isDocusignSyncing, setIsDocusignSyncing] = useState(false);
@@ -232,6 +241,7 @@ function App() {
     setPiiRiskScore(null);
     setPiiRiskLevel(null);
     setComplianceReport(null);
+    setPropertyEnrichment(null);
     setFinalResult(null);
     setErrorMessage(null);
     setActiveTab('extraction');
@@ -294,6 +304,9 @@ function App() {
         case 'compliance':
           setComplianceReport(event.data as unknown as ComplianceReport);
           break;
+        case 'property_enrichment':
+          setPropertyEnrichment(event.data as PropertyEnrichmentEvent);
+          break;
         case 'complete':
           setFinalResult(event.data);
           if (event.data.extraction_id) setExtractionId(event.data.extraction_id);
@@ -335,7 +348,7 @@ function App() {
       if (docName === selectedDoc) {
         resetResults();
         setIsCached(false);
-        setSteps(getSteps(mode));
+        setSteps(getSteps(mode, propertyEnrichmentConfigured));
         setIsRunning(true);
         subscribeToDoc(task_id, mode, docName);
       }
@@ -385,14 +398,14 @@ function App() {
     if (taskId && taskStatusesRef.current[key]) {
       // Has a task — subscribe to SSE to replay all events
       resetResults();
-      setSteps(getSteps(mode));
+      setSteps(getSteps(mode, propertyEnrichmentConfigured));
       setIsCached(false);
       if (taskStatusesRef.current[key] === 'running') setIsRunning(true);
       subscribeToDoc(taskId, mode, docName);
     } else {
       // No task — check cache
       resetResults();
-      setSteps(getSteps(mode));
+      setSteps(getSteps(mode, propertyEnrichmentConfigured));
       checkDocCache(docName);
     }
   }
@@ -495,7 +508,7 @@ function App() {
       setDocuments(docs);
       setSelectedDoc(result.name);
       resetResults();
-      setSteps(getSteps(mode));
+      setSteps(getSteps(mode, propertyEnrichmentConfigured));
       checkDocCache(result.name);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Upload failed');
@@ -591,7 +604,7 @@ function App() {
       if (isCached) {
         setIsCached(false);
         resetResults();
-        setSteps(getSteps(mode));
+        setSteps(getSteps(mode, propertyEnrichmentConfigured));
       }
     } catch {
       setErrorMessage('Failed to clear cache');
@@ -606,6 +619,7 @@ function App() {
   useEffect(() => {
     checkDotloopStatus().then(setDotloopConfigured);
     checkDocuSignStatus().then(setDocusignConfigured);
+    checkPropertyEnrichmentStatus().then(setPropertyEnrichmentConfigured);
     fetchAggregateUsage().then(setAggregateUsage).catch(() => {});
 
     // Reconnect to any active extraction tasks
@@ -620,7 +634,7 @@ function App() {
         if (taskMode === mode) {
           setSelectedDoc(task.filename);
           setIsRunning(true);
-          setSteps(getSteps(taskMode));
+          setSteps(getSteps(taskMode, propertyEnrichmentConfigured));
           subscribeToDoc(task.task_id, taskMode, task.filename);
         }
       }
@@ -650,7 +664,7 @@ function App() {
   useEffect(() => {
     setLoadingDocs(true);
     resetResults();
-    setSteps(getSteps(mode));
+    setSteps(getSteps(mode, propertyEnrichmentConfigured));
     setSelectedDocs(new Set());
 
     fetchDocuments(mode).then((docs) => {
@@ -1053,7 +1067,7 @@ function App() {
                 onClick={() => {
                   setIsCached(false);
                   resetResults();
-                  setSteps(getSteps(mode));
+                  setSteps(getSteps(mode, propertyEnrichmentConfigured));
                   handleRun();
                 }}
               >
@@ -1128,6 +1142,54 @@ function App() {
                   <span className="usage-stat-value">${aggregateUsage.avg_cost_per_extraction.toFixed(4)}</span>
                   <span className="usage-stat-label">Avg/Extract</span>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Property Enrichment — show after extraction in real_estate mode */}
+          {propertyEnrichment && propertyEnrichment.match_quality !== 'none' && mode === 'real_estate' && (
+            <div className="property-enrichment-section">
+              <div className="property-enrichment-title">
+                <span style={{ marginRight: 6 }}>&#x1F4CD;</span>
+                Property Enrichment (Regrid)
+              </div>
+              <div className="property-enrichment-grid">
+                {propertyEnrichment.parcel_id && (
+                  <div className="property-enrichment-field">
+                    <span className="property-enrichment-label">Parcel ID</span>
+                    <span className="property-enrichment-value">{propertyEnrichment.parcel_id}</span>
+                  </div>
+                )}
+                {propertyEnrichment.assessed_total != null && (
+                  <div className="property-enrichment-field">
+                    <span className="property-enrichment-label">Assessed Value</span>
+                    <span className="property-enrichment-value">${propertyEnrichment.assessed_total.toLocaleString()}</span>
+                  </div>
+                )}
+                {propertyEnrichment.year_built != null && (
+                  <div className="property-enrichment-field">
+                    <span className="property-enrichment-label">Year Built</span>
+                    <span className="property-enrichment-value">{propertyEnrichment.year_built}</span>
+                  </div>
+                )}
+                {propertyEnrichment.lot_size_acres != null && (
+                  <div className="property-enrichment-field">
+                    <span className="property-enrichment-label">Lot Size</span>
+                    <span className="property-enrichment-value">{propertyEnrichment.lot_size_acres.toFixed(2)} acres</span>
+                  </div>
+                )}
+                {propertyEnrichment.zoning && (
+                  <div className="property-enrichment-field">
+                    <span className="property-enrichment-label">Zoning</span>
+                    <span className="property-enrichment-value">{propertyEnrichment.zoning}</span>
+                  </div>
+                )}
+                {propertyEnrichment.owner_name && (
+                  <div className="property-enrichment-field">
+                    <span className="property-enrichment-label">Owner on Record</span>
+                    <span className="property-enrichment-value">{propertyEnrichment.owner_name}</span>
+                  </div>
+                )}
               </div>
             </div>
           )}
