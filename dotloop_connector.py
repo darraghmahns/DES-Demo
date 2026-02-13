@@ -438,6 +438,19 @@ def list_dotloop_loops(
         return result.get("data", [])
 
 
+def archive_dotloop_loop(
+    loop_id: int,
+    profile_id: int | None = None,
+    user_tokens: dict | None = None,
+) -> dict[str, Any]:
+    """Archive a Dotloop loop by setting its status to 'Archived'."""
+    if not profile_id:
+        profile_id = _get_profile_id()
+
+    with get_dotloop_client(user_tokens=user_tokens) as client:
+        return client.update_loop(profile_id, loop_id, status="Archived")
+
+
 # ---------------------------------------------------------------------------
 # Webhook handler
 # ---------------------------------------------------------------------------

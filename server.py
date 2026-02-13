@@ -40,6 +40,7 @@ from db_writer import save_document, save_extraction, get_extraction
 from dotloop_connector import (
     is_configured as dotloop_configured,
     list_dotloop_loops,
+    archive_dotloop_loop,
     sync_to_dotloop,
     process_from_dotloop,
     handle_webhook as dotloop_handle_webhook,
@@ -48,7 +49,7 @@ from dotloop_connector import (
 from docusign_connector import (
     is_configured as docusign_configured,
     list_docusign_envelopes,
-    void_docusign_envelope,
+    remove_docusign_envelope,
     sync_to_docusign,
     process_from_docusign,
     handle_webhook as docusign_handle_webhook,
@@ -1343,6 +1344,41 @@ async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/dotloop/loops/{loop_id}")
+async def dotloop_archive_loop(loop_id: int, user=Depends(get_optional_user)):
+    """Archive a single Dotloop loop."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    try:
+        result = await asyncio.to_thread(archive_dotloop_loop, loop_id, user_tokens=user_tokens)
+        return {"status": "archived", "loop_id": loop_id, "detail": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/dotloop/loops")
+async def dotloop_archive_all_loops(user=Depends(get_optional_user)):
+    """Archive all Dotloop loops."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    try:
+        loops = await asyncio.to_thread(list_dotloop_loops, None, 100, user_tokens=user_tokens)
+        results = []
+        for loop in loops:
+            lid = loop.get("loopId")
+            if lid:
+                try:
+                    await asyncio.to_thread(archive_dotloop_loop, lid, user_tokens=user_tokens)
+                    results.append({"loop_id": lid, "result": "archived"})
+                except Exception as e:
+                    results.append({"loop_id": lid, "result": str(e)})
+        return {"archived": len(results), "details": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Dotloop OAuth Endpoints
 # ---------------------------------------------------------------------------
@@ -1556,14 +1592,38 @@ async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSign
 
 
 @app.delete("/api/docusign/envelopes/{envelope_id}")
-async def docusign_void_envelope(envelope_id: str, user=Depends(get_optional_user)):
-    """Void/discard a DocuSign envelope (drafts or sent)."""
+async def docusign_remove_envelope(envelope_id: str, user=Depends(get_optional_user)):
+    """Remove a DocuSign envelope — voids sent/delivered, deletes drafts."""
     user_tokens = _user_docusign_tokens(user)
     if not docusign_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=503, detail="DocuSign not configured")
     try:
-        await asyncio.to_thread(void_docusign_envelope, envelope_id, user_tokens=user_tokens)
-        return {"status": "voided", "envelope_id": envelope_id}
+        result = await asyncio.to_thread(remove_docusign_envelope, envelope_id, user_tokens=user_tokens)
+        return {"status": "removed", "envelope_id": envelope_id, "detail": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/docusign/envelopes")
+async def docusign_remove_all_envelopes(user=Depends(get_optional_user)):
+    """Remove all DocuSign envelopes — voids sent/delivered, deletes drafts."""
+    user_tokens = _user_docusign_tokens(user)
+    if not docusign_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="DocuSign not configured")
+    try:
+        envelopes = await asyncio.to_thread(
+            list_docusign_envelopes, None, "created,sent,delivered", 100, user_tokens=user_tokens
+        )
+        results = []
+        for env in envelopes:
+            eid = env.get("envelopeId")
+            if eid:
+                try:
+                    r = await asyncio.to_thread(remove_docusign_envelope, eid, user_tokens=user_tokens)
+                    results.append({"envelope_id": eid, "result": "removed"})
+                except Exception as e:
+                    results.append({"envelope_id": eid, "result": str(e)})
+        return {"removed": len(results), "details": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1755,6 +1815,22 @@ async def get_usage():
         "total_cost_usd": round(total_cost, 6),
         "avg_cost_per_extraction": round(avg_cost, 6),
     }
+
+
+# ---------------------------------------------------------------------------
+# Serve frontend (production — only when frontend/dist exists)
+# ---------------------------------------------------------------------------
+
+_FRONTEND_DIR = Path("frontend/dist")
+if _FRONTEND_DIR.exists():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIR / "assets")), name="static-assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Catch-all: serve index.html for SPA client-side routing."""
+        return FileResponse(str(_FRONTEND_DIR / "index.html"))
 
 
 # ---------------------------------------------------------------------------

@@ -489,6 +489,29 @@ export async function voidDocuSignEnvelope(envelopeId: string): Promise<void> {
   }
 }
 
+export async function deleteAllDocuSignEnvelopes(): Promise<{ removed: number }> {
+  const resp = await fetch(`${API_BASE}/api/docusign/envelopes`, {
+    method: 'DELETE',
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Delete all failed' }));
+    throw new Error(err.detail || `Delete all failed (${resp.status})`);
+  }
+  return resp.json();
+}
+
+export async function archiveAllDotloopLoops(): Promise<{ archived: number }> {
+  const resp = await fetch(`${API_BASE}/api/dotloop/loops`, {
+    method: 'DELETE',
+    headers: { ...await authHeaders() },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Archive all failed' }));
+    throw new Error(err.detail || `Archive all failed (${resp.status})`);
+  }
+  return resp.json();
+}
+
 export interface DocuSignSyncResult {
   envelope_id: string;
   action: string;
