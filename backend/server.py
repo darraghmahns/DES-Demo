@@ -1818,22 +1818,6 @@ async def get_usage():
 
 
 # ---------------------------------------------------------------------------
-# Serve frontend (production — only when frontend/dist exists)
-# ---------------------------------------------------------------------------
-
-_FRONTEND_DIR = Path("frontend/dist")
-if _FRONTEND_DIR.exists():
-    from fastapi.staticfiles import StaticFiles
-
-    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIR / "assets")), name="static-assets")
-
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        """Catch-all: serve index.html for SPA client-side routing."""
-        return FileResponse(str(_FRONTEND_DIR / "index.html"))
-
-
-# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 

@@ -22,7 +22,7 @@ frontend/dist/
 docusign_private.pem
 
 # Output (keep dist/.gitkeep trackable)
-dist/*.json
+backend/dist/*.json
 
 # OS
 .DS_Store

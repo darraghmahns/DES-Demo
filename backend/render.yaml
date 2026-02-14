@@ -4,6 +4,7 @@ services:
     runtime: docker
     plan: starter
     region: oregon
+    rootDir: backend
     dockerfilePath: ./Dockerfile
     envVars:
       - key: OPENAI_API_KEY
@@ -39,8 +40,6 @@ services:
       - key: CLERK_SECRET_KEY
         sync: false
       - key: CLERK_JWKS_URL
-        sync: false
-      - key: VITE_CLERK_PUBLISHABLE_KEY
         sync: false
       - key: CORS_ORIGINS
         value: http://localhost:5173,https://des.darraghmahns.com,https://des-demo.onrender.com

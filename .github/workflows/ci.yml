@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +33,9 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
 
@@ -42,10 +48,8 @@ jobs:
 
       - name: Install frontend deps
         run: npm ci
-        working-directory: frontend
 
       - name: Build frontend
         run: npm run build
-        working-directory: frontend
         env:
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
