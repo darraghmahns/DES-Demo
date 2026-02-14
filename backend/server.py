@@ -58,7 +58,7 @@ from docusign_connector import (
 
 load_dotenv()
 
-app = FastAPI(title="DocExtract API", version="1.0.0")
+app = FastAPI(title="DESLabs API", version="1.0.0")
 
 ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 

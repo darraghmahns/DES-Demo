@@ -1,5 +1,4 @@
-"""Abstract OCR engine interface for D.E.S.
-
+"""
 All extraction engines (OpenAI, local VLM, etc.) must implement this interface.
 Use get_engine() to get the configured engine instance.
 """
