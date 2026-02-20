@@ -21,10 +21,23 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import httpx
+
 from schemas import PropertyEnrichment
 from cadastral_client import RegridClient
 
 log = logging.getLogger(__name__)
+
+# Module-level singleton — reuses TCP connections across lookups
+_regrid_client: RegridClient | None = None
+
+
+def _get_regrid_client() -> RegridClient:
+    """Return a shared RegridClient (lazy-initialized, connection-pooled)."""
+    global _regrid_client
+    if _regrid_client is None:
+        _regrid_client = RegridClient()
+    return _regrid_client
 
 
 # ---------------------------------------------------------------------------
@@ -109,21 +122,19 @@ async def enrich_property(address: dict[str, Any]) -> PropertyEnrichment | None:
     now = datetime.now(timezone.utc).isoformat()
 
     # Run synchronous HTTP call in a thread to avoid blocking the event loop
-    client = RegridClient()
+    client = _get_regrid_client()
     try:
         result = await asyncio.to_thread(
             client.lookup_by_address, street, city, state, zip_code,
         )
         log.info("Regrid lookup result: %s", result)
-    except Exception:
-        log.exception("Regrid lookup failed for %s, %s, %s", street, city, state)
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        log.error("Regrid lookup failed for %s, %s, %s: %s", street, city, state, exc)
         return PropertyEnrichment(
             source="regrid",
             lookup_timestamp=now,
             match_quality="none",
         )
-    finally:
-        client.close()
 
     if not result:
         return PropertyEnrichment(
@@ -156,18 +167,16 @@ async def lookup_by_parcel_id(parcel_id: str) -> PropertyEnrichment | None:
         return None
 
     now = datetime.now(timezone.utc).isoformat()
-    client = RegridClient()
+    client = _get_regrid_client()
     try:
         result = await asyncio.to_thread(client.lookup_by_parcel_id, parcel_id)
-    except Exception:
-        log.exception("Regrid parcel ID lookup failed for %s", parcel_id)
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        log.error("Regrid parcel ID lookup failed for %s: %s", parcel_id, exc)
         return PropertyEnrichment(
             source="regrid",
             lookup_timestamp=now,
             match_quality="none",
         )
-    finally:
-        client.close()
 
     if not result:
         return PropertyEnrichment(

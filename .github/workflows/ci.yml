@@ -23,10 +23,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements-prod.txt
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio pytest-cov ruff
 
-      - name: Run tests
-        run: pytest tests/ -v --tb=short
+      - name: Lint with ruff
+        run: ruff check . --select=E,F,W --ignore=E501
+
+      - name: Run tests with coverage
+        run: pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=40
         env:
           OPENAI_API_KEY: "sk-test-fake-key-for-ci"
           ENGINE: openai
@@ -48,6 +51,11 @@ jobs:
 
       - name: Install frontend deps
         run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+        env:
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
 
       - name: Build frontend
         run: npm run build

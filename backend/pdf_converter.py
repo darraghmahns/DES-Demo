@@ -24,22 +24,29 @@ def check_poppler_installed() -> bool:
     if convert_from_path is None:
         return False
     try:
-        # Attempt a minimal conversion to verify poppler is accessible
         import shutil
         return shutil.which("pdftoppm") is not None
-    except Exception:
+    except OSError:
         return False
 
 
-def pdf_to_images(pdf_path: str, dpi: int = 200) -> list[Image.Image]:
+MAX_PAGES = 20  # Safety limit for memory — most purchase agreements are <20 pages
+
+
+def pdf_to_images(pdf_path: str, dpi: int = 200, max_pages: int = MAX_PAGES) -> list[Image.Image]:
     """Convert a PDF file to a list of PIL Images, one per page.
 
     Args:
         pdf_path: Path to the PDF file.
         dpi: Resolution for rendering. 200 is a good balance of quality and token cost.
+        max_pages: Maximum pages to convert (0 = unlimited). Protects against
+            large PDFs consuming excessive memory.
 
     Returns:
         List of PIL Image objects.
+
+    Raises:
+        ValueError: If the PDF exceeds *max_pages*.
     """
     if convert_from_path is None:
         print("ERROR: pdf2image is not installed. Run: pip install pdf2image", file=sys.stderr)
@@ -50,6 +57,20 @@ def pdf_to_images(pdf_path: str, dpi: int = 200) -> list[Image.Image]:
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
     if not path.suffix.lower() == ".pdf":
         raise ValueError(f"Expected a PDF file, got: {path.suffix}")
+
+    # Check page count before converting at full DPI
+    if max_pages and convert_from_path is not None:
+        try:
+            from pdf2image.pdf2image import pdfinfo_from_path
+            info = pdfinfo_from_path(str(path))
+            page_count = info.get("Pages", 0)
+            if page_count > max_pages:
+                raise ValueError(
+                    f"PDF has {page_count} pages, exceeding the {max_pages}-page limit. "
+                    f"Please use a shorter document."
+                )
+        except (OSError, KeyError):
+            pass  # If pdfinfo fails, proceed and let convert_from_path handle it
 
     images = convert_from_path(str(path), dpi=dpi)
     return images
@@ -99,7 +120,7 @@ def get_pdf_info(pdf_path: str) -> dict:
             from pdf2image.pdf2image import pdfinfo_from_path
             info = pdfinfo_from_path(str(path))
             page_count = info.get("Pages", 1)
-        except Exception:
+        except (OSError, ValueError, KeyError):
             page_count = 1
     else:
         page_count = 1

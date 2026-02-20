@@ -145,6 +145,7 @@ def extract_from_images(
         response_format={"type": "json_object"},
         temperature=0.0,
         max_tokens=4096,
+        timeout=120.0,
     )
 
     return json.loads(response.choices[0].message.content), _usage_dict(response.usage)
@@ -180,6 +181,7 @@ def extract_raw_text(images_b64: list[str], client: OpenAI) -> tuple[list[str], 
             ],
             temperature=0.0,
             max_tokens=4096,
+            timeout=120.0,
         )
 
         page_texts.append(response.choices[0].message.content)
