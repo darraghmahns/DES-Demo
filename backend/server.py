@@ -70,6 +70,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register Phase 2 routers
+from profile_routes import router as profile_router
+from profile_doc_routes import router as profile_doc_router
+
+app.include_router(profile_router)
+app.include_router(profile_doc_router)
+
 @app.on_event("startup")
 async def startup():
     await init_db()
@@ -81,7 +88,7 @@ async def shutdown():
 
 
 def _user_dotloop_tokens(user) -> dict | None:
-    """Extract Dotloop token dict from UserRecord, or None."""
+    """Extract Dotloop token dict from UserProfile, or None."""
     if not user or not getattr(user, "dotloop_tokens", None):
         return None
     t = user.dotloop_tokens
@@ -89,7 +96,7 @@ def _user_dotloop_tokens(user) -> dict | None:
 
 
 def _user_docusign_tokens(user) -> dict | None:
-    """Extract DocuSign token dict from UserRecord, or None."""
+    """Extract DocuSign token dict from UserProfile, or None."""
     if not user or not getattr(user, "docusign_tokens", None):
         return None
     t = user.docusign_tokens
@@ -1460,8 +1467,8 @@ async def dotloop_oauth_callback(
     if state and AUTH_ENABLED:
         try:
             clerk_user_id = verify_oauth_state(state)
-            from db import UserRecord, OAuthTokenSet
-            user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+            from db import UserProfile, OAuthTokenSet
+            user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
             if user:
                 user.dotloop_tokens = OAuthTokenSet(
                     access_token=token_data["access_token"],
@@ -1747,8 +1754,8 @@ async def docusign_oauth_callback(
     if state and AUTH_ENABLED:
         try:
             clerk_user_id = verify_oauth_state(state)
-            from db import UserRecord, OAuthTokenSet
-            user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+            from db import UserProfile, OAuthTokenSet
+            user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
             if user:
                 user.docusign_tokens = OAuthTokenSet(
                     access_token=token_data["access_token"],

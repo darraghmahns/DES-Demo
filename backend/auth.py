@@ -1,4 +1,4 @@
-"""Clerk JWT authentication for FastAPI.
+"""Clerk JWT authentication + magic link support for FastAPI.
 
 If CLERK_SECRET_KEY is not set, auth is disabled — all endpoints work
 without tokens (backward compatibility during development).
@@ -6,12 +6,15 @@ without tokens (backward compatibility during development).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
+import secrets
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -57,15 +60,10 @@ def _get_jwks() -> dict:
 
 
 def verify_clerk_token(token: str) -> dict:
-    """Decode and verify a Clerk JWT.
-
-    Returns the decoded claims dict with at minimum:
-      sub, email (if present), org_id (if present), org_role (if present)
-    """
+    """Decode and verify a Clerk JWT. Returns the decoded claims dict."""
     jwks = _get_jwks()
     try:
         jwks_client = jwt.PyJWKClient.__new__(jwt.PyJWKClient)
-        # Manually set the cached keys instead of fetching
         jwks_client.jwk_set = jwt.PyJWKSet.from_dict(jwks)
         unverified_header = jwt.get_unverified_header(token)
         signing_key = jwks_client.jwk_set[unverified_header["kid"]]
@@ -97,7 +95,7 @@ def _extract_bearer(request: Request) -> Optional[str]:
 
 
 async def get_current_user(request: Request):
-    """FastAPI dependency — returns UserRecord or raises 401.
+    """FastAPI dependency — returns UserProfile or raises 401.
 
     When auth is disabled (no CLERK_SECRET_KEY), returns None so
     endpoints can check `if user:` to behave differently.
@@ -114,22 +112,21 @@ async def get_current_user(request: Request):
     if not clerk_user_id:
         raise HTTPException(status_code=401, detail="Invalid token: no subject")
 
-    # Look up or auto-create UserRecord
-    from db import UserRecord
+    from db import UserProfile
 
-    user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+    user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
     if not user:
-        user = UserRecord(
+        user = UserProfile(
             clerk_user_id=clerk_user_id,
             email=claims.get("email", ""),
             name=claims.get("name", ""),
             org_id=claims.get("org_id"),
             org_name=claims.get("org_name"),
+            has_clerk_account=True,
         )
         await user.insert()
         log.info("Auto-created user %s (%s)", clerk_user_id, user.email)
     else:
-        # Update org info if changed
         changed = False
         if claims.get("org_id") and user.org_id != claims.get("org_id"):
             user.org_id = claims["org_id"]
@@ -138,6 +135,9 @@ async def get_current_user(request: Request):
         if claims.get("email") and user.email != claims.get("email"):
             user.email = claims["email"]
             changed = True
+        if not user.has_clerk_account:
+            user.has_clerk_account = True
+            changed = True
         if changed:
             await user.save()
 
@@ -145,10 +145,7 @@ async def get_current_user(request: Request):
 
 
 async def get_optional_user(request: Request):
-    """Same as get_current_user but returns None instead of 401.
-
-    Use during transition period so unauthenticated requests still work.
-    """
+    """Same as get_current_user but returns None instead of 401."""
     if not AUTH_ENABLED:
         return None
 
@@ -165,16 +162,17 @@ async def get_optional_user(request: Request):
     if not clerk_user_id:
         return None
 
-    from db import UserRecord
+    from db import UserProfile
 
-    user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+    user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
     if not user:
-        user = UserRecord(
+        user = UserProfile(
             clerk_user_id=clerk_user_id,
             email=claims.get("email", ""),
             name=claims.get("name", ""),
             org_id=claims.get("org_id"),
             org_name=claims.get("org_name"),
+            has_clerk_account=True,
         )
         await user.insert()
 
@@ -194,8 +192,6 @@ def sign_oauth_state(clerk_user_id: str) -> str:
     Format: base64(json({uid, ts})).signature
     Uses CLERK_SECRET_KEY as HMAC key.
     """
-    import base64
-
     payload = json.dumps({"uid": clerk_user_id, "ts": int(time.time())})
     payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
     sig = hmac.new(
@@ -209,8 +205,6 @@ def verify_oauth_state(state: str) -> str:
 
     Raises HTTPException on invalid/expired state.
     """
-    import base64
-
     parts = state.split(".", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
@@ -237,3 +231,98 @@ def verify_oauth_state(state: str) -> str:
         raise HTTPException(status_code=400, detail="OAuth state missing user ID")
 
     return uid
+
+
+# ---------------------------------------------------------------------------
+# Magic Link Token Generation & Validation
+# ---------------------------------------------------------------------------
+
+_MAGIC_LINK_TTL = 86400  # 24 hours
+_MAGIC_LINK_SECRET = CLERK_SECRET_KEY or "dev-magic-link-secret"
+
+
+def generate_magic_link_token() -> str:
+    """Generate a cryptographically secure random token for magic links."""
+    return secrets.token_urlsafe(48)
+
+
+def sign_magic_link(token: str, email: str, transaction_id: Optional[str] = None) -> str:
+    """Create a signed magic link payload.
+
+    Format: base64(json({token, email, txn_id, ts})).signature
+    """
+    payload_dict: dict = {
+        "token": token,
+        "email": email,
+        "ts": int(time.time()),
+    }
+    if transaction_id:
+        payload_dict["txn_id"] = transaction_id
+
+    payload = json.dumps(payload_dict)
+    payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
+    sig = hmac.new(
+        _MAGIC_LINK_SECRET.encode(), payload_b64.encode(), hashlib.sha256,
+    ).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def verify_magic_link(signed_token: str) -> dict:
+    """Verify a signed magic link and return the payload.
+
+    Returns dict with: token, email, txn_id (optional), ts.
+    Raises HTTPException on invalid/expired token.
+    """
+    parts = signed_token.split(".", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Invalid magic link")
+
+    payload_b64, sig = parts
+    expected_sig = hmac.new(
+        _MAGIC_LINK_SECRET.encode(), payload_b64.encode(), hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(sig, expected_sig):
+        raise HTTPException(status_code=400, detail="Invalid magic link signature")
+
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Malformed magic link")
+
+    ts = payload.get("ts", 0)
+    if time.time() - ts > _MAGIC_LINK_TTL:
+        raise HTTPException(status_code=400, detail="Magic link expired")
+
+    return payload
+
+
+async def get_magic_link_user(request: Request):
+    """FastAPI dependency — authenticate via magic link token in header or query.
+
+    Looks for X-Magic-Token header or ?magic_token= query param.
+    Returns UserProfile or raises 401.
+    """
+    token = request.headers.get("X-Magic-Token") or request.query_params.get("magic_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Magic link token required")
+
+    payload = verify_magic_link(token)
+    email = payload.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Magic link missing email")
+
+    from db import UserProfile
+
+    user = await UserProfile.find_one(UserProfile.email == email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found for this magic link")
+
+    # Verify the token matches what's stored on the user
+    if user.magic_link_token != payload.get("token"):
+        raise HTTPException(status_code=401, detail="Magic link token mismatch")
+
+    if user.magic_link_expires and user.magic_link_expires < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Magic link expired")
+
+    return user

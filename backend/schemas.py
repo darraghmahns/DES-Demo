@@ -1,7 +1,8 @@
-"""Pydantic models for document extraction — Dotloop, FOIA, PII, and Verification schemas."""
+"""Pydantic models for document extraction — Dotloop, FOIA, PII, Verification, and User Management schemas."""
 
 from pydantic import BaseModel, Field, computed_field
 from typing import Optional, List
+from datetime import datetime
 from enum import Enum
 
 
@@ -578,3 +579,254 @@ class ComparisonResult(BaseModel):
     minor_count: int = 0
     total_changes: int = 0
     comparison_timestamp: str = Field(default="")
+
+
+# =============================================================================
+# User Management Enums
+# =============================================================================
+
+
+class UserType(str, Enum):
+    """User role types — a user can hold multiple simultaneously."""
+    BUYER = "buyer"
+    SELLER = "seller"
+    AGENT = "agent"
+    LOAN_OFFICER = "loan_officer"
+
+
+class UserDocumentType(str, Enum):
+    """Types of documents users upload to their profile."""
+    PRE_APPROVAL_LETTER = "pre_approval_letter"
+    BANK_STATEMENT = "bank_statement"
+    PAY_STUB = "pay_stub"
+    TAX_RETURN = "tax_return"
+    W2 = "w2"
+    PROOF_OF_FUNDS = "proof_of_funds"
+    DRIVERS_LICENSE = "drivers_license"
+    PROOF_OF_INSURANCE = "proof_of_insurance"
+    OTHER = "other"
+
+
+class TransactionStatus(str, Enum):
+    """Lifecycle stages for a real estate transaction."""
+    DRAFT = "draft"
+    ACTIVE = "active"
+    UNDER_CONTRACT = "under_contract"
+    PENDING_CLOSE = "pending_close"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class ParticipantStatus(str, Enum):
+    """Status of a participant within a transaction."""
+    INVITED = "invited"
+    ACTIVE = "active"
+    REMOVED = "removed"
+
+
+class PreApprovalStatus(str, Enum):
+    """Buyer pre-approval stages."""
+    NONE = "none"
+    PRE_QUALIFIED = "pre_qualified"
+    PRE_APPROVED = "pre_approved"
+    FULLY_APPROVED = "fully_approved"
+
+
+class OwnershipType(str, Enum):
+    """Property ownership structure."""
+    SOLE = "sole"
+    JOINT = "joint"
+    TRUST = "trust"
+    LLC = "llc"
+
+
+# =============================================================================
+# User Profile Sub-Documents (Role-Specific)
+# =============================================================================
+
+
+class AgentProfile(BaseModel):
+    """Agent-specific profile fields."""
+    license_number: Optional[str] = None
+    license_state: Optional[str] = None
+    license_expiry: Optional[datetime] = None
+    brokerage_name: Optional[str] = None
+    brokerage_id: Optional[str] = None  # References BrokerageProfile
+    mls_id: Optional[str] = None
+    nar_member_id: Optional[str] = None
+    areas_served: List[str] = Field(default_factory=list)
+
+
+class BuyerProfile(BaseModel):
+    """Buyer-specific profile fields. Financial fields populated via AI extraction."""
+    pre_approval_status: PreApprovalStatus = PreApprovalStatus.NONE
+    pre_approval_amount: Optional[float] = None
+    pre_approval_lender: Optional[str] = None
+    purchase_budget_min: Optional[float] = None
+    purchase_budget_max: Optional[float] = None
+    property_preferences: Optional[dict] = None
+    first_time_buyer: Optional[bool] = None
+    employment_status: Optional[str] = None
+    employer_name: Optional[str] = None
+    annual_income: Optional[float] = None
+
+
+class SellerProfile(BaseModel):
+    """Seller-specific profile fields."""
+    property_addresses: List[dict] = Field(default_factory=list)
+    ownership_type: Optional[OwnershipType] = None
+
+
+class LoanOfficerProfile(BaseModel):
+    """Loan officer-specific profile fields."""
+    nmls_id: Optional[str] = None
+    company_name: Optional[str] = None
+    company_nmls: Optional[str] = None
+    license_states: List[str] = Field(default_factory=list)
+    loan_types_offered: List[str] = Field(default_factory=list)
+    contact_preference: Optional[str] = None
+
+
+# =============================================================================
+# Transaction Sub-Documents
+# =============================================================================
+
+
+class TransactionParticipant(BaseModel):
+    """A participant linked to a transaction."""
+    user_id: str  # UserProfile document ID
+    role: ParticipantRole
+    status: ParticipantStatus = ParticipantStatus.INVITED
+    added_at: Optional[datetime] = None
+    added_by: Optional[str] = None
+    removed_at: Optional[datetime] = None
+    profile_completion: Optional[float] = None
+
+
+class DocumentRequirement(BaseModel):
+    """A document required from a participant in a transaction."""
+    doc_type: UserDocumentType
+    role: ParticipantRole
+    required: bool = True
+    satisfied: bool = False
+    satisfied_by: Optional[str] = None  # UserDocument ID
+
+
+# =============================================================================
+# Financial Document Extraction Schemas
+# =============================================================================
+
+
+class PreApprovalExtraction(BaseModel):
+    """Structured data extracted from a pre-approval letter."""
+    lender_name: Optional[str] = None
+    lender_address: Optional[str] = None
+    lender_nmls: Optional[str] = None
+    loan_officer_name: Optional[str] = None
+    loan_officer_nmls: Optional[str] = None
+    borrower_name: Optional[str] = None
+    co_borrower_name: Optional[str] = None
+    approval_amount: Optional[float] = None
+    loan_type: Optional[str] = None
+    interest_rate: Optional[float] = None
+    approval_date: Optional[str] = None
+    expiration_date: Optional[str] = None
+    conditions: List[str] = Field(default_factory=list)
+    property_type: Optional[str] = None
+
+
+class BankStatementExtraction(BaseModel):
+    """Structured data extracted from a bank statement."""
+    institution_name: Optional[str] = None
+    account_holder: Optional[str] = None
+    account_type: Optional[str] = None
+    account_number_last4: Optional[str] = None
+    statement_period_start: Optional[str] = None
+    statement_period_end: Optional[str] = None
+    beginning_balance: Optional[float] = None
+    ending_balance: Optional[float] = None
+    total_deposits: Optional[float] = None
+    total_withdrawals: Optional[float] = None
+    average_daily_balance: Optional[float] = None
+
+
+class PayStubExtraction(BaseModel):
+    """Structured data extracted from a pay stub."""
+    employer_name: Optional[str] = None
+    employer_address: Optional[str] = None
+    employee_name: Optional[str] = None
+    employee_id: Optional[str] = None
+    pay_period_start: Optional[str] = None
+    pay_period_end: Optional[str] = None
+    pay_date: Optional[str] = None
+    pay_frequency: Optional[str] = None
+    gross_pay: Optional[float] = None
+    net_pay: Optional[float] = None
+    federal_tax: Optional[float] = None
+    state_tax: Optional[float] = None
+    ytd_gross: Optional[float] = None
+    ytd_net: Optional[float] = None
+
+
+class W2Extraction(BaseModel):
+    """Structured data extracted from a W-2 form."""
+    tax_year: Optional[int] = None
+    employer_name: Optional[str] = None
+    employer_ein: Optional[str] = None
+    employer_address: Optional[str] = None
+    employee_name: Optional[str] = None
+    employee_ssn_last4: Optional[str] = None
+    wages_tips_compensation: Optional[float] = None
+    federal_tax_withheld: Optional[float] = None
+    social_security_wages: Optional[float] = None
+    social_security_tax: Optional[float] = None
+    medicare_wages: Optional[float] = None
+    medicare_tax: Optional[float] = None
+    state: Optional[str] = None
+    state_wages: Optional[float] = None
+    state_tax_withheld: Optional[float] = None
+
+
+class ProofOfFundsExtraction(BaseModel):
+    """Structured data extracted from a proof of funds letter."""
+    institution_name: Optional[str] = None
+    account_holder: Optional[str] = None
+    letter_date: Optional[str] = None
+    account_type: Optional[str] = None
+    available_funds: Optional[float] = None
+    currency: Optional[str] = None
+    officer_name: Optional[str] = None
+    officer_title: Optional[str] = None
+    contact_phone: Optional[str] = None
+
+
+# Map document types to their extraction schema
+FINANCIAL_EXTRACTION_SCHEMAS = {
+    UserDocumentType.PRE_APPROVAL_LETTER: PreApprovalExtraction,
+    UserDocumentType.BANK_STATEMENT: BankStatementExtraction,
+    UserDocumentType.PAY_STUB: PayStubExtraction,
+    UserDocumentType.W2: W2Extraction,
+    UserDocumentType.PROOF_OF_FUNDS: ProofOfFundsExtraction,
+}
+
+
+# =============================================================================
+# Document Requirement Templates (defaults per role per transaction type)
+# =============================================================================
+
+PURCHASE_BUYER_REQUIREMENTS = [
+    DocumentRequirement(doc_type=UserDocumentType.PRE_APPROVAL_LETTER, role=ParticipantRole.BUYER, required=True),
+    DocumentRequirement(doc_type=UserDocumentType.BANK_STATEMENT, role=ParticipantRole.BUYER, required=True),
+    DocumentRequirement(doc_type=UserDocumentType.PROOF_OF_FUNDS, role=ParticipantRole.BUYER, required=True),
+    DocumentRequirement(doc_type=UserDocumentType.PAY_STUB, role=ParticipantRole.BUYER, required=False),
+    DocumentRequirement(doc_type=UserDocumentType.W2, role=ParticipantRole.BUYER, required=False),
+    DocumentRequirement(doc_type=UserDocumentType.DRIVERS_LICENSE, role=ParticipantRole.BUYER, required=True),
+]
+
+PURCHASE_SELLER_REQUIREMENTS = [
+    DocumentRequirement(doc_type=UserDocumentType.PROOF_OF_INSURANCE, role=ParticipantRole.SELLER, required=False),
+    DocumentRequirement(doc_type=UserDocumentType.DRIVERS_LICENSE, role=ParticipantRole.SELLER, required=True),
+]
+
+DEFAULT_PURCHASE_REQUIREMENTS = PURCHASE_BUYER_REQUIREMENTS + PURCHASE_SELLER_REQUIREMENTS
