@@ -312,6 +312,11 @@ async def dotloop_oauth_callback(
             auth=(client_id, client_secret),
             timeout=15.0,
         )
+        if resp.status_code != 200:
+            log.error(
+                "Dotloop token exchange HTTP %s – redirect_uri=%s body=%s",
+                resp.status_code, redirect_uri, resp.text[:500],
+            )
         resp.raise_for_status()
         token_data = resp.json()
     except Exception as e:
