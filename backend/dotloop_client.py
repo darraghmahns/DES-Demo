@@ -117,6 +117,7 @@ class DotloopClient:
             refresh_token=self._refresh_token or "",
             client_id=self._client_id or "",
             client_secret=self._client_secret or "",
+            use_query_params=True,
         )
         if not data:
             return False
