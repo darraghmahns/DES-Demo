@@ -51,3 +51,5 @@ backend/test_docs/financial/
 frontend/e2e/screenshots/
 frontend/test-results/
 frontend/playwright-report/
+
+frontend/.env
