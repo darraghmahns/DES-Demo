@@ -790,13 +790,40 @@ export async function lookupProperty(
 // Onboarding
 // ---------------------------------------------------------------------------
 
+export type OnboardingStepId =
+  | 'welcome'
+  | 'profile'
+  | 'ai_chat'
+  | 'documents'
+  | 'extraction'
+  | 'complete';
+
+export interface OnboardingStepStatus {
+  step_id: OnboardingStepId;
+  status: 'pending' | 'completed' | 'skipped';
+  completed_at: string | null;
+}
+
 export interface OnboardingStatus {
+  version: number;
   completed: boolean;
   completed_at: string | null;
-  skipped_steps: string[];
+  current_step: number;
+  steps: OnboardingStepStatus[];
   dotloop_connected: boolean;
   docusign_connected: boolean;
 }
+
+/** Default fail-open status — marks onboarding completed so it never blocks the app. */
+const DEFAULT_ONBOARDING_STATUS: OnboardingStatus = {
+  version: 2,
+  completed: true,
+  completed_at: null,
+  current_step: 0,
+  steps: [],
+  dotloop_connected: false,
+  docusign_connected: false,
+};
 
 export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
   try {
@@ -805,12 +832,28 @@ export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
     });
     if (!resp.ok) {
       // Fail open: treat as completed so onboarding doesn't block the app
-      return { completed: true, completed_at: null, skipped_steps: [], dotloop_connected: false, docusign_connected: false };
+      return DEFAULT_ONBOARDING_STATUS;
     }
     return resp.json();
   } catch {
-    return { completed: true, completed_at: null, skipped_steps: [], dotloop_connected: false, docusign_connected: false };
+    return DEFAULT_ONBOARDING_STATUS;
   }
+}
+
+export async function updateOnboardingStep(
+  stepId: OnboardingStepId,
+  status: 'completed' | 'skipped',
+): Promise<OnboardingStatus> {
+  const resp = await fetch(`${API_BASE}/api/onboarding/step`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({ step_id: stepId, status }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Failed to update onboarding step' }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json();
 }
 
 export async function completeOnboarding(skippedSteps: string[]): Promise<void> {
