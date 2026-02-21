@@ -59,8 +59,6 @@ services:
   - type: web
     name: des-demo-frontend
     runtime: static
-    plan: starter
-    region: oregon
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
