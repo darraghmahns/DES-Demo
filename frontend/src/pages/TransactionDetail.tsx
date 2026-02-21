@@ -229,7 +229,6 @@ export function TransactionDetail() {
             {activeTab === 'overview' && (
               <OverviewTab
                 transaction={transaction}
-                completion={completion}
                 onUpdate={update}
               />
             )}
@@ -256,10 +255,9 @@ export function TransactionDetail() {
 /* ---- Tab Components ---- */
 
 function OverviewTab({
-  transaction, completion, onUpdate,
+  transaction, onUpdate,
 }: {
   transaction: NonNullable<ReturnType<typeof useTransactionDetail>['transaction']>;
-  completion: ReturnType<typeof useTransactionDetail>['completion'];
   onUpdate: ReturnType<typeof useTransactionDetail>['update'];
 }) {
   const [editing, setEditing] = useState(false);

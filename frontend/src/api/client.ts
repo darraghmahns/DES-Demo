@@ -10,7 +10,7 @@ export function setAuthTokenProvider(getter: () => Promise<string | null>) {
 
 export { _getAuthToken };
 
-async function authHeaders(): Promise<HeadersInit> {
+async function authHeaders(): Promise<Record<string, string>> {
   if (!_getAuthToken) return {};
   const token = await _getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
