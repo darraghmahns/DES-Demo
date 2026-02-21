@@ -21,6 +21,19 @@ from auth import (
     sign_oauth_state,
     verify_oauth_state,
 )
+
+
+def _external_base_url(request: Request) -> str:
+    """Derive the external base URL, respecting X-Forwarded-Proto behind a reverse proxy."""
+    base = str(request.base_url).rstrip("/")
+    # Behind a reverse proxy (Render, etc.), base_url reports http:// but
+    # the real external URL is https://.  Honour the forwarded header.
+    proto = request.headers.get("x-forwarded-proto")
+    if proto == "https" and base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
+    return base
+
+
 from dotloop_connector import (
     is_configured as dotloop_configured,
     list_dotloop_loops,
@@ -244,7 +257,7 @@ async def dotloop_oauth_connect(request: Request, user=Depends(get_optional_user
 
     redirect_uri = os.getenv(
         "DOTLOOP_REDIRECT_URI",
-        f"{str(request.base_url).rstrip('/')}/api/dotloop/oauth/callback",
+        f"{_external_base_url(request)}/api/dotloop/oauth/callback",
     )
 
     # Include signed state with user ID so callback can store tokens on the right user
@@ -285,7 +298,7 @@ async def dotloop_oauth_callback(
     client_secret = os.getenv("DOTLOOP_CLIENT_SECRET")
     redirect_uri = os.getenv(
         "DOTLOOP_REDIRECT_URI",
-        f"{str(request.base_url).rstrip('/')}/api/dotloop/oauth/callback",
+        f"{_external_base_url(request)}/api/dotloop/oauth/callback",
     )
 
     try:
@@ -514,7 +527,7 @@ async def docusign_oauth_connect(request: Request, user=Depends(get_optional_use
 
     redirect_uri = os.getenv(
         "DOCUSIGN_REDIRECT_URI",
-        f"{str(request.base_url).rstrip('/')}/api/docusign/oauth/callback",
+        f"{_external_base_url(request)}/api/docusign/oauth/callback",
     )
     params: dict = {
         "response_type": "code",
@@ -550,7 +563,7 @@ async def docusign_oauth_callback(
     client_secret = os.getenv("DOCUSIGN_CLIENT_SECRET")
     redirect_uri = os.getenv(
         "DOCUSIGN_REDIRECT_URI",
-        f"{str(request.base_url).rstrip('/')}/api/docusign/oauth/callback",
+        f"{_external_base_url(request)}/api/docusign/oauth/callback",
     )
 
     try:
