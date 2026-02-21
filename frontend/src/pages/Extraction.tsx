@@ -1,4 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
+import { Link } from 'react-router-dom';
+import { useOnboardingContext } from '../context/OnboardingContext';
+import { useIntegrations } from '../hooks/useIntegrations';
 import {
   fetchDocuments,
   getDocumentUrl,
@@ -7,16 +10,12 @@ import {
   fetchActiveTasks,
   fetchAllTasks,
   uploadFile,
-  checkDotloopStatus,
   syncToDotloop,
-  getDotloopConnectUrl,
   fetchDotloopLoops,
-  checkDocuSignStatus,
   syncToDocuSign,
   voidDocuSignEnvelope,
   deleteAllDocuSignEnvelopes,
   archiveAllDotloopLoops,
-  getDocuSignConnectUrl,
   fetchDocuSignEnvelopes,
   fetchAggregateUsage,
   computeFileHash,
@@ -142,6 +141,7 @@ function flattenObject(
 // ---------------------------------------------------------------------------
 
 export function ExtractionPage() {
+  const { markStepAction } = useOnboardingContext();
   // Core
   const [mode, setMode] = useState<Mode>('real_estate');
   const [activeView, setActiveView] = useState<ViewId>('extraction');
@@ -181,8 +181,10 @@ export function ExtractionPage() {
   const currentAbortRef = useRef<(() => void) | null>(null);
   const modeDocRef = useRef<Partial<Record<Mode, string | null>>>({});
 
+  // Integrations (shared hook — connection management lives on Profile page)
+  const { dotloopConnected: dotloopConfigured, docusignConnected: docusignConfigured } = useIntegrations();
+
   // Dotloop
-  const [dotloopConfigured, setDotloopConfigured] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<DotloopSyncResult | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -195,7 +197,6 @@ export function ExtractionPage() {
   const [propertyEnrichment, setPropertyEnrichment] = useState<PropertyEnrichmentEvent | null>(null);
 
   // DocuSign
-  const [docusignConfigured, setDocusignConfigured] = useState(false);
   const [isDocusignSyncing, setIsDocusignSyncing] = useState(false);
   const [docusignSyncResult, setDocusignSyncResult] = useState<DocuSignSyncResult | null>(null);
   const [docusignSyncError, setDocusignSyncError] = useState<string | null>(null);
@@ -497,6 +498,7 @@ export function ExtractionPage() {
       resetResults();
       setSteps(getSteps(mode, propertyEnrichmentConfigured));
       checkDocCache(result.name);
+      markStepAction('file_uploaded');
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -602,10 +604,8 @@ export function ExtractionPage() {
   // Effects
   // ---------------------------------------------------------------------------
 
-  // Mount: check integrations, load usage, reconnect to running tasks
+  // Mount: check property enrichment, load usage, reconnect to running tasks
   useEffect(() => {
-    checkDotloopStatus().then(setDotloopConfigured);
-    checkDocuSignStatus().then(setDocusignConfigured);
     checkPropertyEnrichmentStatus().then(setPropertyEnrichmentConfigured);
     fetchAggregateUsage().then(setAggregateUsage).catch(() => {});
 
@@ -626,25 +626,6 @@ export function ExtractionPage() {
         }
       }
     }).catch(() => {});
-
-    // Handle OAuth redirects
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('dotloop_connected') === 'true') {
-      checkDotloopStatus().then(setDotloopConfigured);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-    if (params.get('dotloop_error')) {
-      setSyncError(`Dotloop connection failed: ${params.get('dotloop_error')}`);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-    if (params.get('docusign_connected') === 'true') {
-      checkDocuSignStatus().then(setDocusignConfigured);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-    if (params.get('docusign_error')) {
-      setDocusignSyncError(`DocuSign connection failed: ${params.get('docusign_error')}`);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
   }, []);
 
   // Load documents when mode changes
@@ -1151,12 +1132,12 @@ export function ExtractionPage() {
             </div>
           )}
 
-          {/* Dotloop Section — connect button always visible in real_estate mode */}
+          {/* Dotloop Section — link to Profile when not connected */}
           {mode === 'real_estate' && !dotloopConfigured && (
             <div className="dotloop-section">
-              <a href={getDotloopConnectUrl()} className="dotloop-connect-btn">
-                <span className="dotloop-icon">&#x1F517;</span> Connect to Dotloop
-              </a>
+              <Link to="/profile" className="integration-profile-link">
+                <span className="dotloop-icon">&#x1F517;</span> Dotloop not connected &mdash; Set up in Profile &rarr;
+              </Link>
             </div>
           )}
 
@@ -1247,12 +1228,12 @@ export function ExtractionPage() {
             </div>
           )}
 
-          {/* DocuSign Section — connect button when not configured */}
+          {/* DocuSign Section — link to Profile when not connected */}
           {mode === 'real_estate' && !docusignConfigured && (
             <div className="dotloop-section">
-              <a href={getDocuSignConnectUrl()} className="dotloop-connect-btn">
-                <span className="dotloop-icon">&#x1F4DD;</span> Connect to DocuSign
-              </a>
+              <Link to="/profile" className="integration-profile-link">
+                <span className="dotloop-icon">&#x1F4DD;</span> DocuSign not connected &mdash; Set up in Profile &rarr;
+              </Link>
             </div>
           )}
 
@@ -2038,14 +2019,9 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
         <div className="loops-empty">
           <div className="loops-empty-icon">&#x1F517;</div>
           <div>Connect Dotloop or DocuSign to browse your loops and envelopes</div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <a href={getDotloopConnectUrl()} className="dotloop-connect-btn" style={{ flex: 1 }}>
-              Connect Dotloop
-            </a>
-            <a href={getDocuSignConnectUrl()} className="dotloop-connect-btn" style={{ flex: 1 }}>
-              Connect DocuSign
-            </a>
-          </div>
+          <Link to="/profile" className="integration-profile-link" style={{ marginTop: 12 }}>
+            Set up integrations in Profile →
+          </Link>
         </div>
       )}
 

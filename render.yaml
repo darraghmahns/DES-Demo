@@ -1,0 +1,75 @@
+services:
+  # ── Backend API (FastAPI + Docker) ──
+  - type: web
+    name: des-demo-api
+    runtime: docker
+    plan: starter
+    region: oregon
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/documents
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: des
+      - key: ENGINE
+        value: openai
+      # Clerk auth
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_JWKS_URL
+        sync: false
+      - key: CLERK_WEBHOOK_SECRET
+        sync: false
+      # Frontend URL (for OAuth callback redirects)
+      - key: FRONTEND_URL
+        sync: false
+      # Dotloop integration
+      - key: DOTLOOP_CLIENT_ID
+        sync: false
+      - key: DOTLOOP_CLIENT_SECRET
+        sync: false
+      - key: DOTLOOP_API_TOKEN
+        sync: false
+      - key: DOTLOOP_REFRESH_TOKEN
+        sync: false
+      - key: DOTLOOP_PROFILE_ID
+        sync: false
+      # DocuSign integration
+      - key: DOCUSIGN_CLIENT_ID
+        sync: false
+      - key: DOCUSIGN_CLIENT_SECRET
+        sync: false
+      - key: DOCUSIGN_ACCOUNT_ID
+        sync: false
+      - key: DOCUSIGN_USER_ID
+        sync: false
+      - key: DOCUSIGN_AUTH_SERVER
+        value: account-d.docusign.com
+      - key: DOCUSIGN_BASE_URL
+        value: https://demo.docusign.net/restapi
+      # CORS — must include frontend static site URL
+      - key: CORS_ORIGINS
+        sync: false
+
+  # ── Frontend (React + Vite static site) ──
+  - type: web
+    name: des-demo-frontend
+    runtime: static
+    plan: starter
+    region: oregon
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: VITE_API_BASE
+        sync: false

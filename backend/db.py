@@ -110,7 +110,6 @@ class UserProfile(Document):
     name: str = ""
     phone: Optional[str] = None
     address: Optional[dict] = None  # {street, city, state, zip}
-    profile_photo_url: Optional[str] = None
 
     # Multi-role support
     user_types: List[UserType] = Field(default_factory=list)

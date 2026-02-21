@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements-prod.txt
 
 # App source
 COPY *.py ./
+COPY routers/ ./routers/
 COPY test_docs/ ./test_docs/
 COPY dist/.gitkeep ./dist/
 

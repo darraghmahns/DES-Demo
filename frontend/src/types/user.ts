@@ -61,7 +61,6 @@ export interface UserProfile {
   name: string;
   phone?: string;
   address?: Record<string, string>;
-  profile_photo_url?: string;
   user_types: UserType[];
   agent_profile?: AgentProfile;
   buyer_profile?: BuyerProfile;

@@ -35,7 +35,6 @@ class ProfileUpdateRequest(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[dict] = None
-    profile_photo_url: Optional[str] = None
 
 
 class AddRoleRequest(BaseModel):
@@ -190,8 +189,6 @@ async def update_profile(body: ProfileUpdateRequest, user=Depends(get_current_us
         u.phone = body.phone
     if body.address is not None:
         u.address = body.address
-    if body.profile_photo_url is not None:
-        u.profile_photo_url = body.profile_photo_url
 
     await u.save()
     return _serialize_profile(u)
@@ -320,7 +317,6 @@ async def search_users(email: str, user=Depends(get_current_user)):
             "email": u.email,
             "name": u.name,
             "user_types": [t.value for t in u.user_types],
-            "profile_photo_url": u.profile_photo_url,
         }
         for u in results
     ]

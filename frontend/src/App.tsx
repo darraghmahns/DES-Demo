@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { setAuthTokenProvider } from './api';
+import { setAuthTokenProvider as setClientAuthTokenProvider } from './api/client';
 
 import { AppShell } from './components/layout/AppShell';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
@@ -21,7 +22,9 @@ const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 function AuthTokenWiring() {
   const { getToken } = useAuth();
   useEffect(() => {
-    setAuthTokenProvider(() => getToken());
+    const provider = () => getToken();
+    setAuthTokenProvider(provider);
+    setClientAuthTokenProvider(provider);
   }, [getToken]);
   return null;
 }

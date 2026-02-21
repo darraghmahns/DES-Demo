@@ -94,6 +94,41 @@ def _extract_bearer(request: Request) -> Optional[str]:
     return None
 
 
+async def _find_or_create_user(clerk_user_id: str, claims: dict) -> "UserProfile":
+    """Find existing user or create new one from JWT claims. Sync email/org on every call."""
+    from db import UserProfile
+
+    user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
+    if user:
+        changed = False
+        if claims.get("email") and user.email != claims.get("email"):
+            user.email = claims["email"]
+            changed = True
+        if claims.get("org_id") and user.org_id != claims.get("org_id"):
+            user.org_id = claims["org_id"]
+            user.org_name = claims.get("org_name")
+            changed = True
+        if not user.has_clerk_account:
+            user.has_clerk_account = True
+            changed = True
+        if changed:
+            await user.save()
+        return user
+
+    # Create new user — seed name from Clerk (one-time only)
+    user = UserProfile(
+        clerk_user_id=clerk_user_id,
+        email=claims.get("email", ""),
+        name=claims.get("name", ""),
+        org_id=claims.get("org_id"),
+        org_name=claims.get("org_name"),
+        has_clerk_account=True,
+    )
+    await user.insert()
+    log.info("Auto-created user %s (%s)", clerk_user_id, user.email)
+    return user
+
+
 async def get_current_user(request: Request):
     """FastAPI dependency — returns UserProfile or raises 401.
 
@@ -112,36 +147,7 @@ async def get_current_user(request: Request):
     if not clerk_user_id:
         raise HTTPException(status_code=401, detail="Invalid token: no subject")
 
-    from db import UserProfile
-
-    user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
-    if not user:
-        user = UserProfile(
-            clerk_user_id=clerk_user_id,
-            email=claims.get("email", ""),
-            name=claims.get("name", ""),
-            org_id=claims.get("org_id"),
-            org_name=claims.get("org_name"),
-            has_clerk_account=True,
-        )
-        await user.insert()
-        log.info("Auto-created user %s (%s)", clerk_user_id, user.email)
-    else:
-        changed = False
-        if claims.get("org_id") and user.org_id != claims.get("org_id"):
-            user.org_id = claims["org_id"]
-            user.org_name = claims.get("org_name")
-            changed = True
-        if claims.get("email") and user.email != claims.get("email"):
-            user.email = claims["email"]
-            changed = True
-        if not user.has_clerk_account:
-            user.has_clerk_account = True
-            changed = True
-        if changed:
-            await user.save()
-
-    return user
+    return await _find_or_create_user(clerk_user_id, claims)
 
 
 async def get_optional_user(request: Request):
@@ -162,21 +168,7 @@ async def get_optional_user(request: Request):
     if not clerk_user_id:
         return None
 
-    from db import UserProfile
-
-    user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
-    if not user:
-        user = UserProfile(
-            clerk_user_id=clerk_user_id,
-            email=claims.get("email", ""),
-            name=claims.get("name", ""),
-            org_id=claims.get("org_id"),
-            org_name=claims.get("org_name"),
-            has_clerk_account=True,
-        )
-        await user.insert()
-
-    return user
+    return await _find_or_create_user(clerk_user_id, claims)
 
 
 # ---------------------------------------------------------------------------

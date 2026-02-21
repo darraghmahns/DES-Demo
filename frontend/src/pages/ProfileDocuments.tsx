@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useDocumentUpload } from '../hooks/useDocumentUpload';
+import { useOnboardingContext } from '../context/OnboardingContext';
 import { FileUpload } from '../components/common/FileUpload';
 import type { UserDocumentType } from '../types/user';
 
@@ -47,6 +48,7 @@ export function ProfileDocuments() {
     reExtract,
   } = useDocumentUpload();
 
+  const { markStepAction } = useOnboardingContext();
   const [selectedDocType, setSelectedDocType] = useState<UserDocumentType>('pre_approval_letter');
   const [expandedDoc, setExpandedDoc] = useState<string | null>(null);
 
@@ -57,6 +59,7 @@ export function ProfileDocuments() {
   const handleFileSelect = async (file: File) => {
     try {
       await upload(file, selectedDocType);
+      markStepAction('document_uploaded');
     } catch {
       // Error is handled by the hook
     }

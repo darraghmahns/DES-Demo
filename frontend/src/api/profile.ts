@@ -13,7 +13,6 @@ export interface ProfileUpdateRequest {
   name?: string;
   phone?: string;
   address?: Record<string, string>;
-  profile_photo_url?: string;
 }
 
 export interface UserSearchResult {
@@ -21,7 +20,6 @@ export interface UserSearchResult {
   email: string;
   name: string;
   user_types: UserType[];
-  profile_photo_url?: string;
 }
 
 export async function getProfile(): Promise<UserProfile> {

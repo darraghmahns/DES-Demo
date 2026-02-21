@@ -106,6 +106,11 @@ from chat_routes import router as chat_router
 
 app.include_router(chat_router)
 
+# Register Clerk webhook router
+from clerk_webhook import router as clerk_webhook_router
+
+app.include_router(clerk_webhook_router)
+
 # ---------------------------------------------------------------------------
 # Onboarding
 # ---------------------------------------------------------------------------
@@ -362,6 +367,23 @@ async def test_reset_onboarding(user=Depends(get_current_user)):
         "steps": _default_v2_steps(),
     }
     return {"reset": True, "version": 2}
+
+
+@app.post("/api/test/complete-onboarding")
+async def test_complete_onboarding(user=Depends(get_current_user)):
+    """Mark onboarding as completed for e2e testing. Only works when AUTH_ENABLED=False.
+
+    Clears the e2e reset flag, returning to the default state where auth-disabled
+    mode returns completed=True. This ensures subsequent test specs don't see the wizard.
+    """
+    global _e2e_onboarding_reset, _e2e_onboarding_state
+
+    if AUTH_ENABLED:
+        raise HTTPException(status_code=403, detail="Only available when AUTH_ENABLED=False")
+
+    _e2e_onboarding_reset = False
+    _e2e_onboarding_state = {}
+    return {"completed": True, "version": 2}
 
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_docs"

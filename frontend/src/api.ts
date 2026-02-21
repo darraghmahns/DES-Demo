@@ -461,6 +461,24 @@ export function getDocuSignConnectUrl(): string {
   return `${API_BASE}/api/docusign/oauth/connect`;
 }
 
+export async function disconnectDotloop(): Promise<{ status: string }> {
+  const resp = await fetch(`${API_BASE}/api/dotloop/oauth/disconnect`, {
+    method: 'DELETE',
+    headers: { ...await authHeaders() },
+  });
+  if (!resp.ok) throw new Error('Failed to disconnect Dotloop');
+  return resp.json();
+}
+
+export async function disconnectDocuSign(): Promise<{ status: string }> {
+  const resp = await fetch(`${API_BASE}/api/docusign/oauth/disconnect`, {
+    method: 'DELETE',
+    headers: { ...await authHeaders() },
+  });
+  if (!resp.ok) throw new Error('Failed to disconnect DocuSign');
+  return resp.json();
+}
+
 export interface DocuSignEnvelope {
   envelopeId: string;
   emailSubject: string;

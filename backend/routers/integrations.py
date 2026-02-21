@@ -275,7 +275,7 @@ async def dotloop_oauth_callback(
 
     if error:
         desc = error_description or error
-        return RedirectResponse(url=f"{frontend_url}?dotloop_error={desc}")
+        return RedirectResponse(url=f"{frontend_url}/profile?dotloop_error={desc}")
 
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
@@ -302,7 +302,7 @@ async def dotloop_oauth_callback(
         token_data = resp.json()
     except Exception as e:
         log.error("Dotloop token exchange failed: %s", e)
-        return RedirectResponse(url=f"{frontend_url}?dotloop_error=token_exchange_failed")
+        return RedirectResponse(url=f"{frontend_url}/profile?dotloop_error=token_exchange_failed")
 
     # If we have a signed state, store tokens on the user's record
     if state and AUTH_ENABLED:
@@ -326,7 +326,18 @@ async def dotloop_oauth_callback(
         refresh_token=token_data.get("refresh_token"),
     )
 
-    return RedirectResponse(url=f"{frontend_url}?dotloop_connected=true")
+    return RedirectResponse(url=f"{frontend_url}/profile?dotloop_connected=true")
+
+
+@router.delete("/api/dotloop/oauth/disconnect")
+async def dotloop_oauth_disconnect(user=Depends(get_current_user)):
+    """Remove Dotloop OAuth tokens from the user's profile."""
+    if not user or not user.dotloop_tokens:
+        return {"status": "not_connected"}
+    user.dotloop_tokens = None
+    await user.save()
+    log.info("Disconnected Dotloop for user %s", getattr(user, "clerk_user_id", "unknown"))
+    return {"status": "disconnected"}
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +539,7 @@ async def docusign_oauth_callback(
     frontend_url = FRONTEND_URL or "http://localhost:5173"
 
     if error:
-        return RedirectResponse(url=f"{frontend_url}?docusign_error={error}")
+        return RedirectResponse(url=f"{frontend_url}/profile?docusign_error={error}")
 
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
@@ -555,7 +566,7 @@ async def docusign_oauth_callback(
         token_data = resp.json()
     except Exception as e:
         log.error("DocuSign token exchange failed: %s", e)
-        return RedirectResponse(url=f"{frontend_url}?docusign_error=token_exchange_failed")
+        return RedirectResponse(url=f"{frontend_url}/profile?docusign_error=token_exchange_failed")
 
     # Discover account_id from userinfo
     account_id = None
@@ -602,7 +613,18 @@ async def docusign_oauth_callback(
         account_id=account_id,
     )
 
-    return RedirectResponse(url=f"{frontend_url}?docusign_connected=true")
+    return RedirectResponse(url=f"{frontend_url}/profile?docusign_connected=true")
+
+
+@router.delete("/api/docusign/oauth/disconnect")
+async def docusign_oauth_disconnect(user=Depends(get_current_user)):
+    """Remove DocuSign OAuth tokens from the user's profile."""
+    if not user or not user.docusign_tokens:
+        return {"status": "not_connected"}
+    user.docusign_tokens = None
+    await user.save()
+    log.info("Disconnected DocuSign for user %s", getattr(user, "clerk_user_id", "unknown"))
+    return {"status": "disconnected"}
 
 
 # ---------------------------------------------------------------------------

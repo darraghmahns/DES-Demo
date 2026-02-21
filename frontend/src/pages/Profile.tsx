@@ -2,7 +2,11 @@
 
 import { useState } from 'react';
 import { useProfile } from '../hooks/useProfile';
+import { useOnboardingContext } from '../context/OnboardingContext';
+import { useClerkAvatar } from '../hooks/useClerkAvatar';
+import { useIntegrations } from '../hooks/useIntegrations';
 import { RoleSelector } from '../components/profile/RoleSelector';
+import { IntegrationsSection } from '../components/profile/IntegrationsSection';
 import { AgentForm } from '../components/profile/AgentForm';
 import { BuyerForm } from '../components/profile/BuyerForm';
 import { SellerForm } from '../components/profile/SellerForm';
@@ -31,6 +35,9 @@ export function Profile() {
     removeRole,
   } = useProfile();
 
+  const { markStepAction } = useOnboardingContext();
+  const { avatarUrl } = useClerkAvatar();
+  const { dotloopConnected, docusignConnected, refresh: refreshIntegrations } = useIntegrations();
   const [viewMode, setViewMode] = useState<ViewMode>('form');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -62,6 +69,7 @@ export function Profile() {
           ? { street, city, state, zip }
           : undefined,
       });
+      if (name) markStepAction('name_set');
     } finally {
       setSharedSaving(false);
     }
@@ -133,6 +141,18 @@ export function Profile() {
           {/* Shared Fields */}
           <section className="profile-section">
             <h2>Personal Information</h2>
+            {avatarUrl && (
+              <div className="profile-avatar-row">
+                <img
+                  src={avatarUrl}
+                  alt="Profile"
+                  className="profile-avatar"
+                />
+                <span className="profile-avatar-hint">
+                  Managed through your login provider
+                </span>
+              </div>
+            )}
             <div className="form-grid">
               <label>
                 <span>Full Name</span>
@@ -209,11 +229,18 @@ export function Profile() {
             </button>
           </section>
 
+          {/* Connected Services */}
+          <IntegrationsSection
+            dotloopConnected={dotloopConnected}
+            docusignConnected={docusignConnected}
+            onRefresh={refreshIntegrations}
+          />
+
           {/* Role Management */}
           <section className="profile-section">
             <RoleSelector
               currentRoles={profile?.user_types || []}
-              onAddRole={addRole}
+              onAddRole={(role) => { addRole(role); markStepAction('role_selected'); }}
               onRemoveRole={removeRole}
             />
           </section>

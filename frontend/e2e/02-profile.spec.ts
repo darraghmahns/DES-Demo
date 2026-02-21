@@ -20,8 +20,19 @@ test.describe('Profile Management', () => {
     await expect(page.locator('.app-shell-content h1')).toHaveText('My Profile');
     await screenshot(page, 'profile-initial');
 
+    // ── Verify field editability ──
+    // Email field should be present and disabled (read-only — managed by Clerk)
+    const emailInput = page.locator('input[type="email"]');
+    await expect(emailInput).toBeVisible();
+    await expect(emailInput).toBeDisabled();
+
+    // Name field should be present and editable (MongoDB owns name)
+    const nameInput = page.locator('input[placeholder="Your full name"]');
+    await expect(nameInput).toBeVisible();
+    await expect(nameInput).toBeEnabled();
+
     // ── Fill Personal Information ──
-    await page.locator('input[placeholder="Your full name"]').fill('Jane Marie Doe');
+    await nameInput.fill('Jane Marie Doe');
     await page.locator('input[placeholder="(555) 555-5555"]').fill('(303) 555-7890');
     await page.locator('input[placeholder="123 Main St"]').fill('456 Elm Avenue');
     await page.locator('input[placeholder="City"]').fill('Denver');
@@ -35,6 +46,13 @@ test.describe('Profile Management', () => {
     await page.waitForLoadState('networkidle');
     await pace(1000);
     await screenshot(page, 'profile-personal-saved');
+
+    // Verify name persisted after save (reload page and check value)
+    await page.reload();
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('input[placeholder="Your full name"]')).toHaveValue('Jane Marie Doe');
+    // Email should still be disabled after reload
+    await expect(page.locator('input[type="email"]')).toBeDisabled();
 
     // ── Add Agent Role ──
     const agentChip = page.locator('.role-chip', { hasText: 'Agent' });
