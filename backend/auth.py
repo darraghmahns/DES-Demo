@@ -322,7 +322,7 @@ async def get_magic_link_user(request: Request):
     if user.magic_link_token != payload.get("token"):
         raise HTTPException(status_code=401, detail="Magic link token mismatch")
 
-    if user.magic_link_expires and user.magic_link_expires < datetime.now(timezone.utc):
+    if user.magic_link_expires and user.magic_link_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Magic link expired")
 
     return user

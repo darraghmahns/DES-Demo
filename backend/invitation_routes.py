@@ -171,7 +171,7 @@ async def validate_invitation(token: str):
     if invitee.magic_link_token != payload.get("token"):
         raise HTTPException(status_code=401, detail="Invalid or used magic link")
 
-    if invitee.magic_link_expires and invitee.magic_link_expires < datetime.now(timezone.utc):
+    if invitee.magic_link_expires and invitee.magic_link_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Magic link expired")
 
     result = {

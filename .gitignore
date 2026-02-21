@@ -46,3 +46,8 @@ backend/profile_uploads/
 
 # Generated test PDFs (recreated via generate_test_docs.py)
 backend/test_docs/financial/
+
+# Playwright E2E test artifacts
+frontend/e2e/screenshots/
+frontend/test-results/
+frontend/playwright-report/

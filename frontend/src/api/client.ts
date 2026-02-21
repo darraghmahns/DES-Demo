@@ -1,6 +1,6 @@
 /** Base HTTP client for D.E.S. API calls. */
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
 let _getAuthToken: (() => Promise<string | null>) | null = null;
 

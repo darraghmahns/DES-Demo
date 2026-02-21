@@ -149,8 +149,10 @@ async def upload_document(
         doc.extraction_status = "processing"
         await doc.save()
 
-    result = _serialize_doc(doc)
-    result["duplicate"] = False
+    result = {
+        "document": _serialize_doc(doc),
+        "duplicate": False,
+    }
     if extraction_id:
         result["extraction_id"] = extraction_id
     return result

@@ -60,7 +60,7 @@ load_dotenv()
 
 app = FastAPI(title="DESLabs API", version="1.0.0")
 
-ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,6 +83,11 @@ from invitation_routes import router as invitation_router
 
 app.include_router(transaction_router)
 app.include_router(invitation_router)
+
+# Register Phase 4 router
+from chat_routes import router as chat_router
+
+app.include_router(chat_router)
 
 @app.on_event("startup")
 async def startup():
