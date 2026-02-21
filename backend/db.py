@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from beanie import Document, Indexed, init_beanie
 from dotenv import load_dotenv
@@ -33,8 +33,23 @@ DB_NAME = os.getenv("MONGODB_DB", "des")
 
 
 # ---------------------------------------------------------------------------
+# Onboarding constants
+# ---------------------------------------------------------------------------
+
+VALID_STEP_IDS = ["welcome", "profile", "ai_chat", "documents", "extraction", "complete"]
+
+
+# ---------------------------------------------------------------------------
 # Embedded Models (subdocuments — not standalone collections)
 # ---------------------------------------------------------------------------
+
+
+class OnboardingStepStatus(BaseModel):
+    """Status of a single onboarding step (embedded in UserProfile)."""
+
+    step_id: str
+    status: Literal["completed", "skipped", "pending"] = "pending"
+    completed_at: Optional[str] = None
 
 
 class ExtractionRecord(BaseModel):
@@ -124,10 +139,15 @@ class UserProfile(Document):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login: Optional[datetime] = None
 
-    # Onboarding wizard state
+    # Onboarding wizard state (v1 fields — kept for backward compat)
     onboarding_completed: bool = False
     onboarding_completed_at: Optional[datetime] = None
     onboarding_skipped_steps: List[str] = Field(default_factory=list)
+
+    # Onboarding v2 fields
+    onboarding_version: int = 1  # 1=old wizard, 2=new panel
+    onboarding_step_statuses: List[OnboardingStepStatus] = Field(default_factory=list)
+    onboarding_current_step: int = 0  # Resume index
 
     class Settings:
         name = "user_profiles"

@@ -110,20 +110,202 @@ app.include_router(chat_router)
 # Onboarding
 # ---------------------------------------------------------------------------
 
-@app.get("/api/onboarding/status")
-async def onboarding_status(user=Depends(get_current_user)):
-    """Return onboarding completion state and integration status for the wizard."""
-    if not user:
-        # Auth disabled — no onboarding
-        return {"completed": True, "completed_at": None, "skipped_steps": [],
-                "dotloop_connected": False, "docusign_connected": False}
+from typing import Literal as TypingLiteral
+from db import VALID_STEP_IDS, OnboardingStepStatus
+
+# Module-level flag for e2e test resets (only used when AUTH_ENABLED=False)
+_e2e_onboarding_reset: bool = False
+_e2e_onboarding_state: dict = {}
+
+
+def _default_v2_steps() -> list[dict]:
+    """Return the default v2 step list with all steps pending."""
+    return [
+        {"step_id": sid, "status": "pending", "completed_at": None}
+        for sid in VALID_STEP_IDS
+    ]
+
+
+def _build_v2_status_response(user, dotloop_connected: bool, docusign_connected: bool) -> dict:
+    """Build the v2 onboarding status response from a UserProfile."""
+    # If user has v2 step statuses, use them; otherwise generate defaults
+    if user.onboarding_step_statuses:
+        steps = [
+            {
+                "step_id": s.step_id,
+                "status": s.status,
+                "completed_at": s.completed_at,
+            }
+            for s in user.onboarding_step_statuses
+        ]
+    else:
+        steps = _default_v2_steps()
+
     return {
+        "version": 2,
         "completed": user.onboarding_completed,
         "completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
-        "skipped_steps": user.onboarding_skipped_steps,
-        "dotloop_connected": bool(user.dotloop_tokens and user.dotloop_tokens.access_token),
-        "docusign_connected": bool(user.docusign_tokens and user.docusign_tokens.access_token),
+        "current_step": user.onboarding_current_step,
+        "steps": steps,
+        "dotloop_connected": dotloop_connected,
+        "docusign_connected": docusign_connected,
     }
+
+
+@app.get("/api/onboarding/status")
+async def onboarding_status(user=Depends(get_current_user)):
+    """Return onboarding completion state and integration status for the wizard.
+
+    v2 response includes step-level progress. Migration logic:
+    - v1 completed users: return completed=True (don't force re-onboarding)
+    - v1 mid-flow users (not completed): upgrade to v2, start at step 0
+    """
+    if not user:
+        # Auth disabled — check e2e reset flag
+        if _e2e_onboarding_reset:
+            return {
+                "version": 2,
+                "completed": _e2e_onboarding_state.get("completed", False),
+                "completed_at": _e2e_onboarding_state.get("completed_at"),
+                "current_step": _e2e_onboarding_state.get("current_step", 0),
+                "steps": _e2e_onboarding_state.get("steps", _default_v2_steps()),
+                "dotloop_connected": False,
+                "docusign_connected": False,
+            }
+        # Default: auth disabled, no onboarding needed
+        return {
+            "version": 2,
+            "completed": True,
+            "completed_at": None,
+            "current_step": len(VALID_STEP_IDS),
+            "steps": [
+                {"step_id": sid, "status": "completed", "completed_at": None}
+                for sid in VALID_STEP_IDS
+            ],
+            "dotloop_connected": False,
+            "docusign_connected": False,
+        }
+
+    dotloop_connected = bool(user.dotloop_tokens and user.dotloop_tokens.access_token)
+    docusign_connected = bool(user.docusign_tokens and user.docusign_tokens.access_token)
+
+    # --- v1 → v2 migration ---
+    if user.onboarding_version < 2:
+        if user.onboarding_completed:
+            # v1 completed user: mark all steps complete, keep completed state
+            user.onboarding_version = 2
+            now_iso = user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None
+            user.onboarding_step_statuses = [
+                OnboardingStepStatus(step_id=sid, status="completed", completed_at=now_iso)
+                for sid in VALID_STEP_IDS
+            ]
+            user.onboarding_current_step = len(VALID_STEP_IDS)
+            await user.save()
+        else:
+            # v1 mid-flow user: start fresh at v2 step 0
+            user.onboarding_version = 2
+            user.onboarding_step_statuses = [
+                OnboardingStepStatus(step_id=sid, status="pending", completed_at=None)
+                for sid in VALID_STEP_IDS
+            ]
+            user.onboarding_current_step = 0
+            await user.save()
+
+    return _build_v2_status_response(user, dotloop_connected, docusign_connected)
+
+
+class OnboardingStepUpdate(BaseModel):
+    step_id: str
+    status: TypingLiteral["completed", "skipped"]
+
+
+@app.patch("/api/onboarding/step")
+async def onboarding_step_update(request: OnboardingStepUpdate, user=Depends(get_current_user)):
+    """Mark a single onboarding step as completed or skipped, advance current_step."""
+    if not user:
+        # Auth disabled — update e2e state if reset flag is active
+        if _e2e_onboarding_reset:
+            if request.step_id not in VALID_STEP_IDS:
+                raise HTTPException(status_code=400, detail=f"Invalid step_id: {request.step_id}")
+            steps = _e2e_onboarding_state.get("steps", _default_v2_steps())
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for s in steps:
+                if s["step_id"] == request.step_id:
+                    s["status"] = request.status
+                    s["completed_at"] = now_iso if request.status == "completed" else None
+                    break
+            _e2e_onboarding_state["steps"] = steps
+            # Advance current_step to next pending step
+            next_step = len(VALID_STEP_IDS)
+            for i, s in enumerate(steps):
+                if s["status"] == "pending":
+                    next_step = i
+                    break
+            _e2e_onboarding_state["current_step"] = next_step
+            # Check if all done
+            all_done = all(s["status"] in ("completed", "skipped") for s in steps)
+            if all_done:
+                _e2e_onboarding_state["completed"] = True
+                _e2e_onboarding_state["completed_at"] = now_iso
+            return {
+                "version": 2,
+                "completed": _e2e_onboarding_state.get("completed", False),
+                "completed_at": _e2e_onboarding_state.get("completed_at"),
+                "current_step": _e2e_onboarding_state["current_step"],
+                "steps": steps,
+            }
+        return {"completed": True}
+
+    # Validate step_id
+    if request.step_id not in VALID_STEP_IDS:
+        raise HTTPException(status_code=400, detail=f"Invalid step_id: {request.step_id}")
+
+    # Ensure user is on v2
+    if user.onboarding_version < 2:
+        # Auto-upgrade
+        user.onboarding_version = 2
+        if not user.onboarding_step_statuses:
+            user.onboarding_step_statuses = [
+                OnboardingStepStatus(step_id=sid, status="pending", completed_at=None)
+                for sid in VALID_STEP_IDS
+            ]
+
+    # Update the step
+    now_iso = datetime.now(timezone.utc).isoformat()
+    found = False
+    for step in user.onboarding_step_statuses:
+        if step.step_id == request.step_id:
+            step.status = request.status
+            step.completed_at = now_iso if request.status == "completed" else None
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=400, detail=f"Step {request.step_id} not found in user state")
+
+    # Advance current_step to the index of the next pending step
+    next_step = len(VALID_STEP_IDS)
+    for i, step in enumerate(user.onboarding_step_statuses):
+        if step.status == "pending":
+            next_step = i
+            break
+    user.onboarding_current_step = next_step
+
+    # If all steps are completed/skipped, mark onboarding as done
+    all_done = all(s.status in ("completed", "skipped") for s in user.onboarding_step_statuses)
+    if all_done and not user.onboarding_completed:
+        user.onboarding_completed = True
+        user.onboarding_completed_at = datetime.now(timezone.utc)
+        # Sync skipped_steps for backward compat
+        user.onboarding_skipped_steps = [
+            s.step_id for s in user.onboarding_step_statuses if s.status == "skipped"
+        ]
+
+    await user.save()
+
+    dotloop_connected = bool(user.dotloop_tokens and user.dotloop_tokens.access_token)
+    docusign_connected = bool(user.docusign_tokens and user.docusign_tokens.access_token)
+    return _build_v2_status_response(user, dotloop_connected, docusign_connected)
 
 
 class OnboardingCompleteRequest(BaseModel):
@@ -132,18 +314,54 @@ class OnboardingCompleteRequest(BaseModel):
 
 @app.patch("/api/onboarding/complete")
 async def onboarding_complete(request: OnboardingCompleteRequest, user=Depends(get_current_user)):
-    """Mark onboarding as completed. Idempotent — won't overwrite existing timestamp."""
+    """Mark onboarding as completed. Idempotent — won't overwrite existing timestamp.
+
+    Backward compat endpoint (v1). Also syncs v2 step statuses when invoked.
+    """
     if not user:
         return {"completed": True}
     if not user.onboarding_completed:
         user.onboarding_completed = True
         user.onboarding_completed_at = datetime.now(timezone.utc)
         user.onboarding_skipped_steps = request.skipped_steps
+
+        # Sync v2 step statuses
+        now_iso = user.onboarding_completed_at.isoformat()
+        user.onboarding_version = 2
+        user.onboarding_step_statuses = [
+            OnboardingStepStatus(
+                step_id=sid,
+                status="skipped" if sid in request.skipped_steps else "completed",
+                completed_at=now_iso if sid not in request.skipped_steps else None,
+            )
+            for sid in VALID_STEP_IDS
+        ]
+        user.onboarding_current_step = len(VALID_STEP_IDS)
+
         await user.save()
     return {
         "completed": user.onboarding_completed,
         "completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
     }
+
+
+@app.post("/api/test/reset-onboarding")
+async def test_reset_onboarding(user=Depends(get_current_user)):
+    """Reset onboarding state for e2e testing. Only works when AUTH_ENABLED=False."""
+    global _e2e_onboarding_reset, _e2e_onboarding_state
+
+    if AUTH_ENABLED:
+        raise HTTPException(status_code=403, detail="Only available when AUTH_ENABLED=False")
+
+    # When auth is disabled, user is None — reset the e2e state
+    _e2e_onboarding_reset = True
+    _e2e_onboarding_state = {
+        "completed": False,
+        "completed_at": None,
+        "current_step": 0,
+        "steps": _default_v2_steps(),
+    }
+    return {"reset": True, "version": 2}
 
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_docs"
