@@ -785,3 +785,38 @@ export async function lookupProperty(
   }
   return resp.json();
 }
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+export interface OnboardingStatus {
+  completed: boolean;
+  completed_at: string | null;
+  skipped_steps: string[];
+  dotloop_connected: boolean;
+  docusign_connected: boolean;
+}
+
+export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
+  try {
+    const resp = await fetch(`${API_BASE}/api/onboarding/status`, {
+      headers: { ...await authHeaders() },
+    });
+    if (!resp.ok) {
+      // Fail open: treat as completed so onboarding doesn't block the app
+      return { completed: true, completed_at: null, skipped_steps: [], dotloop_connected: false, docusign_connected: false };
+    }
+    return resp.json();
+  } catch {
+    return { completed: true, completed_at: null, skipped_steps: [], dotloop_connected: false, docusign_connected: false };
+  }
+}
+
+export async function completeOnboarding(skippedSteps: string[]): Promise<void> {
+  await fetch(`${API_BASE}/api/onboarding/complete`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({ skipped_steps: skippedSteps }),
+  });
+}

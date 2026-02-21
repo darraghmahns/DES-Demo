@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from pdf_converter import get_pdf_info, pdf_to_images, image_to_base64
 
@@ -86,6 +86,45 @@ app.add_middleware(
 )
 
 app.include_router(integrations_router)
+
+# ---------------------------------------------------------------------------
+# Onboarding
+# ---------------------------------------------------------------------------
+
+@app.get("/api/onboarding/status")
+async def onboarding_status(user=Depends(get_current_user)):
+    """Return onboarding completion state and integration status for the wizard."""
+    if not user:
+        # Auth disabled — no onboarding
+        return {"completed": True, "completed_at": None, "skipped_steps": [],
+                "dotloop_connected": False, "docusign_connected": False}
+    return {
+        "completed": user.onboarding_completed,
+        "completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
+        "skipped_steps": user.onboarding_skipped_steps,
+        "dotloop_connected": bool(user.dotloop_tokens and user.dotloop_tokens.access_token),
+        "docusign_connected": bool(user.docusign_tokens and user.docusign_tokens.access_token),
+    }
+
+
+class OnboardingCompleteRequest(BaseModel):
+    skipped_steps: List[str] = Field(default_factory=list)
+
+
+@app.patch("/api/onboarding/complete")
+async def onboarding_complete(request: OnboardingCompleteRequest, user=Depends(get_current_user)):
+    """Mark onboarding as completed. Idempotent — won't overwrite existing timestamp."""
+    if not user:
+        return {"completed": True}
+    if not user.onboarding_completed:
+        user.onboarding_completed = True
+        user.onboarding_completed_at = datetime.now(timezone.utc)
+        user.onboarding_skipped_steps = request.skipped_steps
+        await user.save()
+    return {
+        "completed": user.onboarding_completed,
+        "completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
+    }
 
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_docs"

@@ -30,7 +30,11 @@ import {
   fetchExtractions,
   setAuthTokenProvider,
   checkPropertyEnrichmentStatus,
+  fetchOnboardingStatus,
+  completeOnboarding,
 } from './api';
+
+import OnboardingWizard from './components/OnboardingWizard';
 
 // Clerk auth — only active when VITE_CLERK_PUBLISHABLE_KEY is set
 import { useAuth, SignedIn, SignedOut, SignIn, UserButton, OrganizationSwitcher } from '@clerk/clerk-react';
@@ -226,6 +230,9 @@ function App() {
   // Comparison
   const [compareFromId, setCompareFromId] = useState('');
   const [compareToId, setCompareToId] = useState('');
+
+  // Onboarding
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   // ---------------------------------------------------------------------------
   // Core helpers
@@ -612,6 +619,26 @@ function App() {
   }
 
   // ---------------------------------------------------------------------------
+  // Onboarding
+  // ---------------------------------------------------------------------------
+
+  async function handleOnboardingComplete(skippedSteps: string[]) {
+    await completeOnboarding(skippedSteps);
+    setShowOnboarding(false);
+    // Refresh integration status in case user connected during onboarding
+    checkDotloopStatus().then(setDotloopConfigured);
+    checkDocuSignStatus().then(setDocusignConfigured);
+  }
+
+  function handleOnboardingFileUploaded(fileName: string) {
+    // Refresh doc list and select the uploaded file
+    fetchDocuments(mode).then((docs) => {
+      setDocuments(docs);
+      setSelectedDoc(fileName);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Effects
   // ---------------------------------------------------------------------------
 
@@ -621,6 +648,13 @@ function App() {
     checkDocuSignStatus().then(setDocusignConfigured);
     checkPropertyEnrichmentStatus().then(setPropertyEnrichmentConfigured);
     fetchAggregateUsage().then(setAggregateUsage).catch(() => {});
+
+    // Check onboarding status
+    fetchOnboardingStatus().then((status) => {
+      if (!status.completed) {
+        setShowOnboarding(true);
+      }
+    });
 
     // Reconnect to any active extraction tasks
     fetchActiveTasks().then((tasks) => {
@@ -657,6 +691,15 @@ function App() {
     if (params.get('docusign_error')) {
       setDocusignSyncError(`DocuSign connection failed: ${params.get('docusign_error')}`);
       window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    // After OAuth redirect, re-check onboarding so wizard reopens at correct step
+    if (params.get('dotloop_connected') === 'true' || params.get('docusign_connected') === 'true') {
+      fetchOnboardingStatus().then((status) => {
+        if (!status.completed) {
+          setShowOnboarding(true);
+        }
+      });
     }
   }, []);
 
@@ -793,10 +836,20 @@ function App() {
 
   /* eslint-disable-next-line no-unreachable */
   function renderMainApp() { return (<div className="app">
+      {showOnboarding && (
+        <OnboardingWizard
+          dotloopConnected={dotloopConfigured}
+          docusignConnected={docusignConfigured}
+          onComplete={handleOnboardingComplete}
+          onFileUploaded={handleOnboardingFileUploaded}
+        />
+      )}
       {/* Header */}
       <header className="header">
         <div className="header-left">
           <span className="header-title">D.E.S.</span>
+          {/* Gov mode toggle hidden — enable via VITE_ENABLE_GOV_MODE=true */}
+          {import.meta.env.VITE_ENABLE_GOV_MODE === 'true' && (
           <div className="mode-toggle">
             <button
               className={`mode-btn ${mode === 'real_estate' ? 'active' : ''}`}
@@ -811,6 +864,7 @@ function App() {
               Government
             </button>
           </div>
+          )}
           {mode === 'real_estate' && (
             <div className="view-toggle">
               <button

@@ -81,6 +81,11 @@ class UserRecord(Document):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login: Optional[datetime] = None
 
+    # Onboarding wizard state
+    onboarding_completed: bool = False
+    onboarding_completed_at: Optional[datetime] = None
+    onboarding_skipped_steps: List[str] = Field(default_factory=list)
+
     class Settings:
         name = "users"
         indexes = [
