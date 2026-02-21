@@ -4128,3 +4128,48 @@ body {
 
 .chat-input-form input:focus { border-color: var(--accent); }
 .chat-input-form input::placeholder { color: var(--text-muted); }
+
+/* =============================================================================
+   Mobile Responsiveness
+   ============================================================================= */
+
+/* --- Hamburger Button (hidden on desktop) --- */
+.navbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.navbar-hamburger {
+  display: none; /* hidden on desktop */
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  min-height: 44px;
+  min-width: 44px;
+  align-items: center;
+}
+
+.hamburger-line {
+  display: block;
+  width: 20px;
+  height: 2px;
+  background: var(--text-primary);
+  border-radius: 1px;
+  transition: transform 0.2s, opacity 0.2s;
+}
+
+/* --- Navbar Org Switcher wrapper (for hiding on mobile) --- */
+.navbar-org-switcher {
+  display: flex;
+  align-items: center;
+}
+
+/* --- Sidebar Backdrop (mobile only) --- */
+.sidebar-backdrop {
+  display: none; /* hidden on desktop */
+}
