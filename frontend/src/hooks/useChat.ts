@@ -3,9 +3,7 @@
 import { useCallback, useState } from 'react';
 import {
   sendChatMessage,
-  type ChatResponse,
   type ExtractedField,
-  type ChatHistoryMessage,
 } from '../api/chat';
 
 export interface ChatMessage {

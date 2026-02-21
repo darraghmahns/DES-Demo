@@ -132,7 +132,7 @@ function EnvelopeCard({ envelope }: { envelope: DocuSignEnvelope }) {
 }
 
 export function TransactionList() {
-  const { transactions, loading, error, create, remove } = useTransactionList();
+  const { transactions, loading, error, create } = useTransactionList();
   const { dotloopConnected, docusignConnected, loading: integrationsLoading } = useIntegrations();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
