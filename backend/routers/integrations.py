@@ -10,7 +10,7 @@ import os
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -236,7 +236,7 @@ async def dotloop_archive_all_loops(user=Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @router.get("/api/dotloop/oauth/connect")
-async def dotloop_oauth_connect(user=Depends(get_optional_user)):
+async def dotloop_oauth_connect(request: Request, user=Depends(get_optional_user)):
     """Redirect browser to Dotloop authorization page."""
     client_id = os.getenv("DOTLOOP_CLIENT_ID")
     if not client_id:
@@ -244,7 +244,7 @@ async def dotloop_oauth_connect(user=Depends(get_optional_user)):
 
     redirect_uri = os.getenv(
         "DOTLOOP_REDIRECT_URI",
-        "http://localhost:8000/api/dotloop/oauth/callback",
+        f"{str(request.base_url).rstrip('/')}/api/dotloop/oauth/callback",
     )
 
     # Include signed state with user ID so callback can store tokens on the right user
@@ -265,6 +265,7 @@ async def dotloop_oauth_connect(user=Depends(get_optional_user)):
 
 @router.get("/api/dotloop/oauth/callback")
 async def dotloop_oauth_callback(
+    request: Request,
     code: str | None = None,
     error: str | None = None,
     error_description: str | None = None,
@@ -284,7 +285,7 @@ async def dotloop_oauth_callback(
     client_secret = os.getenv("DOTLOOP_CLIENT_SECRET")
     redirect_uri = os.getenv(
         "DOTLOOP_REDIRECT_URI",
-        "http://localhost:8000/api/dotloop/oauth/callback",
+        f"{str(request.base_url).rstrip('/')}/api/dotloop/oauth/callback",
     )
 
     try:
@@ -505,7 +506,7 @@ async def docusign_process(envelope_id: str, request: ProcessFromDocuSignRequest
 # ---------------------------------------------------------------------------
 
 @router.get("/api/docusign/oauth/connect")
-async def docusign_oauth_connect(user=Depends(get_optional_user)):
+async def docusign_oauth_connect(request: Request, user=Depends(get_optional_user)):
     """Redirect browser to DocuSign authorization page."""
     client_id = os.getenv("DOCUSIGN_CLIENT_ID")
     if not client_id:
@@ -513,7 +514,7 @@ async def docusign_oauth_connect(user=Depends(get_optional_user)):
 
     redirect_uri = os.getenv(
         "DOCUSIGN_REDIRECT_URI",
-        "http://localhost:8000/api/docusign/oauth/callback",
+        f"{str(request.base_url).rstrip('/')}/api/docusign/oauth/callback",
     )
     params: dict = {
         "response_type": "code",
@@ -531,6 +532,7 @@ async def docusign_oauth_connect(user=Depends(get_optional_user)):
 
 @router.get("/api/docusign/oauth/callback")
 async def docusign_oauth_callback(
+    request: Request,
     code: str | None = None,
     error: str | None = None,
     state: str | None = None,
@@ -548,7 +550,7 @@ async def docusign_oauth_callback(
     client_secret = os.getenv("DOCUSIGN_CLIENT_SECRET")
     redirect_uri = os.getenv(
         "DOCUSIGN_REDIRECT_URI",
-        "http://localhost:8000/api/docusign/oauth/callback",
+        f"{str(request.base_url).rstrip('/')}/api/docusign/oauth/callback",
     )
 
     try:
