@@ -653,6 +653,39 @@ frontend/src/
 
 ---
 
+### Phase 2.5 — End-to-End Test Validation
+
+**Goal**: Create a test user with sample financial documents that validates the entire Phase 2 pipeline: upload → AI extraction → schema validation → profile field mapping → completion tracking.
+
+**Tasks:**
+1. Create sample financial PDFs in `test_docs/financial/`:
+   - `sample_pre_approval.pdf` — Pre-approval letter with lender, borrower, amount, loan type, dates
+   - `sample_bank_statement.pdf` — Bank statement with institution, balances, statement period, deposits
+   - `sample_pay_stub.pdf` — Pay stub with employer, employee, gross/net pay, YTD, pay frequency
+2. Create `backend/seed_test_user.py` script that:
+   - Creates a test user "Jane Doe" (jane.doe@test.deslabs.local) with buyer + agent roles
+   - Uploads each sample financial doc as a profile document
+   - Triggers AI extraction on each document
+   - Validates extraction results against financial schemas
+   - Confirms profile fields were auto-populated (annual income, employer, pre-approval amount, etc.)
+   - Prints completion % before and after to show progression
+3. Add integration tests in `backend/tests/test_e2e_profile.py`:
+   - Test full upload → extract → map pipeline per document type
+   - Test profile completion increases after each document
+   - Test duplicate detection (uploading same doc twice)
+   - Test that extraction doesn't overwrite existing profile data
+
+**Validation matrix:**
+| Document | Extracts | Populates Profile Field |
+|----------|----------|------------------------|
+| Pre-approval letter | lender_name, approval_amount, loan_type, borrower_name | buyer_profile.pre_approval_amount, pre_approval_lender, pre_approval_status → PRE_APPROVED |
+| Bank statement | institution_name, ending_balance, account_holder | user.name (if empty) |
+| Pay stub | employer_name, gross_pay, pay_frequency, ytd_gross | buyer_profile.employer_name, annual_income, employment_status |
+
+**Definition of done**: Running `python seed_test_user.py` creates a fully populated test user with extracted financial data, profile completion goes from 0% → 60%+, and all integration tests pass.
+
+---
+
 ### Phase 3 — Transaction System
 
 **Goal**: Agents can create transactions, invite participants, manage the "lobby", and auto-fill from profiles.

@@ -38,5 +38,11 @@ Thumbs.db
 # Claude Code
 .claude/
 
-# llocal extractions
+# Local extractions
 dist/*.json
+
+# User-uploaded profile documents (generated at runtime)
+backend/profile_uploads/
+
+# Generated test PDFs (recreated via generate_test_docs.py)
+backend/test_docs/financial/

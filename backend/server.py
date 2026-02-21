@@ -77,6 +77,13 @@ from profile_doc_routes import router as profile_doc_router
 app.include_router(profile_router)
 app.include_router(profile_doc_router)
 
+# Register Phase 3 routers
+from transaction_routes import router as transaction_router
+from invitation_routes import router as invitation_router
+
+app.include_router(transaction_router)
+app.include_router(invitation_router)
+
 @app.on_event("startup")
 async def startup():
     await init_db()
