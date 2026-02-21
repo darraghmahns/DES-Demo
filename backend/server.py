@@ -11,11 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional
 
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
-from pydantic import BaseModel, ValidationError
+from fastapi.responses import StreamingResponse, FileResponse
+from pydantic import BaseModel, Field, ValidationError
 
 from pdf_converter import get_pdf_info, pdf_to_images, image_to_base64
 
@@ -34,31 +35,45 @@ from schemas import (
 from ocr_engine import get_engine
 from compliance_engine import run_compliance_check, async_run_compliance_check
 import property_prefill
-from auth import get_optional_user, get_current_user, sign_oauth_state, verify_oauth_state, AUTH_ENABLED
+from auth import get_optional_user, get_current_user, AUTH_ENABLED
 from db import init_db, close_db
 from db_writer import save_document, save_extraction, get_extraction
 from dotloop_connector import (
     is_configured as dotloop_configured,
-    list_dotloop_loops,
-    archive_dotloop_loop,
-    sync_to_dotloop,
     process_from_dotloop,
-    handle_webhook as dotloop_handle_webhook,
-    set_oauth_tokens,
 )
 from docusign_connector import (
     is_configured as docusign_configured,
-    list_docusign_envelopes,
-    remove_docusign_envelope,
-    sync_to_docusign,
     process_from_docusign,
-    handle_webhook as docusign_handle_webhook,
-    set_oauth_tokens as docusign_set_oauth_tokens,
 )
+from routers.integrations import router as integrations_router
+from routers.integrations import _user_dotloop_tokens, _user_docusign_tokens
 
 load_dotenv()
 
-app = FastAPI(title="DESLabs API", version="1.0.0")
+# ---------------------------------------------------------------------------
+# Feature flags & configuration
+# ---------------------------------------------------------------------------
+
+ENABLE_GOV_MODE = os.getenv("ENABLE_GOV_MODE", "false").lower() in ("1", "true", "yes")
+WRITE_DIST_FILES = os.getenv("WRITE_DIST_FILES", "true").lower() in ("1", "true", "yes")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Issue 3: Fail fast if FRONTEND_URL is not set in production
+    if AUTH_ENABLED and not FRONTEND_URL:
+        raise RuntimeError(
+            "FRONTEND_URL must be set when auth is enabled "
+            "(needed for OAuth callback redirects)"
+        )
+    await init_db()
+    yield
+    await close_db()
+
+
+app = FastAPI(title="DESLabs API", version="1.0.0", lifespan=lifespan)
 
 ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
 
@@ -69,6 +84,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(integrations_router)
 
 # Register Phase 2 routers
 from profile_routes import router as profile_router
@@ -89,33 +106,43 @@ from chat_routes import router as chat_router
 
 app.include_router(chat_router)
 
-@app.on_event("startup")
-async def startup():
-    await init_db()
+# ---------------------------------------------------------------------------
+# Onboarding
+# ---------------------------------------------------------------------------
 
-
-@app.on_event("shutdown")
-async def shutdown():
-    await close_db()
-
-
-def _user_dotloop_tokens(user) -> dict | None:
-    """Extract Dotloop token dict from UserProfile, or None."""
-    if not user or not getattr(user, "dotloop_tokens", None):
-        return None
-    t = user.dotloop_tokens
-    return {"access_token": t.access_token, "refresh_token": t.refresh_token}
-
-
-def _user_docusign_tokens(user) -> dict | None:
-    """Extract DocuSign token dict from UserProfile, or None."""
-    if not user or not getattr(user, "docusign_tokens", None):
-        return None
-    t = user.docusign_tokens
+@app.get("/api/onboarding/status")
+async def onboarding_status(user=Depends(get_current_user)):
+    """Return onboarding completion state and integration status for the wizard."""
+    if not user:
+        # Auth disabled — no onboarding
+        return {"completed": True, "completed_at": None, "skipped_steps": [],
+                "dotloop_connected": False, "docusign_connected": False}
     return {
-        "access_token": t.access_token,
-        "refresh_token": t.refresh_token,
-        "account_id": t.account_id,
+        "completed": user.onboarding_completed,
+        "completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
+        "skipped_steps": user.onboarding_skipped_steps,
+        "dotloop_connected": bool(user.dotloop_tokens and user.dotloop_tokens.access_token),
+        "docusign_connected": bool(user.docusign_tokens and user.docusign_tokens.access_token),
+    }
+
+
+class OnboardingCompleteRequest(BaseModel):
+    skipped_steps: List[str] = Field(default_factory=list)
+
+
+@app.patch("/api/onboarding/complete")
+async def onboarding_complete(request: OnboardingCompleteRequest, user=Depends(get_current_user)):
+    """Mark onboarding as completed. Idempotent — won't overwrite existing timestamp."""
+    if not user:
+        return {"completed": True}
+    if not user.onboarding_completed:
+        user.onboarding_completed = True
+        user.onboarding_completed_at = datetime.now(timezone.utc)
+        user.onboarding_skipped_steps = request.skipped_steps
+        await user.save()
+    return {
+        "completed": user.onboarding_completed,
+        "completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
     }
 
 
@@ -167,7 +194,10 @@ async def list_documents(mode: str | None = None) -> list[DocumentInfo]:
     if not TEST_DOCS_DIR.exists():
         return docs
     for pdf in sorted(TEST_DOCS_DIR.glob("*.pdf")):
-        if mode and _classify_document(pdf.name) != mode:
+        doc_mode = _classify_document(pdf.name)
+        if mode and doc_mode != mode:
+            continue
+        if not ENABLE_GOV_MODE and doc_mode == "gov":
             continue
         info = get_pdf_info(str(pdf))
         docs.append(DocumentInfo(
@@ -200,7 +230,7 @@ async def get_document(name: str):
 async def upload_document(
     file: UploadFile = File(...),
     mode: str = Query("real_estate"),
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Upload a PDF document for extraction."""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -220,7 +250,7 @@ async def upload_document(
 
 
 @app.post("/api/extract")
-async def extract(request: ExtractRequest, user=Depends(get_optional_user)):
+async def extract(request: ExtractRequest, user=Depends(get_current_user)):
     """Start the extraction pipeline as a background task, return task_id.
 
     The extraction runs independently of the HTTP connection.
@@ -231,8 +261,11 @@ async def extract(request: ExtractRequest, user=Depends(get_optional_user)):
     pdf_path = TEST_DOCS_DIR / request.filename
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="Document not found")
-    if request.mode not in ("real_estate", "gov"):
-        raise HTTPException(status_code=400, detail="Invalid mode")
+    allowed_modes = ["real_estate"]
+    if ENABLE_GOV_MODE:
+        allowed_modes.append("gov")
+    if request.mode not in allowed_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode. Allowed: {allowed_modes}")
 
     # Check for already-running task for this file+mode
     existing = get_active_task(request.mode, request.filename)
@@ -343,9 +376,9 @@ async def _run_extraction_task(task, mode: str, pdf_path: str, user_id: str | No
 
     # Mark final status based on last event
     if task.events and task.events[-1]["type"] == "error":
-        task.status = TaskStatus.ERROR
+        task.mark_complete(TaskStatus.ERROR)
     else:
-        task.status = TaskStatus.COMPLETE
+        task.mark_complete(TaskStatus.COMPLETE)
 
     cleanup_old_tasks()
 
@@ -476,7 +509,7 @@ async def _extraction_pipeline(
                         for p in nested["participants"]
                     ]
                 lenient_validated = DotloopLoopDetails.model_construct(**nested)
-            except Exception:
+            except (TypeError, KeyError, ValidationError):
                 pass
 
         emit("extraction", {"validated_data": validated_data})
@@ -641,12 +674,12 @@ async def _extraction_pipeline(
             if source:
                 try:
                     dotloop_api_payload = source.to_dotloop_api_format()
-                except Exception:
-                    pass
+                except (AttributeError, ValueError, KeyError) as e:
+                    log.warning("Dotloop API format failed: %s", e)
                 try:
                     docusign_api_payload = source.to_docusign_api_format()
-                except Exception:
-                    pass
+                except (AttributeError, ValueError, KeyError) as e:
+                    log.warning("DocuSign API format failed: %s", e)
 
         # Compute cost: GPT-4o pricing ($2.50/1M input, $10.00/1M output)
         cost_usd = (
@@ -674,10 +707,11 @@ async def _extraction_pipeline(
             cost_usd=round(cost_usd, 6),
         )
 
-        # Write to dist/
+        # Write to dist/ (disabled in production via WRITE_DIST_FILES=false)
         output_path = DIST_DIR / f"{Path(pdf_path).stem}_extracted.json"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(result.model_dump_json(indent=2))
+        if WRITE_DIST_FILES:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(result.model_dump_json(indent=2))
 
         # Persist to MongoDB
         duration_ms = int((time.monotonic() - _start_time) * 1000)
@@ -744,7 +778,7 @@ async def check_cached_extraction(
 
 
 @app.delete("/api/extractions/cache")
-async def clear_extraction_cache(mode: str = Query(None), user=Depends(get_optional_user)):
+async def clear_extraction_cache(mode: str = Query(None), user=Depends(get_current_user)):
     """Clear cached extractions, optionally filtered by mode. Scoped to user/org."""
     from db import DocumentRecord
 
@@ -796,7 +830,7 @@ class BatchExtractRequest(BaseModel):
 
 
 @app.post("/api/extract-batch")
-async def extract_batch(request: BatchExtractRequest, user=Depends(get_optional_user)):
+async def extract_batch(request: BatchExtractRequest, user=Depends(get_current_user)):
     """Extract from multiple Dotloop loops / DocuSign envelopes in parallel.
 
     Runs process_from_dotloop / process_from_docusign concurrently and
@@ -1191,7 +1225,7 @@ async def scout_get_result(result_id: str):
 
     try:
         result = await ScoutResult.get(ObjectId(result_id))
-    except Exception:
+    except (ValueError, TypeError):
         raise HTTPException(status_code=404, detail="Scout result not found")
 
     if not result:
@@ -1208,7 +1242,7 @@ async def scout_verify_result(result_id: str, verified_by: str = Query("admin"),
 
     try:
         result = await ScoutResult.get(ObjectId(result_id))
-    except Exception:
+    except (ValueError, TypeError):
         raise HTTPException(status_code=404, detail="Scout result not found")
 
     if not result:
@@ -1238,7 +1272,7 @@ async def scout_reject_result(result_id: str):
 
     try:
         result = await ScoutResult.get(ObjectId(result_id))
-    except Exception:
+    except (ValueError, TypeError):
         raise HTTPException(status_code=404, detail="Scout result not found")
 
     if not result:
@@ -1256,548 +1290,6 @@ async def scout_reject_result(result_id: str):
         "is_active": False,
         "status": "rejected",
     }
-
-
-# ---------------------------------------------------------------------------
-# Dotloop Integration Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/api/dotloop/status")
-async def dotloop_status(user=Depends(get_optional_user)):
-    """Check whether Dotloop integration is configured for this user."""
-    user_tokens = _user_dotloop_tokens(user)
-    return {"configured": dotloop_configured(user_tokens=user_tokens)}
-
-
-@app.get("/api/dotloop/loops")
-async def dotloop_loops(profile_id: int | None = None, batch_size: int = 20, user=Depends(get_optional_user)):
-    """List recent loops from Dotloop."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    try:
-        loops = await asyncio.to_thread(list_dotloop_loops, profile_id, batch_size, user_tokens=user_tokens)
-        return {"loops": loops}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/dotloop/loops/search")
-async def dotloop_search_loops(
-    q: str = Query(..., description="Search query for loop name or property address"),
-    profile_id: int | None = None,
-    user=Depends(get_optional_user),
-):
-    """Search Dotloop loops by name or property address."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    from dotloop_connector import search_loops
-    try:
-        matches = await asyncio.to_thread(search_loops, q, profile_id, user_tokens=user_tokens)
-        return {"loops": matches, "query": q}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/dotloop/loops/{loop_id}")
-async def dotloop_loop_detail(loop_id: int, profile_id: int | None = None, user=Depends(get_optional_user)):
-    """Get full loop detail including property, participants, and documents."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    from dotloop_connector import get_loop_with_details
-    try:
-        detail = await asyncio.to_thread(get_loop_with_details, loop_id, profile_id, user_tokens=user_tokens)
-        return detail
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class DotloopSyncRequest(BaseModel):
-    loop_id: int | None = None
-    upload_document: bool = True
-
-
-@app.post("/api/dotloop/sync/{extraction_id}")
-async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyncRequest(), user=Depends(get_optional_user)):
-    """Push a saved extraction to Dotloop as a loop."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    try:
-        result = await sync_to_dotloop(
-            extraction_id,
-            loop_id=body.loop_id,
-            upload_document=body.upload_document,
-            user_tokens=user_tokens,
-        )
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class ProcessFromDotloopRequest(BaseModel):
-    profile_id: int | None = None
-    sync_back: bool = False
-
-
-@app.post("/api/dotloop/process/{loop_id}")
-async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user=Depends(get_optional_user)):
-    """Pull a PDF from a Dotloop loop, extract, and optionally sync back."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    try:
-        result = await process_from_dotloop(request.profile_id, loop_id, request.sync_back, user_tokens=user_tokens)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/dotloop/loops/{loop_id}")
-async def dotloop_archive_loop(loop_id: int, user=Depends(get_optional_user)):
-    """Archive a single Dotloop loop."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    try:
-        result = await asyncio.to_thread(archive_dotloop_loop, loop_id, user_tokens=user_tokens)
-        return {"status": "archived", "loop_id": loop_id, "detail": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/dotloop/loops")
-async def dotloop_archive_all_loops(user=Depends(get_optional_user)):
-    """Archive all Dotloop loops."""
-    user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="Dotloop not configured")
-    try:
-        loops = await asyncio.to_thread(list_dotloop_loops, None, 100, user_tokens=user_tokens)
-        results = []
-        for loop in loops:
-            lid = loop.get("loopId")
-            if lid:
-                try:
-                    await asyncio.to_thread(archive_dotloop_loop, lid, user_tokens=user_tokens)
-                    results.append({"loop_id": lid, "result": "archived"})
-                except Exception as e:
-                    results.append({"loop_id": lid, "result": str(e)})
-        return {"archived": len(results), "details": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# Dotloop OAuth Endpoints
-# ---------------------------------------------------------------------------
-
-DOTLOOP_AUTH_BASE = "https://auth.dotloop.com"
-
-
-@app.get("/api/dotloop/oauth/connect")
-async def dotloop_oauth_connect(user=Depends(get_optional_user)):
-    """Redirect browser to Dotloop authorization page."""
-    client_id = os.getenv("DOTLOOP_CLIENT_ID")
-    if not client_id:
-        raise HTTPException(status_code=500, detail="DOTLOOP_CLIENT_ID not configured")
-
-    redirect_uri = os.getenv(
-        "DOTLOOP_REDIRECT_URI",
-        "http://localhost:8000/api/dotloop/oauth/callback",
-    )
-
-    # Include signed state with user ID so callback can store tokens on the right user
-    state_param = ""
-    if user and AUTH_ENABLED:
-        state = sign_oauth_state(user.clerk_user_id)
-        state_param = f"&state={state}"
-
-    auth_url = (
-        f"{DOTLOOP_AUTH_BASE}/oauth/authorize"
-        f"?response_type=code"
-        f"&client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"{state_param}"
-    )
-    return RedirectResponse(url=auth_url)
-
-
-@app.get("/api/dotloop/oauth/callback")
-async def dotloop_oauth_callback(
-    code: str | None = None,
-    error: str | None = None,
-    error_description: str | None = None,
-    state: str | None = None,
-):
-    """Handle OAuth callback from Dotloop, exchange code for tokens."""
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-
-    if error:
-        desc = error_description or error
-        return RedirectResponse(url=f"{frontend_url}?dotloop_error={desc}")
-
-    if not code:
-        raise HTTPException(status_code=400, detail="No authorization code received")
-
-    client_id = os.getenv("DOTLOOP_CLIENT_ID")
-    client_secret = os.getenv("DOTLOOP_CLIENT_SECRET")
-    redirect_uri = os.getenv(
-        "DOTLOOP_REDIRECT_URI",
-        "http://localhost:8000/api/dotloop/oauth/callback",
-    )
-
-    import httpx
-    try:
-        resp = httpx.post(
-            f"{DOTLOOP_AUTH_BASE}/oauth/token",
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-            auth=(client_id, client_secret),
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        token_data = resp.json()
-    except Exception as e:
-        logging.getLogger(__name__).error("Dotloop token exchange failed: %s", e)
-        return RedirectResponse(url=f"{frontend_url}?dotloop_error=token_exchange_failed")
-
-    # If we have a signed state, store tokens on the user's record
-    if state and AUTH_ENABLED:
-        try:
-            clerk_user_id = verify_oauth_state(state)
-            from db import UserProfile, OAuthTokenSet
-            user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
-            if user:
-                user.dotloop_tokens = OAuthTokenSet(
-                    access_token=token_data["access_token"],
-                    refresh_token=token_data.get("refresh_token"),
-                )
-                await user.save()
-                log.info("Stored Dotloop tokens on user %s", clerk_user_id)
-        except HTTPException:
-            log.warning("Invalid OAuth state in Dotloop callback, falling back to module-level storage")
-
-    # Always store module-level as fallback (for webhooks, etc.)
-    set_oauth_tokens(
-        access_token=token_data["access_token"],
-        refresh_token=token_data.get("refresh_token"),
-    )
-
-    return RedirectResponse(url=f"{frontend_url}?dotloop_connected=true")
-
-
-# ---------------------------------------------------------------------------
-# Dotloop Webhook
-# ---------------------------------------------------------------------------
-
-@app.post("/api/webhooks/dotloop")
-async def dotloop_webhook(payload: dict):
-    """Receive Dotloop LOOP_UPDATED webhook events."""
-    result = await dotloop_handle_webhook(payload)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# DocuSign Integration Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/api/docusign/status")
-async def docusign_status(user=Depends(get_optional_user)):
-    """Check whether DocuSign integration is configured for this user."""
-    from docusign_connector import get_oauth_tokens, _jwt_available
-    user_tokens = _user_docusign_tokens(user)
-    configured = docusign_configured(user_tokens=user_tokens)
-    tokens = get_oauth_tokens()
-    return {
-        "configured": configured,
-        "has_access_token": bool(
-            (user_tokens and user_tokens.get("access_token"))
-            or tokens.get("access_token")
-            or os.getenv("DOCUSIGN_ACCESS_TOKEN")
-        ),
-        "has_account_id": bool(
-            (user_tokens and user_tokens.get("account_id"))
-            or tokens.get("account_id")
-            or os.getenv("DOCUSIGN_ACCOUNT_ID")
-        ),
-        "jwt_available": _jwt_available(),
-        "account_id": (
-            (user_tokens or {}).get("account_id")
-            or tokens.get("account_id")
-            or os.getenv("DOCUSIGN_ACCOUNT_ID", "")
-        ),
-    }
-
-
-@app.get("/api/docusign/envelopes")
-async def docusign_envelopes(
-    from_date: str | None = None,
-    status: str | None = None,
-    count: int = 50,
-    user=Depends(get_optional_user),
-):
-    """List recent envelopes from DocuSign."""
-    user_tokens = _user_docusign_tokens(user)
-    if not docusign_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="DocuSign not configured")
-    # Default to all active statuses so drafts are included
-    if not status:
-        status = "created,sent,delivered,signed,completed"
-    try:
-        envelopes = await asyncio.to_thread(
-            list_docusign_envelopes, from_date, status, count, user_tokens=user_tokens
-        )
-        return {"envelopes": envelopes}
-    except Exception as e:
-        log.error("DocuSign envelope listing failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/docusign/envelopes/{envelope_id}")
-async def docusign_envelope_detail(envelope_id: str, user=Depends(get_optional_user)):
-    """Get full envelope detail including recipients and documents."""
-    user_tokens = _user_docusign_tokens(user)
-    if not docusign_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="DocuSign not configured")
-    from docusign_connector import get_envelope_with_details
-    try:
-        detail = await asyncio.to_thread(get_envelope_with_details, envelope_id, user_tokens=user_tokens)
-        return detail
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class DocuSignSyncRequest(BaseModel):
-    envelope_id: str | None = None
-
-
-@app.post("/api/docusign/sync/{extraction_id}")
-async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSignSyncRequest(), user=Depends(get_optional_user)):
-    """Push a saved extraction to DocuSign as an envelope."""
-    user_tokens = _user_docusign_tokens(user)
-    if not docusign_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="DocuSign not configured")
-    try:
-        result = await sync_to_docusign(extraction_id, envelope_id=body.envelope_id, user_tokens=user_tokens)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        # Construct envelope web URL
-        if result.get("envelope_id"):
-            base_url = os.getenv("DOCUSIGN_BASE_URL", "https://demo.docusign.net/restapi")
-            if "demo.docusign.net" in base_url:
-                portal_base = "https://appdemo.docusign.com"
-            else:
-                portal_base = "https://app.docusign.com"
-            result["envelope_url"] = f"{portal_base}/documents/details/{result['envelope_id']}"
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/docusign/envelopes/{envelope_id}")
-async def docusign_remove_envelope(envelope_id: str, user=Depends(get_optional_user)):
-    """Remove a DocuSign envelope — voids sent/delivered, deletes drafts."""
-    user_tokens = _user_docusign_tokens(user)
-    if not docusign_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="DocuSign not configured")
-    try:
-        result = await asyncio.to_thread(remove_docusign_envelope, envelope_id, user_tokens=user_tokens)
-        return {"status": "removed", "envelope_id": envelope_id, "detail": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/docusign/envelopes")
-async def docusign_remove_all_envelopes(user=Depends(get_optional_user)):
-    """Remove all DocuSign envelopes — voids sent/delivered, deletes drafts."""
-    user_tokens = _user_docusign_tokens(user)
-    if not docusign_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="DocuSign not configured")
-    try:
-        envelopes = await asyncio.to_thread(
-            list_docusign_envelopes, None, "created,sent,delivered", 100, user_tokens=user_tokens
-        )
-        results = []
-        for env in envelopes:
-            eid = env.get("envelopeId")
-            if eid:
-                try:
-                    r = await asyncio.to_thread(remove_docusign_envelope, eid, user_tokens=user_tokens)
-                    results.append({"envelope_id": eid, "result": "removed"})
-                except Exception as e:
-                    results.append({"envelope_id": eid, "result": str(e)})
-        return {"removed": len(results), "details": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class ProcessFromDocuSignRequest(BaseModel):
-    sync_back: bool = False
-
-
-@app.post("/api/docusign/process/{envelope_id}")
-async def docusign_process(envelope_id: str, request: ProcessFromDocuSignRequest = ProcessFromDocuSignRequest(), user=Depends(get_optional_user)):
-    """Pull a PDF from a DocuSign envelope, extract, and optionally sync back."""
-    user_tokens = _user_docusign_tokens(user)
-    if not docusign_configured(user_tokens=user_tokens):
-        raise HTTPException(status_code=503, detail="DocuSign not configured")
-    try:
-        result = await process_from_docusign(envelope_id, request.sync_back, user_tokens=user_tokens)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# DocuSign OAuth Endpoints
-# ---------------------------------------------------------------------------
-
-DOCUSIGN_AUTH_SERVER = os.getenv("DOCUSIGN_AUTH_SERVER", "account-d.docusign.com")
-
-
-@app.get("/api/docusign/oauth/connect")
-async def docusign_oauth_connect(user=Depends(get_optional_user)):
-    """Redirect browser to DocuSign authorization page."""
-    client_id = os.getenv("DOCUSIGN_CLIENT_ID")
-    if not client_id:
-        raise HTTPException(status_code=500, detail="DOCUSIGN_CLIENT_ID not configured")
-
-    redirect_uri = os.getenv(
-        "DOCUSIGN_REDIRECT_URI",
-        "http://localhost:8000/api/docusign/oauth/callback",
-    )
-    from urllib.parse import urlencode
-    params: dict = {
-        "response_type": "code",
-        "scope": "signature",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-    }
-    # Include signed state with user ID so callback can store tokens on the right user
-    if user and AUTH_ENABLED:
-        params["state"] = sign_oauth_state(user.clerk_user_id)
-
-    auth_url = f"https://{DOCUSIGN_AUTH_SERVER}/oauth/auth?{urlencode(params)}"
-    return RedirectResponse(url=auth_url)
-
-
-@app.get("/api/docusign/oauth/callback")
-async def docusign_oauth_callback(
-    code: str | None = None,
-    error: str | None = None,
-    state: str | None = None,
-):
-    """Handle OAuth callback from DocuSign, exchange code for tokens."""
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-
-    if error:
-        return RedirectResponse(url=f"{frontend_url}?docusign_error={error}")
-
-    if not code:
-        raise HTTPException(status_code=400, detail="No authorization code received")
-
-    client_id = os.getenv("DOCUSIGN_CLIENT_ID")
-    client_secret = os.getenv("DOCUSIGN_CLIENT_SECRET")
-    redirect_uri = os.getenv(
-        "DOCUSIGN_REDIRECT_URI",
-        "http://localhost:8000/api/docusign/oauth/callback",
-    )
-
-    import httpx
-    try:
-        resp = httpx.post(
-            f"https://{DOCUSIGN_AUTH_SERVER}/oauth/token",
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-            auth=(client_id, client_secret),
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        token_data = resp.json()
-    except Exception as e:
-        logging.getLogger(__name__).error("DocuSign token exchange failed: %s", e)
-        return RedirectResponse(url=f"{frontend_url}?docusign_error=token_exchange_failed")
-
-    # Discover account_id from userinfo
-    account_id = None
-    try:
-        userinfo_resp = httpx.get(
-            f"https://{DOCUSIGN_AUTH_SERVER}/oauth/userinfo",
-            headers={"Authorization": f"Bearer {token_data['access_token']}"},
-            timeout=15.0,
-        )
-        userinfo_resp.raise_for_status()
-        userinfo = userinfo_resp.json()
-        for acct in userinfo.get("accounts", []):
-            if acct.get("is_default"):
-                account_id = acct["account_id"]
-                break
-        if not account_id:
-            accounts = userinfo.get("accounts", [])
-            if accounts:
-                account_id = accounts[0]["account_id"]
-    except Exception as e:
-        logging.getLogger(__name__).warning("DocuSign userinfo failed: %s", e)
-
-    # If we have a signed state, store tokens on the user's record
-    if state and AUTH_ENABLED:
-        try:
-            clerk_user_id = verify_oauth_state(state)
-            from db import UserProfile, OAuthTokenSet
-            user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
-            if user:
-                user.docusign_tokens = OAuthTokenSet(
-                    access_token=token_data["access_token"],
-                    refresh_token=token_data.get("refresh_token"),
-                    account_id=account_id,
-                )
-                await user.save()
-                log.info("Stored DocuSign tokens on user %s", clerk_user_id)
-        except HTTPException:
-            log.warning("Invalid OAuth state in DocuSign callback, falling back to module-level storage")
-
-    # Always store module-level as fallback (for webhooks, etc.)
-    docusign_set_oauth_tokens(
-        access_token=token_data["access_token"],
-        refresh_token=token_data.get("refresh_token"),
-        account_id=account_id,
-    )
-
-    return RedirectResponse(url=f"{frontend_url}?docusign_connected=true")
-
-
-# ---------------------------------------------------------------------------
-# DocuSign Webhook
-# ---------------------------------------------------------------------------
-
-@app.post("/api/webhooks/docusign")
-async def docusign_webhook(payload: dict):
-    """Receive DocuSign Connect webhook events."""
-    result = await docusign_handle_webhook(payload)
-    return result
 
 
 # ---------------------------------------------------------------------------

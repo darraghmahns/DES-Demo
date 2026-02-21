@@ -3,6 +3,7 @@
 import json
 
 from openai import OpenAI
+from pydantic import ValidationError
 
 from schemas import VerificationCitation
 
@@ -84,6 +85,7 @@ def verify_extraction(
         response_format={"type": "json_object"},
         temperature=0.0,
         max_tokens=4096,
+        timeout=120.0,
     )
 
     raw = json.loads(response.choices[0].message.content)
@@ -94,7 +96,7 @@ def verify_extraction(
     for c in citations_raw:
         try:
             citations.append(VerificationCitation.model_validate(c))
-        except Exception:
+        except (ValidationError, TypeError, KeyError):
             # Skip malformed citations rather than failing
             continue
 

@@ -82,43 +82,35 @@ class DocuSignClient:
 
     def _refresh_access_token(self) -> bool:
         """Attempt to refresh the access token using refresh token or JWT."""
+        from oauth_helpers import refresh_oauth_token
+
         # Try refresh_token grant first
-        if all([self._refresh_token, self._client_id, self._client_secret]):
+        data = refresh_oauth_token(
+            token_url=f"https://{self._auth_server}/oauth/token",
+            refresh_token=self._refresh_token or "",
+            client_id=self._client_id or "",
+            client_secret=self._client_secret or "",
+        )
+        if data:
+            self._access_token = data["access_token"]
+            if "refresh_token" in data:
+                self._refresh_token = data["refresh_token"]
+
+            self._client.close()
+            self._client = self._build_client()
+
+            # Persist refreshed tokens
             try:
-                resp = httpx.post(
-                    f"https://{self._auth_server}/oauth/token",
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": self._refresh_token,
-                    },
-                    auth=(self._client_id, self._client_secret),
-                    timeout=15.0,
+                from docusign_connector import set_oauth_tokens
+                set_oauth_tokens(
+                    access_token=self._access_token,
+                    refresh_token=self._refresh_token,
                 )
-                resp.raise_for_status()
-                data = resp.json()
+            except ImportError:
+                pass
 
-                self._access_token = data["access_token"]
-                if "refresh_token" in data:
-                    self._refresh_token = data["refresh_token"]
-
-                self._client.close()
-                self._client = self._build_client()
-
-                # Persist refreshed tokens
-                try:
-                    from docusign_connector import set_oauth_tokens
-                    set_oauth_tokens(
-                        access_token=self._access_token,
-                        refresh_token=self._refresh_token,
-                    )
-                except ImportError:
-                    pass
-
-                log.info("DocuSign token refreshed via refresh_token")
-                return True
-
-            except Exception as exc:
-                log.warning("Refresh token grant failed: %s — trying JWT", exc)
+            log.info("DocuSign token refreshed via refresh_token")
+            return True
 
         # Fallback to JWT grant
         try:

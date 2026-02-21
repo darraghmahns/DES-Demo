@@ -192,6 +192,12 @@ def sign_oauth_state(clerk_user_id: str) -> str:
     Format: base64(json({uid, ts})).signature
     Uses CLERK_SECRET_KEY as HMAC key.
     """
+    if not CLERK_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Cannot sign OAuth state: CLERK_SECRET_KEY not configured",
+        )
+
     payload = json.dumps({"uid": clerk_user_id, "ts": int(time.time())})
     payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
     sig = hmac.new(
@@ -205,6 +211,12 @@ def verify_oauth_state(state: str) -> str:
 
     Raises HTTPException on invalid/expired state.
     """
+    if not CLERK_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Cannot verify OAuth state: CLERK_SECRET_KEY not configured",
+        )
+
     parts = state.split(".", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
@@ -219,7 +231,7 @@ def verify_oauth_state(state: str) -> str:
 
     try:
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="Malformed OAuth state")
 
     ts = payload.get("ts", 0)

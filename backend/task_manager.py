@@ -11,11 +11,18 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+TASK_TTL_SECONDS = 3600  # 1 hour — completed tasks older than this are pruned
+MAX_COMPLETED_TASKS = 50  # hard cap on completed/errored tasks in memory
 
 
 class TaskStatus(str, Enum):
@@ -35,6 +42,7 @@ class ExtractionTask:
     status: TaskStatus = TaskStatus.PENDING
     events: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = field(default=None)
     _waiters: list[asyncio.Event] = field(default_factory=list, repr=False)
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -43,6 +51,11 @@ class ExtractionTask:
         self.events.append(event)
         for waiter in self._waiters:
             waiter.set()
+
+    def mark_complete(self, status: TaskStatus) -> None:
+        """Mark task as completed/errored and record the timestamp."""
+        self.status = status
+        self.completed_at = datetime.now(timezone.utc)
 
     def add_waiter(self) -> asyncio.Event:
         """Register a new waiter that will be notified on new events."""
@@ -105,13 +118,41 @@ def list_tasks() -> list[dict[str, Any]]:
     ]
 
 
-def cleanup_old_tasks(max_completed: int = 50) -> None:
-    """Remove old completed/errored tasks to prevent unbounded memory growth."""
-    completed = [
+def cleanup_old_tasks(
+    max_completed: int = MAX_COMPLETED_TASKS,
+    ttl_seconds: int = TASK_TTL_SECONDS,
+) -> None:
+    """Remove old completed/errored tasks using TTL + count cap.
+
+    Two-pass cleanup:
+      1. Remove any finished task older than *ttl_seconds*.
+      2. If still over *max_completed*, remove oldest by completion time.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=ttl_seconds)
+
+    finished = [
         t for t in _tasks.values()
         if t.status in (TaskStatus.COMPLETE, TaskStatus.ERROR)
     ]
-    completed.sort(key=lambda t: t.created_at)
-    while len(completed) > max_completed:
-        old = completed.pop(0)
+
+    # Pass 1: TTL-based removal
+    expired_ids = [
+        t.task_id for t in finished
+        if (t.completed_at or t.created_at) < cutoff
+    ]
+    for tid in expired_ids:
+        del _tasks[tid]
+
+    if expired_ids:
+        log.debug("Cleaned up %d expired tasks (TTL=%ds)", len(expired_ids), ttl_seconds)
+
+    # Pass 2: count cap
+    remaining = [
+        t for t in _tasks.values()
+        if t.status in (TaskStatus.COMPLETE, TaskStatus.ERROR)
+    ]
+    remaining.sort(key=lambda t: t.completed_at or t.created_at)
+    while len(remaining) > max_completed:
+        old = remaining.pop(0)
         del _tasks[old.task_id]

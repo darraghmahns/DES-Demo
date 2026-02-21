@@ -110,37 +110,27 @@ class DotloopClient:
 
         Returns True if refresh succeeded, False otherwise.
         """
-        if not all([self._refresh_token, self._client_id, self._client_secret]):
-            log.warning("Cannot refresh token: missing refresh_token, client_id, or client_secret")
+        from oauth_helpers import refresh_oauth_token
+
+        data = refresh_oauth_token(
+            token_url=self.AUTH_URL,
+            refresh_token=self._refresh_token or "",
+            client_id=self._client_id or "",
+            client_secret=self._client_secret or "",
+        )
+        if not data:
             return False
 
-        try:
-            resp = httpx.post(
-                self.AUTH_URL,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": self._refresh_token,
-                },
-                auth=(self._client_id, self._client_secret),
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        self._api_token = data["access_token"]
+        if "refresh_token" in data:
+            self._refresh_token = data["refresh_token"]
 
-            self._api_token = data["access_token"]
-            if "refresh_token" in data:
-                self._refresh_token = data["refresh_token"]
+        # Rebuild client with new token
+        self._client.close()
+        self._client = self._build_client()
 
-            # Rebuild client with new token
-            self._client.close()
-            self._client = self._build_client()
-
-            log.info("Dotloop token refreshed successfully")
-            return True
-
-        except Exception as exc:
-            log.error("Token refresh failed: %s", exc)
-            return False
+        log.info("Dotloop token refreshed successfully")
+        return True
 
     def close(self) -> None:
         """Close the HTTP client."""
