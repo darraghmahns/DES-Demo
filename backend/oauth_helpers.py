@@ -20,6 +20,8 @@ def refresh_oauth_token(
     client_id: str,
     client_secret: str,
     timeout: float = 15.0,
+    *,
+    use_query_params: bool = False,
 ) -> dict[str, Any] | None:
     """Exchange a refresh token for a new access token.
 
@@ -29,6 +31,8 @@ def refresh_oauth_token(
         client_id: OAuth client ID.
         client_secret: OAuth client secret.
         timeout: HTTP request timeout in seconds.
+        use_query_params: Send grant params as query parameters instead of
+            form body.  Required by Dotloop's non-standard token endpoint.
 
     Returns:
         Token response dict with at least ``access_token`` (and optionally
@@ -38,13 +42,15 @@ def refresh_oauth_token(
         log.warning("Cannot refresh token: missing refresh_token, client_id, or client_secret")
         return None
 
+    grant_data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
     try:
         resp = httpx.post(
             token_url,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            },
+            params=grant_data if use_query_params else None,
+            data=None if use_query_params else grant_data,
             auth=(client_id, client_secret),
             timeout=timeout,
         )

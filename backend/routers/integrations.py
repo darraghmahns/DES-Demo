@@ -304,7 +304,7 @@ async def dotloop_oauth_callback(
     try:
         resp = httpx.post(
             f"{DOTLOOP_AUTH_BASE}/oauth/token",
-            data={
+            params={
                 "grant_type": "authorization_code",
                 "code": code,
                 "redirect_uri": redirect_uri,
