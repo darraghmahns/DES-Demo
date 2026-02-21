@@ -53,8 +53,8 @@ export function TransactionDetail() {
   const { id } = useParams<{ id: string }>();
   const {
     transaction, completion, loading, error,
-    update, addParticipantByEmail, removeParticipantById,
-    sendInvitation, runAutoFill, refresh,
+    update, removeParticipantById,
+    sendInvitation, runAutoFill,
   } = useTransactionDetail(id);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [inviteEmail, setInviteEmail] = useState('');

@@ -20,10 +20,9 @@ export async function apiFetch<T = unknown>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    ...(await authHeaders()),
-    ...(options.headers as Record<string, string> || {}),
-  };
+  const auth = await authHeaders();
+  const extra = (options.headers as Record<string, string>) || {};
+  const headers: Record<string, string> = { ...auth, ...extra };
 
   // Don't set Content-Type for FormData (browser sets boundary)
   if (!(options.body instanceof FormData) && !headers['Content-Type']) {

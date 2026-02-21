@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { OnboardingStepId, OnboardingStepStatus, OnboardingStatus } from '../api';
-import { fetchOnboardingStatus, updateOnboardingStep, completeOnboarding } from '../api';
+import { fetchOnboardingStatus, updateOnboardingStep } from '../api';
 
 // ---------------------------------------------------------------------------
 // Constants
