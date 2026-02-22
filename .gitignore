@@ -17,7 +17,6 @@ frontend/dist/
 # Environment & secrets
 .env
 .env.*
-!frontend/.env
 .docusign_tokens.json
 docusign_private.pem
 
@@ -52,4 +51,5 @@ frontend/e2e/screenshots/
 frontend/test-results/
 frontend/playwright-report/
 
-frontend/.env
+# Local docs/plans (not committed)
+docs/
