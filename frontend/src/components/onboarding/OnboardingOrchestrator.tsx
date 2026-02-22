@@ -8,9 +8,15 @@ import { OnboardingPanel } from './OnboardingPanel';
 
 interface OnboardingOrchestratorProps {
   children: React.ReactNode;
+  onMobileNavOpen?: boolean;
+  onMobileNavClose?: () => void;
 }
 
-export function OnboardingOrchestrator({ children }: OnboardingOrchestratorProps) {
+export function OnboardingOrchestrator({
+  children,
+  onMobileNavOpen = false,
+  onMobileNavClose,
+}: OnboardingOrchestratorProps) {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -40,13 +46,24 @@ export function OnboardingOrchestrator({ children }: OnboardingOrchestratorProps
     }
   }, [isOnboarding, panelOpen, currentStepIndex, loading, location.pathname, navigate]);
 
-  // Handle final completion — navigate to dashboard and advance
+  // Mutual exclusion: close onboarding panel when mobile nav opens
+  useEffect(() => {
+    if (onMobileNavOpen && panelOpen) {
+      dismissPanel();
+    }
+  }, [onMobileNavOpen, panelOpen, dismissPanel]);
+
+  // Mutual exclusion: close mobile nav when onboarding panel opens
+  const handleOpenPanel = () => {
+    if (onMobileNavClose) onMobileNavClose();
+    openPanel();
+  };
+
   const handleFinish = async () => {
-    await advanceStep(); // marks 'complete' step as completed
+    await advanceStep();
     navigate('/dashboard');
   };
 
-  // Context value for consuming pages
   const contextValue = {
     isOnboarding,
     currentStep,
@@ -79,11 +96,10 @@ export function OnboardingOrchestrator({ children }: OnboardingOrchestratorProps
         />
       )}
 
-      {/* Floating reopen button when panel is dismissed but onboarding is active */}
       {isOnboarding && !panelOpen && (
         <button
           className="ob-reopen-btn"
-          onClick={openPanel}
+          onClick={handleOpenPanel}
           title="Resume setup guide"
           aria-label="Resume setup guide"
         >

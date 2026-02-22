@@ -3,10 +3,23 @@ import { SignedIn, SignedOut, SignIn, UserButton, OrganizationSwitcher } from '@
 
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
-export function Navbar() {
+interface NavbarProps {
+  onMenuToggle: () => void;
+}
+
+export function Navbar({ onMenuToggle }: NavbarProps) {
   return (
     <nav className="navbar">
-      <div className="navbar-brand">
+      <div className="navbar-left">
+        <button
+          className="navbar-hamburger"
+          onClick={onMenuToggle}
+          aria-label="Toggle navigation menu"
+        >
+          <span className="hamburger-line" />
+          <span className="hamburger-line" />
+          <span className="hamburger-line" />
+        </button>
         <Link to="/" className="navbar-logo">
           <span className="navbar-logo-text">D.E.S.</span>
           <span className="navbar-logo-sub">Data Entry Sucks</span>
@@ -16,14 +29,16 @@ export function Navbar() {
         {CLERK_ENABLED ? (
           <>
             <SignedIn>
-              <OrganizationSwitcher
-                appearance={{
-                  elements: {
-                    rootBox: { color: '#e0e0e0' },
-                    organizationSwitcherTrigger: { color: '#e0e0e0' },
-                  },
-                }}
-              />
+              <div className="navbar-org-switcher">
+                <OrganizationSwitcher
+                  appearance={{
+                    elements: {
+                      rootBox: { color: '#e0e0e0' },
+                      organizationSwitcherTrigger: { color: '#e0e0e0' },
+                    },
+                  }}
+                />
+              </div>
               <UserButton
                 appearance={{
                   elements: {

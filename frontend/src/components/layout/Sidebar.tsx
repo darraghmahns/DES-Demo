@@ -10,33 +10,45 @@ const NAV_ITEMS = [
   { to: '/profile/documents', label: 'Documents', icon: '\u229F' },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+export function Sidebar({ open, onClose }: SidebarProps) {
   const { isOnboarding, currentStep } = useOnboardingContext();
 
-  // Determine which nav route the current onboarding step targets
   const activeOnboardingRoute = isOnboarding && currentStep
     ? ONBOARDING_STEPS.find((s) => s.id === currentStep)?.route ?? null
     : null;
 
   return (
-    <aside className="sidebar">
-      <nav className="sidebar-nav">
-        {NAV_ITEMS.map((item) => {
-          const isOnboardingTarget = activeOnboardingRoute === item.to;
-          return (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                `sidebar-link${isActive ? ' sidebar-link-active' : ''}${isOnboardingTarget ? ' sidebar-link-onboarding-active' : ''}`
-              }
-            >
-              <span className="sidebar-icon">{item.icon}</span>
-              <span className="sidebar-label">{item.label}</span>
-            </NavLink>
-          );
-        })}
-      </nav>
-    </aside>
+    <>
+      {/* Backdrop overlay — visible only on mobile when drawer is open */}
+      <div
+        className={`sidebar-backdrop ${open ? 'sidebar-backdrop-visible' : ''}`}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <aside className={`sidebar ${open ? 'sidebar-open' : ''}`}>
+        <nav className="sidebar-nav">
+          {NAV_ITEMS.map((item) => {
+            const isOnboardingTarget = activeOnboardingRoute === item.to;
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  `sidebar-link${isActive ? ' sidebar-link-active' : ''}${isOnboardingTarget ? ' sidebar-link-onboarding-active' : ''}`
+                }
+              >
+                <span className="sidebar-icon">{item.icon}</span>
+                <span className="sidebar-label">{item.label}</span>
+              </NavLink>
+            );
+          })}
+        </nav>
+      </aside>
+    </>
   );
 }

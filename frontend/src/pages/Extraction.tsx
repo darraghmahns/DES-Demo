@@ -143,7 +143,7 @@ function flattenObject(
 export function ExtractionPage() {
   const { markStepAction } = useOnboardingContext();
   // Core
-  const [mode, setMode] = useState<Mode>('real_estate');
+  const [mode, _setMode] = useState<Mode>('real_estate'); // setMode unused — gov mode halted
   const [activeView, setActiveView] = useState<ViewId>('extraction');
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
@@ -399,28 +399,22 @@ export function ExtractionPage() {
   }
 
   // ---------------------------------------------------------------------------
-  // Mode switching
+  // Mode switching (disabled — government mode halted)
   // ---------------------------------------------------------------------------
 
-  function handleModeChange(newMode: Mode) {
-    if (newMode === mode) return;
-
-    // Remember selected doc for current mode
-    modeDocRef.current[mode] = selectedDoc;
-
-    // Unsubscribe from current SSE
-    if (currentAbortRef.current) {
-      currentAbortRef.current();
-      currentAbortRef.current = null;
-    }
-
-    // Reset
-    resetResults();
-    setIsRunning(false);
-    setSelectedDoc(null);
-    setSelectedDocs(new Set());
-    setMode(newMode);
-  }
+  // function handleModeChange(newMode: Mode) {
+  //   if (newMode === mode) return;
+  //   modeDocRef.current[mode] = selectedDoc;
+  //   if (currentAbortRef.current) {
+  //     currentAbortRef.current();
+  //     currentAbortRef.current = null;
+  //   }
+  //   resetResults();
+  //   setIsRunning(false);
+  //   setSelectedDoc(null);
+  //   setSelectedDocs(new Set());
+  //   setMode(newMode);
+  // }
 
   // ---------------------------------------------------------------------------
   // Cache check
@@ -741,20 +735,7 @@ export function ExtractionPage() {
       <header className="header">
         <div className="header-left">
           <span className="header-title">D.E.S.</span>
-          <div className="mode-toggle">
-            <button
-              className={`mode-btn ${mode === 'real_estate' ? 'active' : ''}`}
-              onClick={() => handleModeChange('real_estate')}
-            >
-              Real Estate
-            </button>
-            <button
-              className={`mode-btn ${mode === 'gov' ? 'active' : ''}`}
-              onClick={() => handleModeChange('gov')}
-            >
-              Government
-            </button>
-          </div>
+          {/* Mode toggle hidden — government mode halted for now */}
           {mode === 'real_estate' && (
             <div className="view-toggle">
               <button
