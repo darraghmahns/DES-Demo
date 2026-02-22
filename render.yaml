@@ -51,6 +51,8 @@ services:
         value: account-d.docusign.com
       - key: DOCUSIGN_BASE_URL
         value: https://demo.docusign.net/restapi
+      - key: DOCUSIGN_REDIRECT_URI
+        value: https://des-demo-api.onrender.com/api/docusign/oauth/callback
       # CORS — must include frontend static site URL
       - key: CORS_ORIGINS
         sync: false
