@@ -823,7 +823,9 @@ body {
   }
 
   .header-left {
-    gap: 10px;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
   }
 
   .header-subtitle {
@@ -4172,4 +4174,195 @@ body {
 /* --- Sidebar Backdrop (mobile only) --- */
 .sidebar-backdrop {
   display: none; /* hidden on desktop */
+}
+
+/* =============================================================================
+   Mobile Breakpoint (max-width: 768px)
+   ============================================================================= */
+@media (max-width: 768px) {
+
+  /* --- Navbar: compact layout --- */
+  .navbar-hamburger {
+    display: flex;
+  }
+
+  .navbar-logo-sub {
+    display: none;
+  }
+
+  .navbar-org-switcher {
+    display: none;
+  }
+
+  .navbar {
+    padding: 0 12px;
+  }
+
+  /* --- Sidebar: slide-in drawer --- */
+  .sidebar {
+    position: fixed;
+    top: 52px; /* below navbar */
+    left: 0;
+    bottom: 0;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    width: 240px;
+  }
+
+  .sidebar-open {
+    transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    top: 52px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+
+  .sidebar-backdrop-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* --- Sidebar touch targets --- */
+  .sidebar-link {
+    min-height: 44px;
+    padding: 12px 20px;
+  }
+
+  /* --- Content padding --- */
+  .app-shell-content {
+    padding: 12px;
+  }
+
+  /* --- Page headings: smaller on mobile --- */
+  .page-dashboard h1,
+  .page-profile h1,
+  .page-transactions h1 {
+    font-size: 1.25rem;
+  }
+
+  .page-subtitle {
+    font-size: 0.85rem;
+  }
+
+  /* --- Dashboard: stack completion banner vertically --- */
+  .dashboard-completion-banner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  /* --- Profile: stack header vertically --- */
+  .profile-header {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .profile-header-actions {
+    align-items: flex-start;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* --- Profile: single-column form fields --- */
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* --- Profile: stack integration cards --- */
+  .integrations-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* --- Profile section padding --- */
+  .profile-section {
+    padding: 14px;
+  }
+
+  /* --- Transactions: responsive cards --- */
+  .txn-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .page-header-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* --- Transactions: hide low-priority details --- */
+  .txn-card-details .txn-card-detail:nth-child(n+3) {
+    display: none;
+  }
+
+  /* --- Touch targets: buttons --- */
+  .btn-primary,
+  .btn-secondary {
+    min-height: 44px;
+  }
+
+  /* --- Onboarding panel: disable margin-right push on mobile --- */
+  .ob-layout {
+    margin-right: 0 !important;
+  }
+}
+
+/* =============================================================================
+   Small Phone Breakpoint (max-width: 480px)
+   ============================================================================= */
+@media (max-width: 480px) {
+
+  /* --- Even tighter padding --- */
+  .app-shell-content {
+    padding: 8px;
+  }
+
+  /* --- Dashboard cards: reduce min-width so they don't overflow --- */
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .dashboard-card {
+    padding: 14px;
+  }
+
+  /* --- Profile section: tighter padding --- */
+  .profile-section {
+    padding: 10px;
+  }
+
+  /* --- Transaction cards: tighter padding --- */
+  .txn-card {
+    padding: 12px;
+  }
+
+  /* --- Navbar: even more compact --- */
+  .navbar {
+    padding: 0 8px;
+    height: 48px;
+  }
+
+  .navbar-logo-text {
+    font-size: 16px;
+  }
+
+  /* --- Sidebar: position below smaller navbar --- */
+  .sidebar {
+    top: 48px;
+  }
+
+  .sidebar-backdrop {
+    top: 48px;
+  }
 }
