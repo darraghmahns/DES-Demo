@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional
 
@@ -110,6 +110,39 @@ app.include_router(chat_router)
 from clerk_webhook import router as clerk_webhook_router
 
 app.include_router(clerk_webhook_router)
+
+
+# ---------------------------------------------------------------------------
+# Demo Login (Phase 2 — bypass Clerk for @deslabs.local demo accounts)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/demo-login")
+async def demo_login():
+    """Issue a demo session token for the dev@deslabs.local user.
+
+    No authentication required. Only issues tokens for the hardcoded
+    demo account — cannot be used to impersonate arbitrary users.
+    """
+    from db import UserProfile
+    from auth import generate_magic_link_token, sign_magic_link, _MAGIC_LINK_TTL
+
+    demo_email = "dev@deslabs.local"
+    user = await UserProfile.find_one(UserProfile.email == demo_email)
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Demo user not found. Run seed_demo.py first.",
+        )
+
+    raw_token = generate_magic_link_token()
+    user.magic_link_token = raw_token
+    user.magic_link_expires = datetime.now(timezone.utc) + timedelta(seconds=_MAGIC_LINK_TTL)
+    user.last_login = datetime.now(timezone.utc)
+    await user.save()
+
+    signed = sign_magic_link(raw_token, demo_email)
+    return {"demo_token": signed, "email": user.email, "name": user.name}
+
 
 # ---------------------------------------------------------------------------
 # Onboarding

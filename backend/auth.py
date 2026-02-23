@@ -129,11 +129,32 @@ async def _find_or_create_user(clerk_user_id: str, claims: dict) -> "UserProfile
     return user
 
 
+async def _try_demo_token(token: str):
+    """Try to authenticate a demo magic-link token. Returns UserProfile or None."""
+    try:
+        payload = verify_magic_link(token)
+        email = payload.get("email", "")
+        if not email.endswith("@deslabs.local"):
+            return None
+        from db import UserProfile
+        user = await UserProfile.find_one(UserProfile.email == email)
+        if not user or user.magic_link_token != payload.get("token"):
+            return None
+        if user.magic_link_expires and user.magic_link_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            return None
+        return user
+    except Exception:
+        return None
+
+
 async def get_current_user(request: Request):
     """FastAPI dependency — returns UserProfile or raises 401.
 
-    When auth is disabled (no CLERK_SECRET_KEY), returns None so
-    endpoints can check `if user:` to behave differently.
+    Auth paths (tried in order):
+    1. If AUTH_ENABLED=False, return None (dev mode)
+    2. Try Clerk JWT verification
+    3. Try demo magic-link token (for @deslabs.local accounts)
+    4. Otherwise raise 401
     """
     if not AUTH_ENABLED:
         return None
@@ -142,12 +163,21 @@ async def get_current_user(request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    claims = verify_clerk_token(token)
-    clerk_user_id = claims.get("sub")
-    if not clerk_user_id:
-        raise HTTPException(status_code=401, detail="Invalid token: no subject")
+    # Path 1: Try Clerk JWT
+    try:
+        claims = verify_clerk_token(token)
+        clerk_user_id = claims.get("sub")
+        if clerk_user_id:
+            return await _find_or_create_user(clerk_user_id, claims)
+    except HTTPException:
+        pass  # Not a valid Clerk JWT — fall through to demo token
 
-    return await _find_or_create_user(clerk_user_id, claims)
+    # Path 2: Try demo magic-link token
+    demo_user = await _try_demo_token(token)
+    if demo_user:
+        return demo_user
+
+    raise HTTPException(status_code=401, detail="Invalid token")
 
 
 async def get_optional_user(request: Request):
@@ -159,16 +189,17 @@ async def get_optional_user(request: Request):
     if not token:
         return None
 
+    # Try Clerk JWT first
     try:
         claims = verify_clerk_token(token)
+        clerk_user_id = claims.get("sub")
+        if clerk_user_id:
+            return await _find_or_create_user(clerk_user_id, claims)
     except HTTPException:
-        return None
+        pass
 
-    clerk_user_id = claims.get("sub")
-    if not clerk_user_id:
-        return None
-
-    return await _find_or_create_user(clerk_user_id, claims)
+    # Try demo magic-link token
+    return await _try_demo_token(token)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 /** Profile page: personal info, role management, role-specific forms, and AI chat builder. */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useProfile } from '../hooks/useProfile';
 import { useOnboardingContext } from '../context/OnboardingContext';
 import { useClerkAvatar } from '../hooks/useClerkAvatar';
@@ -13,6 +13,7 @@ import { SellerForm } from '../components/profile/SellerForm';
 import { LoanOfficerForm } from '../components/profile/LoanOfficerForm';
 import { CompletionIndicator } from '../components/common/CompletionIndicator';
 import { ChatInterface } from '../components/chat/ChatInterface';
+import { useChat } from '../hooks/useChat';
 import type { AgentProfile, BuyerProfile, SellerProfile, LoanOfficerProfile } from '../types/user';
 
 const DEFAULT_AGENT: AgentProfile = { areas_served: [] };
@@ -38,6 +39,7 @@ export function Profile() {
   const { markStepAction } = useOnboardingContext();
   const { avatarUrl } = useClerkAvatar();
   const { dotloopConnected, docusignConnected, refresh: refreshIntegrations } = useIntegrations();
+  const chatState = useChat();
   const [viewMode, setViewMode] = useState<ViewMode>('form');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -46,18 +48,18 @@ export function Profile() {
   const [state, setState] = useState('');
   const [zip, setZip] = useState('');
   const [sharedSaving, setSharedSaving] = useState(false);
-  const [initialized, setInitialized] = useState(false);
 
-  // Sync form with loaded profile
-  if (profile && !initialized) {
-    setName(profile.name || '');
-    setPhone(profile.phone || '');
-    setStreet(profile.address?.street || '');
-    setCity(profile.address?.city || '');
-    setState(profile.address?.state || '');
-    setZip(profile.address?.zip || '');
-    setInitialized(true);
-  }
+  // Sync form fields whenever profile data changes and we're in form view
+  useEffect(() => {
+    if (profile && viewMode === 'form' && !loading) {
+      setName(profile.name || '');
+      setPhone(profile.phone || '');
+      setStreet(profile.address?.street || '');
+      setCity(profile.address?.city || '');
+      setState(profile.address?.state || '');
+      setZip(profile.address?.zip || '');
+    }
+  }, [profile, viewMode, loading]);
 
   const handleSaveShared = async () => {
     setSharedSaving(true);
@@ -118,7 +120,7 @@ export function Profile() {
           <div className="view-toggle">
             <button
               className={`toggle-btn ${viewMode === 'form' ? 'active' : ''}`}
-              onClick={() => setViewMode('form')}
+              onClick={() => { refresh(); setViewMode('form'); }}
             >
               Form View
             </button>
@@ -135,7 +137,7 @@ export function Profile() {
       {error && <div className="error-banner">{error}</div>}
 
       {viewMode === 'chat' ? (
-        <ChatInterface onProfileUpdated={() => { setInitialized(false); refresh(); }} />
+        <ChatInterface chatState={chatState} onProfileUpdated={() => { refresh(); window.dispatchEvent(new Event('profile-updated')); }} />
       ) : (
         <>
           {/* Shared Fields */}

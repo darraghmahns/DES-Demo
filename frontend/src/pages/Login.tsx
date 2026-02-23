@@ -1,19 +1,44 @@
 import { SignIn } from '@clerk/clerk-react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
+import { useState } from 'react';
+import { useDemoAuth, getDemoToken } from '../hooks/useDemoAuth';
 
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 export function Login() {
+  const navigate = useNavigate();
+  const { startDemo } = useDemoAuth();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
   // If Clerk is not configured, redirect to dashboard (dev mode)
   if (!CLERK_ENABLED) {
     return <Navigate to="/dashboard" replace />;
   }
 
+  // If already in demo mode, redirect to dashboard
+  if (getDemoToken()) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  const handleTryDemo = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      await startDemo();
+      navigate('/dashboard');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start demo');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="page-login">
       <div className="login-container">
         <h1>D.E.S.</h1>
-        <p>Data Entry Sucks — Sign in to continue</p>
+        <p>Data Entry Sucks &mdash; Sign in to continue</p>
         <SignIn
           routing="hash"
           appearance={{
@@ -50,6 +75,20 @@ export function Login() {
             },
           }}
         />
+        <div className="login-divider">
+          <span>or</span>
+        </div>
+        <button
+          className="demo-login-btn"
+          onClick={handleTryDemo}
+          disabled={loading}
+        >
+          {loading ? 'Starting Demo...' : 'Try Demo'}
+        </button>
+        {error && <p className="demo-login-error">{error}</p>}
+        <p className="demo-login-hint">
+          Explore the app with sample data &mdash; no account needed
+        </p>
       </div>
     </div>
   );

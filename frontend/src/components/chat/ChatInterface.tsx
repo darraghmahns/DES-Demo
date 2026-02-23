@@ -1,16 +1,22 @@
 /** Chat interface — message list, input, and profile completion sidebar. */
 
 import { useEffect, useRef, useState } from 'react';
-import { useChat } from '../../hooks/useChat';
+import { useChat, type ChatMessage as ChatMsg } from '../../hooks/useChat';
 import { ChatMessage } from './ChatMessage';
 import { CompletionIndicator } from '../common/CompletionIndicator';
 
+/** Chat state that can be owned by a parent to survive unmount/remount cycles. */
+export type ChatState = ReturnType<typeof useChat>;
+
 interface Props {
   onProfileUpdated?: () => void;
+  /** If provided, use this external chat state instead of creating a new one. */
+  chatState?: ChatState;
 }
 
-export function ChatInterface({ onProfileUpdated }: Props) {
-  const { messages, sending, error, completionPct, send, reset } = useChat();
+export function ChatInterface({ onProfileUpdated, chatState }: Props) {
+  const ownChat = useChat();
+  const { messages, sending, error, completionPct, send, reset } = chatState ?? ownChat;
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);

@@ -90,11 +90,11 @@ export function IntegrationsSection({
             <span className="integration-icon">&#x1F517;</span>
             <span className="integration-name">Dotloop</span>
             <span className={`integration-badge ${dotloopConnected ? 'connected' : ''}`}>
-              {dotloopConnected ? 'Connected' : 'Not Connected'}
+              {dotloopConnected ? 'Connected' : 'Ready to Connect'}
             </span>
           </div>
           <p className="integration-description">
-            Sync extracted data to Dotloop loops for transaction management.
+            Connect your Dotloop account to sync documents automatically.
           </p>
           {dotloopConnected ? (
             <button
@@ -117,11 +117,11 @@ export function IntegrationsSection({
             <span className="integration-icon">&#x1F4DD;</span>
             <span className="integration-name">DocuSign</span>
             <span className={`integration-badge ${docusignConnected ? 'connected' : ''}`}>
-              {docusignConnected ? 'Connected' : 'Not Connected'}
+              {docusignConnected ? 'Connected' : 'Ready to Connect'}
             </span>
           </div>
           <p className="integration-description">
-            Push extraction results to DocuSign envelopes for e-signatures.
+            Connect your DocuSign account to send envelopes for e-signatures.
           </p>
           {docusignConnected ? (
             <button

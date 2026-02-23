@@ -12,9 +12,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 from auth import get_current_user, AUTH_ENABLED
 from db import UserProfile
