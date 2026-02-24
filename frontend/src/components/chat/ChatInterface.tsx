@@ -1,7 +1,7 @@
 /** Chat interface — message list, input, and profile completion sidebar. */
 
 import { useEffect, useRef, useState } from 'react';
-import { useChat, type ChatMessage as ChatMsg } from '../../hooks/useChat';
+import { useChat } from '../../hooks/useChat';
 import { ChatMessage } from './ChatMessage';
 import { CompletionIndicator } from '../common/CompletionIndicator';
 
