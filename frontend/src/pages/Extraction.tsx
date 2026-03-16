@@ -734,7 +734,7 @@ export function ExtractionPage() {
       {/* Header */}
       <header className="header">
         <div className="header-left">
-          <span className="header-title">D.E.S.</span>
+          <span className="header-title">JGP</span>
           {/* Mode toggle hidden — government mode halted for now */}
           {mode === 'real_estate' && (
             <div className="view-toggle">

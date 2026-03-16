@@ -12,7 +12,7 @@ export function DocumentsStep({ onNext, onSkip }: DocumentsStepProps) {
       <h2 className="ob-step-heading">Upload Your Documents</h2>
       <p className="ob-step-body">
         Upload your supporting documents — pre-approval letters, bank
-        statements, pay stubs, and more. D.E.S. will automatically extract
+        statements, pay stubs, and more. JGP will automatically extract
         and organize the data for your transactions.
       </p>
       <ul className="ob-step-checklist">

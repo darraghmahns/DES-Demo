@@ -11,7 +11,7 @@ export function ProfileStep({ onNext, onSkip }: ProfileStepProps) {
       <div className="ob-step-icon">&#x1F464;</div>
       <h2 className="ob-step-heading">Set Up Your Profile</h2>
       <p className="ob-step-body">
-        Fill in your basic information and select your role. This helps D.E.S.
+        Fill in your basic information and select your role. This helps JGP
         tailor your experience and auto-fill transaction documents.
       </p>
       <ul className="ob-step-checklist">

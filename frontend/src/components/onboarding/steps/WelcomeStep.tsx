@@ -8,10 +8,10 @@ export function WelcomeStep({ onNext }: WelcomeStepProps) {
   return (
     <div className="ob-step">
       <div className="ob-step-icon">&#x1F44B;</div>
-      <h2 className="ob-step-title">Welcome to D.E.S.</h2>
-      <p className="ob-step-subtitle">Document Entry System</p>
+      <h2 className="ob-step-title">Welcome to JGP</h2>
+      <p className="ob-step-subtitle">Julie Gardner Properties</p>
       <p className="ob-step-body">
-        D.E.S. uses AI to extract structured data from real estate documents,
+        JGP uses AI to extract structured data from real estate documents,
         manage transactions, and keep your deals organized. Let's walk you
         through the key features.
       </p>

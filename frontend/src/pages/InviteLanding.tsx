@@ -80,7 +80,7 @@ export function InviteLanding() {
   return (
     <div className="page-invite">
       <div className="invite-container">
-        <div className="invite-logo">D.E.S.</div>
+        <div className="invite-logo">JGP</div>
 
         {step === 'loading' && (
           <div className="invite-card">

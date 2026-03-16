@@ -4,6 +4,23 @@ import { SignedIn, SignedOut, SignIn, UserButton, OrganizationSwitcher } from '@
 import { useDemoAuth } from '../../hooks/useDemoAuth';
 import { getProfile } from '../../api/profile';
 
+function ThemeToggle() {
+  const [theme, setTheme] = useState(
+    () => localStorage.getItem('theme') ?? 'light'
+  );
+  const toggle = () => {
+    const next = theme === 'light' ? 'dark' : 'light';
+    setTheme(next);
+    localStorage.setItem('theme', next);
+    document.documentElement.setAttribute('data-theme', next);
+  };
+  return (
+    <button onClick={toggle} className="theme-toggle" title="Toggle theme">
+      {theme === 'light' ? '🌙' : '☀️'}
+    </button>
+  );
+}
+
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 interface NavbarProps {
@@ -39,11 +56,12 @@ export function Navbar({ onMenuToggle }: NavbarProps) {
           <span className="hamburger-line" />
         </button>
         <Link to="/" className="navbar-logo">
-          <span className="navbar-logo-text">D.E.S.</span>
-          <span className="navbar-logo-sub">Data Entry Sucks</span>
+          <span className="navbar-logo-text">JGP</span>
+          <span className="navbar-logo-sub">Julie Gardner Properties</span>
         </Link>
       </div>
       <div className="navbar-actions">
+        <ThemeToggle />
         {isDemoMode ? (
           <>
             <span className="navbar-demo-badge">Demo Mode</span>

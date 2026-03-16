@@ -22,7 +22,7 @@ export function Dashboard() {
   return (
     <div className="page-dashboard">
       <h1>Dashboard</h1>
-      <p className="page-subtitle">Welcome to D.E.S. — Data Entry Sucks</p>
+      <p className="page-subtitle">Welcome to Julie Gardner Properties</p>
 
       {/* Profile Completion Banner */}
       {completion && completion.overall < 100 && (

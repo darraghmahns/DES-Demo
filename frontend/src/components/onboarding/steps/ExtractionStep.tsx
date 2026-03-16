@@ -12,7 +12,7 @@ export function ExtractionStep({ onNext, onSkip }: ExtractionStepProps) {
       <h2 className="ob-step-heading">Try Document Intelligence</h2>
       <p className="ob-step-body">
         Upload a real estate document — a purchase agreement, listing contract,
-        or disclosure — and watch D.E.S. extract structured data with
+        or disclosure — and watch JGP extract structured data with
         AI-powered intelligence.
       </p>
       <ul className="ob-step-checklist">

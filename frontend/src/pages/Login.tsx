@@ -37,8 +37,8 @@ export function Login() {
   return (
     <div className="page-login">
       <div className="login-container">
-        <h1>D.E.S.</h1>
-        <p>Data Entry Sucks &mdash; Sign in to continue</p>
+        <h1>JGP</h1>
+        <p>Julie Gardner Properties &mdash; Sign in to continue</p>
         <SignIn
           routing="hash"
           appearance={{

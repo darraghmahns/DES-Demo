@@ -4,6 +4,9 @@ import { ClerkProvider } from '@clerk/clerk-react'
 import App from './App.tsx'
 import './App.css'
 
+const savedTheme = localStorage.getItem('theme') ?? 'light';
+document.documentElement.setAttribute('data-theme', savedTheme);
+
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 
 const root = document.getElementById('root')!
