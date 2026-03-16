@@ -113,6 +113,10 @@ class DotloopContractDates(BaseModel):
     offer_date: Optional[str] = Field(default=None, description="Date offer was made")
     offer_expiration_date: Optional[str] = Field(default=None, description="Offer expiration date")
     inspection_date: Optional[str] = Field(default=None, description="Inspection deadline")
+    inspection_negotiation_deadline: Optional[str] = Field(default=None, description="Deadline to complete inspection negotiations")
+    insurance_contingency_date: Optional[str] = Field(default=None, description="Insurance contingency deadline date")
+    loan_application_deadline: Optional[str] = Field(default=None, description="Date by which buyer must submit loan application")
+    seller_response_time: Optional[str] = Field(default=None, description="Date/time by which seller must respond to the offer")
 
 
 class DotloopLoopDetails(BaseModel):

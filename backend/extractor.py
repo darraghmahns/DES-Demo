@@ -35,7 +35,11 @@ You MUST return a JSON object with this exact structure:
     "closing_date": null,
     "offer_date": null,
     "offer_expiration_date": null,
-    "inspection_date": null
+    "inspection_date": null,
+    "inspection_negotiation_deadline": null,
+    "insurance_contingency_date": null,
+    "loan_application_deadline": null,
+    "seller_response_time": null
   },
   "participants": [
     {"full_name": "", "role": "BUYER", "email": null, "phone": null, "company_name": null}
@@ -48,6 +52,12 @@ Rules:
 - For dates, use MM/DD/YYYY format.
 - Valid participant roles: BUYER, SELLER, LISTING_AGENT, BUYING_AGENT, LISTING_BROKER, BUYING_BROKER, ESCROW_TITLE_REP, LOAN_OFFICER, OTHER
 - Include ALL participants found (buyers, sellers, agents, brokers, title reps).
+- For contract_dates:
+  - inspection_date: the inspection contingency deadline (last day to complete inspection)
+  - inspection_negotiation_deadline: the deadline to complete negotiations following inspection
+  - insurance_contingency_date: the insurance contingency deadline date
+  - loan_application_deadline: the date by which the buyer must submit their loan application
+  - seller_response_time: the date/time by which the seller must respond to the offer
 - If a field is not present in the document, use null.
 - Do NOT make up or infer values that are not explicitly stated.
 """
