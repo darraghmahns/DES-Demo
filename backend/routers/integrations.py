@@ -39,6 +39,7 @@ from dotloop_connector import (
     list_dotloop_loops,
     archive_dotloop_loop,
     sync_to_dotloop,
+    preview_sync_to_dotloop,
     process_from_dotloop,
     handle_webhook as dotloop_handle_webhook,
     set_oauth_tokens,
@@ -73,6 +74,19 @@ DOCUSIGN_AUTH_SERVER = os.getenv("DOCUSIGN_AUTH_SERVER", "account-d.docusign.com
 
 class DotloopSyncRequest(BaseModel):
     loop_id: int | None = None
+    upload_document: bool = True
+
+
+class DotloopSyncPreviewRequest(BaseModel):
+    extraction_id: str
+    mode: str = "buying"  # "selling" or "buying"
+
+
+class DotloopSyncExecuteRequest(BaseModel):
+    extraction_id: str
+    mode: str = "buying"
+    loop_id: int | None = None
+    folder_name: str | None = None
     upload_document: bool = True
 
 
@@ -181,6 +195,49 @@ async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyn
             extraction_id,
             loop_id=body.loop_id,
             upload_document=body.upload_document,
+            user_tokens=user_tokens,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/dotloop/sync-preview")
+async def dotloop_sync_preview(body: DotloopSyncPreviewRequest, user=Depends(get_current_user)):
+    """Preview what a sync would do — no writes to Dotloop."""
+    user_tokens = _user_dotloop_tokens(user)
+    try:
+        result = await preview_sync_to_dotloop(
+            extraction_id=body.extraction_id,
+            mode=body.mode,
+            user_tokens=user_tokens,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/dotloop/sync-execute")
+async def dotloop_sync_execute(body: DotloopSyncExecuteRequest, user=Depends(get_current_user)):
+    """Execute a confirmed sync to Dotloop with folder support."""
+    user_tokens = _user_dotloop_tokens(user)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=503, detail="Dotloop not configured")
+    try:
+        result = await sync_to_dotloop(
+            extraction_id=body.extraction_id,
+            loop_id=body.loop_id,
+            folder_name=body.folder_name,
+            upload_document=body.upload_document,
+            mode=body.mode,
             user_tokens=user_tokens,
         )
         if "error" in result:

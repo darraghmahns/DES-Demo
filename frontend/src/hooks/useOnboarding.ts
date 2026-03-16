@@ -14,7 +14,6 @@ const STORAGE_KEY = 'des_onboarding_v2';
 export const ONBOARDING_STEPS: { id: OnboardingStepId; route: string }[] = [
   { id: 'welcome', route: '/dashboard' },
   { id: 'profile', route: '/profile' },
-  { id: 'ai_chat', route: '/profile' },
   { id: 'documents', route: '/profile/documents' },
   { id: 'extraction', route: '/extraction' },
   { id: 'complete', route: '/dashboard' },
@@ -39,7 +38,6 @@ export interface UseOnboardingReturn {
   loading: boolean;
   /** Integration connection status (for the complete step summary). */
   dotloopConnected: boolean;
-  docusignConnected: boolean;
 
   /** Mark current step completed and advance. */
   advanceStep: () => Promise<void>;
@@ -101,7 +99,6 @@ export function useOnboarding(): UseOnboardingReturn {
   const [steps, setSteps] = useState<OnboardingStepStatus[]>([]);
   const [panelOpen, setPanelOpen] = useState(false);
   const [dotloopConnected, setDotloopConnected] = useState(false);
-  const [docusignConnected, setDocusignConnected] = useState(false);
 
   // Track step actions from pages (e.g. "name_set", "document_uploaded")
   const stepActionsRef = useRef<Set<string>>(new Set());
@@ -116,7 +113,6 @@ export function useOnboarding(): UseOnboardingReturn {
       if (cancelled) return;
 
       setDotloopConnected(status.dotloop_connected);
-      setDocusignConnected(status.docusign_connected);
 
       if (status.completed) {
         setCompleted(true);
@@ -243,7 +239,6 @@ export function useOnboarding(): UseOnboardingReturn {
     panelOpen,
     loading,
     dotloopConnected,
-    docusignConnected,
     advanceStep,
     skipStep,
     dismissPanel,

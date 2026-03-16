@@ -4,7 +4,6 @@ import type { OnboardingStepId, OnboardingStepStatus } from '../../api';
 import { OnboardingProgress } from './OnboardingProgress';
 import { WelcomeStep } from './steps/WelcomeStep';
 import { ProfileStep } from './steps/ProfileStep';
-import { AIChatStep } from './steps/AIChatStep';
 import { DocumentsStep } from './steps/DocumentsStep';
 import { ExtractionStep } from './steps/ExtractionStep';
 import { CompleteStep } from './steps/CompleteStep';
@@ -15,7 +14,6 @@ interface OnboardingPanelProps {
   currentIndex: number;
   steps: OnboardingStepStatus[];
   dotloopConnected: boolean;
-  docusignConnected: boolean;
   onAdvance: () => void;
   onSkip: () => void;
   onDismiss: () => void;
@@ -27,7 +25,6 @@ export function OnboardingPanel({
   currentIndex,
   steps,
   dotloopConnected,
-  docusignConnected,
   onAdvance,
   onSkip,
   onDismiss,
@@ -58,9 +55,6 @@ export function OnboardingPanel({
         {currentStep === 'profile' && (
           <ProfileStep onNext={onAdvance} onSkip={onSkip} />
         )}
-        {currentStep === 'ai_chat' && (
-          <AIChatStep onNext={onAdvance} onSkip={onSkip} />
-        )}
         {currentStep === 'documents' && (
           <DocumentsStep onNext={onAdvance} onSkip={onSkip} />
         )}
@@ -71,7 +65,6 @@ export function OnboardingPanel({
           <CompleteStep
             steps={steps}
             dotloopConnected={dotloopConnected}
-            docusignConnected={docusignConnected}
             onFinish={onFinish}
           />
         )}

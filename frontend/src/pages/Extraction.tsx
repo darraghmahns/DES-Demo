@@ -10,20 +10,11 @@ import {
   fetchActiveTasks,
   fetchAllTasks,
   uploadFile,
-  syncToDotloop,
+  previewDotloopSync,
+  executeDotloopSync,
   fetchDotloopLoops,
-  syncToDocuSign,
-  voidDocuSignEnvelope,
-  deleteAllDocuSignEnvelopes,
-  archiveAllDotloopLoops,
-  fetchDocuSignEnvelopes,
-  fetchAggregateUsage,
-  computeFileHash,
-  checkCachedExtraction,
-  clearExtractionCache,
   searchDotloopLoops,
   fetchLoopDetail,
-  fetchEnvelopeDetail,
   extractBatch,
   compareExtractions,
   fetchExtractions,
@@ -34,18 +25,13 @@ import type {
   DocumentInfo,
   VerificationCitation,
   PIIFinding,
-  PIIReport,
   ComplianceReport,
   ComplianceRequirement,
   ExtractionResult,
   SSEEvent,
   DotloopSyncResult,
-  DotloopLoop,
-  DocuSignSyncResult,
-  DocuSignEnvelope,
-  AggregateUsage,
+  DotloopSyncPreview,
   LoopDetail,
-  EnvelopeDetail,
   ComparisonResult,
   FieldSignificance,
   BatchSource,
@@ -59,6 +45,19 @@ import type {
 
 type Mode = 'real_estate' | 'gov';
 type ViewId = 'extraction' | 'loops' | 'compare';
+
+// Key date fields for ICS export
+const DATE_FIELDS = [
+  { key: 'closing_date', label: 'Closing Date' },
+  { key: 'offer_date', label: 'Offer Date' },
+  { key: 'offer_expiration_date', label: 'Offer Expiration Date' },
+  { key: 'contract_agreement_date', label: 'Contract Agreement Date' },
+  { key: 'inspection_date', label: 'Inspection Contingency Deadline' },
+  { key: 'inspection_negotiation_deadline', label: 'Inspection Negotiation Deadline' },
+  { key: 'insurance_contingency_date', label: 'Insurance Contingency Date' },
+  { key: 'loan_application_deadline', label: 'Loan Application Deadline' },
+  { key: 'seller_response_time', label: 'Seller Response Time' },
+] as const;
 type StepStatus = 'pending' | 'running' | 'complete' | 'error';
 type TabId = 'extraction' | 'citations' | 'compliance' | 'pii' | 'json';
 
@@ -162,7 +161,7 @@ export function ExtractionPage() {
   const [validationSuccess, setValidationSuccess] = useState<boolean | null>(null);
   const [, setValidationErrors] = useState<string[]>([]);
   const [citations, setCitations] = useState<VerificationCitation[] | null>(null);
-  const [overallConfidence, setOverallConfidence] = useState<number | null>(null);
+  const [, setOverallConfidence] = useState<number | null>(null);
   const [piiFindings, setPiiFindings] = useState<PIIFinding[] | null>(null);
   const [piiRiskScore, setPiiRiskScore] = useState<number | null>(null);
   const [piiRiskLevel, setPiiRiskLevel] = useState<string | null>(null);
@@ -182,34 +181,27 @@ export function ExtractionPage() {
   const modeDocRef = useRef<Partial<Record<Mode, string | null>>>({});
 
   // Integrations (shared hook — connection management lives on Profile page)
-  const { dotloopConnected: dotloopConfigured, docusignConnected: docusignConfigured } = useIntegrations();
+  const { dotloopConnected: dotloopConfigured } = useIntegrations();
 
   // Dotloop
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<DotloopSyncResult | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [dotloopLoops, setDotloopLoops] = useState<DotloopLoop[]>([]);
-  const [selectedLoopId, setSelectedLoopId] = useState<number | null>(null);
-  const [loadingLoops, setLoadingLoops] = useState(false);
+
+  // HITL Dotloop sync
+  const [syncMode, setSyncMode] = useState<'selling' | 'buying'>('buying');
+  const [syncPreview, setSyncPreview] = useState<DotloopSyncPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewFolderName, setPreviewFolderName] = useState('');
+
+  // Key Dates .ics export
+  const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
 
   // Property Enrichment (Cadastral)
   const [propertyEnrichmentConfigured, setPropertyEnrichmentConfigured] = useState(false);
   const [propertyEnrichment, setPropertyEnrichment] = useState<PropertyEnrichmentEvent | null>(null);
 
-  // DocuSign
-  const [isDocusignSyncing, setIsDocusignSyncing] = useState(false);
-  const [docusignSyncResult, setDocusignSyncResult] = useState<DocuSignSyncResult | null>(null);
-  const [docusignSyncError, setDocusignSyncError] = useState<string | null>(null);
-  const [docusignEnvelopes, setDocusignEnvelopes] = useState<DocuSignEnvelope[]>([]);
-  const [selectedEnvelopeId, setSelectedEnvelopeId] = useState<string | null>(null);
-  const [loadingEnvelopes, setLoadingEnvelopes] = useState(false);
-
-  // API Usage
-  const [aggregateUsage, setAggregateUsage] = useState<AggregateUsage | null>(null);
-
-  // Cache
-  const [isCached, setIsCached] = useState(false);
-  const [checkingCache, setCheckingCache] = useState(false);
 
   // Comparison
   const [compareFromId, setCompareFromId] = useState('');
@@ -236,12 +228,9 @@ export function ExtractionPage() {
     setExtractionId(null);
     setSyncResult(null);
     setSyncError(null);
-    setDotloopLoops([]);
-    setSelectedLoopId(null);
-    setDocusignSyncResult(null);
-    setDocusignSyncError(null);
-    setSelectedEnvelopeId(null);
-    setIsCached(false);
+    setSyncPreview(null);
+    setPreviewError(null);
+    setSelectedDates(new Set());
   }
 
   // ---------------------------------------------------------------------------
@@ -300,7 +289,6 @@ export function ExtractionPage() {
           if (event.data.extraction_id) setExtractionId(event.data.extraction_id);
           setIsRunning(false);
           setTaskStatuses((prev) => ({ ...prev, [key]: 'complete' }));
-          fetchAggregateUsage().then(setAggregateUsage).catch(() => {});
           break;
         case 'error':
           setErrorMessage(event.data.message);
@@ -335,7 +323,6 @@ export function ExtractionPage() {
       // If this is the currently selected doc, subscribe to SSE
       if (docName === selectedDoc) {
         resetResults();
-        setIsCached(false);
         setSteps(getSteps(mode, propertyEnrichmentConfigured));
         setIsRunning(true);
         subscribeToDoc(task_id, mode, docName);
@@ -387,14 +374,11 @@ export function ExtractionPage() {
       // Has a task — subscribe to SSE to replay all events
       resetResults();
       setSteps(getSteps(mode, propertyEnrichmentConfigured));
-      setIsCached(false);
       if (taskStatusesRef.current[key] === 'running') setIsRunning(true);
       subscribeToDoc(taskId, mode, docName);
     } else {
-      // No task — check cache
       resetResults();
       setSteps(getSteps(mode, propertyEnrichmentConfigured));
-      checkDocCache(docName);
     }
   }
 
@@ -417,65 +401,6 @@ export function ExtractionPage() {
   // }
 
   // ---------------------------------------------------------------------------
-  // Cache check
-  // ---------------------------------------------------------------------------
-
-  async function checkDocCache(docName: string) {
-    setCheckingCache(true);
-    try {
-      const resp = await fetch(getDocumentUrl(docName));
-      if (!resp.ok) return;
-      const blob = await resp.blob();
-      const file = new File([blob], docName);
-      const hash = await computeFileHash(file);
-      const cached = await checkCachedExtraction(hash, mode);
-      if (cached.cached && cached.extraction) {
-        const ext = cached.extraction;
-        setIsCached(true);
-        setExtractionId(ext.id as string);
-        setExtractedData(ext.extracted_data as Record<string, unknown> | null);
-        setOverallConfidence(ext.overall_confidence as number ?? null);
-        if (ext.citations) setCitations(ext.citations as VerificationCitation[]);
-        if (ext.pii_report) {
-          const pii = ext.pii_report as PIIReport;
-          setPiiFindings(pii.findings);
-          setPiiRiskScore(pii.pii_risk_score);
-          setPiiRiskLevel(pii.risk_level);
-        }
-        if (ext.compliance_report) {
-          setComplianceReport(ext.compliance_report as unknown as ComplianceReport);
-        }
-        setValidationSuccess(ext.validation_success as boolean ?? null);
-        setFinalResult({
-          mode: ext.mode as string,
-          source_file: docName,
-          extraction_timestamp: ext.extraction_timestamp as string,
-          model_used: ext.model_used as string,
-          pages_processed: ext.pages_processed as number,
-          dotloop_data: ext.mode === 'real_estate' ? ext.extracted_data as Record<string, unknown> : null,
-          foia_data: ext.mode === 'gov' ? ext.extracted_data as Record<string, unknown> : null,
-          dotloop_api_payload: ext.dotloop_api_payload as Record<string, unknown> | null,
-          docusign_api_payload: ext.docusign_api_payload as Record<string, unknown> | null,
-          citations: (ext.citations ?? []) as VerificationCitation[],
-          overall_confidence: ext.overall_confidence as number,
-          pii_report: ext.pii_report as PIIReport | null ?? null,
-          compliance_report: ext.compliance_report as unknown as ComplianceReport | null ?? null,
-          extraction_id: ext.id as string,
-          prompt_tokens: ext.prompt_tokens as number ?? 0,
-          completion_tokens: ext.completion_tokens as number ?? 0,
-          total_tokens: ext.total_tokens as number ?? 0,
-          cost_usd: ext.cost_usd as number ?? 0,
-        });
-        setSteps(prev => prev.map(s => ({ ...s, status: 'complete' as StepStatus })));
-      }
-    } catch {
-      // Cache check is best-effort
-    } finally {
-      setCheckingCache(false);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Upload
   // ---------------------------------------------------------------------------
 
@@ -491,7 +416,6 @@ export function ExtractionPage() {
       setSelectedDoc(result.name);
       resetResults();
       setSteps(getSteps(mode, propertyEnrichmentConfigured));
-      checkDocCache(result.name);
       markStepAction('file_uploaded');
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Upload failed');
@@ -502,106 +426,99 @@ export function ExtractionPage() {
   }
 
   // ---------------------------------------------------------------------------
-  // Dotloop sync
+  // HITL Dotloop sync handlers
   // ---------------------------------------------------------------------------
 
-  async function handleDotloopSync() {
-    if (!extractionId || isSyncing) return;
+  async function handlePreviewSync() {
+    if (!extractionId) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setSyncPreview(null);
+    try {
+      const preview = await previewDotloopSync(extractionId, syncMode);
+      setSyncPreview(preview);
+      setPreviewFolderName(preview.folder_name);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : 'Preview failed');
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function handleExecuteSync() {
+    if (!extractionId || !syncPreview) return;
     setIsSyncing(true);
     setSyncError(null);
-    setSyncResult(null);
     try {
-      const result = await syncToDotloop(extractionId, selectedLoopId ?? undefined);
+      const result = await executeDotloopSync(
+        extractionId,
+        syncMode,
+        syncPreview.existing_loop?.id,
+        previewFolderName || syncPreview.folder_name,
+        true,
+      );
       setSyncResult(result);
+      setSyncPreview(null);
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : 'Sync failed');
+      setSyncPreview(null);
     } finally {
       setIsSyncing(false);
     }
   }
 
   // ---------------------------------------------------------------------------
-  // DocuSign sync
+  // Key Dates ICS export
   // ---------------------------------------------------------------------------
 
-  async function handleDocuSignSync() {
-    if (!extractionId || isDocusignSyncing) return;
-    setIsDocusignSyncing(true);
-    setDocusignSyncError(null);
-    setDocusignSyncResult(null);
-    try {
-      const result = await syncToDocuSign(extractionId, selectedEnvelopeId ?? undefined);
-      setDocusignSyncResult(result);
-    } catch (err) {
-      setDocusignSyncError(err instanceof Error ? err.message : 'Sync failed');
-    } finally {
-      setIsDocusignSyncing(false);
+  function handleExportICS() {
+    if (!finalResult || selectedDates.size === 0) return;
+    const dotloopData = finalResult.dotloop_data as Record<string, unknown> | null;
+    const dates = dotloopData?.['contract_dates'] as Record<string, string | null> | undefined;
+    if (!dates) return;
+
+    const lines: string[] = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//JGP//OfferDates//EN'];
+
+    for (const key of Array.from(selectedDates)) {
+      const raw = dates[key];
+      if (!raw) continue;
+      // Parse MM/DD/YYYY manually (timezone-safe)
+      const parts = raw.split('/');
+      if (parts.length !== 3) continue;
+      const [mm, dd, yyyy] = parts;
+      if (!mm || !dd || !yyyy) continue;
+      const dtval = `${yyyy}${mm.padStart(2, '0')}${dd.padStart(2, '0')}`;
+      const label = DATE_FIELDS.find((f) => f.key === key)?.label ?? key;
+      const uid = `${key}-${extractionId}@jgp`;
+
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:${uid}`,
+        `DTSTART;VALUE=DATE:${dtval}`,
+        `DTEND;VALUE=DATE:${dtval}`,
+        `SUMMARY:${label}`,
+        'END:VEVENT',
+      );
     }
+
+    lines.push('END:VCALENDAR');
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'transaction-dates.ics';
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  async function handleVoidEnvelope(envelopeId: string) {
-    try {
-      await voidDocuSignEnvelope(envelopeId);
-      setDocusignEnvelopes((prev) => prev.filter((e) => e.envelopeId !== envelopeId));
-      if (selectedEnvelopeId === envelopeId) setSelectedEnvelopeId(null);
-    } catch (err) {
-      setDocusignSyncError(err instanceof Error ? err.message : 'Delete failed');
-    }
-  }
-
-  async function handleDeleteAllEnvelopes() {
-    try {
-      await deleteAllDocuSignEnvelopes();
-      setDocusignEnvelopes([]);
-      setSelectedEnvelopeId(null);
-    } catch (err) {
-      setDocusignSyncError(err instanceof Error ? err.message : 'Delete all failed');
-    }
-  }
-
-  async function handleArchiveAllLoops() {
-    try {
-      await archiveAllDotloopLoops();
-      setDotloopLoops([]);
-      setSelectedLoopId(null);
-    } catch (err) {
-      setSyncError(err instanceof Error ? err.message : 'Archive all failed');
-    }
-  }
-
-  function loadDocuSignEnvelopes() {
-    setLoadingEnvelopes(true);
-    fetchDocuSignEnvelopes()
-      .then(setDocusignEnvelopes)
-      .catch(() => setDocusignEnvelopes([]))
-      .finally(() => setLoadingEnvelopes(false));
-  }
-
-  // ---------------------------------------------------------------------------
-  // Cache clear
-  // ---------------------------------------------------------------------------
-
-  async function handleClearCache() {
-    try {
-      await clearExtractionCache(mode);
-      if (isCached) {
-        setIsCached(false);
-        resetResults();
-        setSteps(getSteps(mode, propertyEnrichmentConfigured));
-      }
-    } catch {
-      setErrorMessage('Failed to clear cache');
-    }
-  }
 
   // ---------------------------------------------------------------------------
   // Effects
   // ---------------------------------------------------------------------------
 
-  // Mount: check property enrichment, load usage, reconnect to running tasks
+  // Mount: check property enrichment, reconnect to running tasks
   useEffect(() => {
     checkPropertyEnrichmentStatus().then(setPropertyEnrichmentConfigured);
-    fetchAggregateUsage().then(setAggregateUsage).catch(() => {});
 
     // Reconnect to any active extraction tasks
     fetchActiveTasks().then((tasks) => {
@@ -646,11 +563,8 @@ export function ExtractionPage() {
 
         if (taskId) {
           // Resubscribe — SSE replays all events
-          setIsCached(false);
           if (taskStatusesRef.current[key] === 'running') setIsRunning(true);
           subscribeToDoc(taskId, mode, docToSelect);
-        } else {
-          checkDocCache(docToSelect);
         }
       }
     }).catch(() => {
@@ -659,30 +573,7 @@ export function ExtractionPage() {
     }).finally(() => setLoadingDocs(false));
   }, [mode]);
 
-  // Load Dotloop loops when extraction completes
-  useEffect(() => {
-    if (dotloopConfigured && mode === 'real_estate' && finalResult && extractionId) {
-      setLoadingLoops(true);
-      fetchDotloopLoops()
-        .then(setDotloopLoops)
-        .catch(() => setDotloopLoops([]))
-        .finally(() => setLoadingLoops(false));
-    }
-  }, [dotloopConfigured, mode, finalResult, extractionId]);
 
-  // Load DocuSign envelopes
-  useEffect(() => {
-    if (docusignConfigured && mode === 'real_estate') {
-      loadDocuSignEnvelopes();
-    }
-  }, [docusignConfigured, mode]);
-
-  // Refresh envelopes after sync
-  useEffect(() => {
-    if (docusignSyncResult && docusignConfigured) {
-      loadDocuSignEnvelopes();
-    }
-  }, [docusignSyncResult]);
 
   // Poll task statuses for background status indicators
   useEffect(() => {
@@ -768,7 +659,6 @@ export function ExtractionPage() {
       {activeView === 'loops' && mode === 'real_estate' && (
         <LoopBrowser
           dotloopConfigured={dotloopConfigured}
-          docusignConfigured={docusignConfigured}
           onCompare={(fromId, toId) => {
             setCompareFromId(fromId);
             setCompareToId(toId);
@@ -975,95 +865,6 @@ export function ExtractionPage() {
             </div>
           )}
 
-          {/* Cached Badge */}
-          {isCached && (
-            <div className="cached-banner">
-              <span className="cached-badge">CACHED</span>
-              <span className="cached-text">Loaded from previous extraction</span>
-              <button
-                className="cached-reextract"
-                disabled={isRunning}
-                onClick={() => {
-                  setIsCached(false);
-                  resetResults();
-                  setSteps(getSteps(mode, propertyEnrichmentConfigured));
-                  handleRun();
-                }}
-              >
-                Re-extract
-              </button>
-              <button
-                className="cached-reextract"
-                onClick={handleClearCache}
-              >
-                Clear Cache
-              </button>
-            </div>
-          )}
-
-          {/* Checking cache spinner */}
-          {checkingCache && !isCached && !isRunning && !finalResult && (
-            <div className="cached-banner">
-              <span className="spinner" /> Checking cache...
-            </div>
-          )}
-
-          {/* Confidence Bar */}
-          {overallConfidence !== null && (
-            <div className="confidence-section">
-              <span className="confidence-label">Confidence</span>
-              <div className="confidence-bar">
-                <div
-                  className={`confidence-fill ${confLevel(overallConfidence)}`}
-                  style={{ width: `${overallConfidence * 100}%` }}
-                />
-              </div>
-              <span className={`confidence-value ${confLevel(overallConfidence)}`}>
-                {(overallConfidence * 100).toFixed(0)}%
-              </span>
-            </div>
-          )}
-
-          {/* API Usage — per-extraction cost */}
-          {finalResult && finalResult.total_tokens > 0 && (
-            <div className="usage-section">
-              <div className="usage-row">
-                <span className="usage-label">Tokens</span>
-                <span className="usage-value">
-                  {finalResult.prompt_tokens.toLocaleString()} in / {finalResult.completion_tokens.toLocaleString()} out
-                </span>
-              </div>
-              <div className="usage-row">
-                <span className="usage-label">Cost</span>
-                <span className="usage-value usage-cost">${finalResult.cost_usd.toFixed(4)}</span>
-              </div>
-            </div>
-          )}
-
-          {/* Aggregate Usage Banner */}
-          {aggregateUsage && aggregateUsage.total_extractions > 0 && (
-            <div className="usage-aggregate">
-              <div className="usage-aggregate-title">Running Totals</div>
-              <div className="usage-aggregate-grid">
-                <div className="usage-stat">
-                  <span className="usage-stat-value">{aggregateUsage.total_extractions}</span>
-                  <span className="usage-stat-label">Extractions</span>
-                </div>
-                <div className="usage-stat">
-                  <span className="usage-stat-value">{(aggregateUsage.total_tokens / 1000).toFixed(1)}k</span>
-                  <span className="usage-stat-label">Tokens</span>
-                </div>
-                <div className="usage-stat">
-                  <span className="usage-stat-value">${aggregateUsage.total_cost_usd.toFixed(4)}</span>
-                  <span className="usage-stat-label">Total Spend</span>
-                </div>
-                <div className="usage-stat">
-                  <span className="usage-stat-value">${aggregateUsage.avg_cost_per_extraction.toFixed(4)}</span>
-                  <span className="usage-stat-label">Avg/Extract</span>
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* Property Enrichment — show after extraction in real_estate mode */}
           {propertyEnrichment && propertyEnrichment.match_quality !== 'none' && mode === 'real_estate' && (
@@ -1113,6 +914,47 @@ export function ExtractionPage() {
             </div>
           )}
 
+          {/* Key Dates panel — ICS export */}
+          {mode === 'real_estate' && finalResult && (() => {
+            const dotloopData = finalResult.dotloop_data as Record<string, unknown> | null;
+            const dates = dotloopData?.['contract_dates'] as Record<string, string | null> | undefined;
+            const availableDates = dates
+              ? DATE_FIELDS.filter((f) => dates[f.key])
+              : [];
+            if (availableDates.length === 0) return null;
+            return (
+              <div className="key-dates-section">
+                <h3 className="key-dates-heading">Key Dates</h3>
+                <div className="key-dates-list">
+                  {availableDates.map((f) => (
+                    <label key={f.key} className="key-dates-row">
+                      <input
+                        type="checkbox"
+                        checked={selectedDates.has(f.key)}
+                        onChange={() => setSelectedDates((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(f.key)) next.delete(f.key);
+                          else next.add(f.key);
+                          return next;
+                        })}
+                      />
+                      <span className="key-dates-label">{f.label}</span>
+                      <span className="key-dates-value">{dates![f.key]}</span>
+                    </label>
+                  ))}
+                </div>
+                <button
+                  className="btn-secondary"
+                  disabled={selectedDates.size === 0}
+                  onClick={handleExportICS}
+                  style={{ marginTop: 12 }}
+                >
+                  Export to Calendar (.ics)
+                </button>
+              </div>
+            );
+          })()}
+
           {/* Dotloop Section — link to Profile when not connected */}
           {mode === 'real_estate' && !dotloopConfigured && (
             <div className="dotloop-section">
@@ -1122,63 +964,105 @@ export function ExtractionPage() {
             </div>
           )}
 
-          {/* Dotloop Sync — only after extraction completes */}
+          {/* HITL Dotloop Sync — 2-step: mode + preview → confirmation modal */}
           {mode === 'real_estate' && dotloopConfigured && finalResult && extractionId && (
             <div className="dotloop-section">
-              {!syncResult && !syncError && (
-                <div className="dotloop-loop-selector">
-                  <label className="dotloop-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span>Target Loop</span>
-                    {dotloopLoops.length > 0 && (
-                      <button
-                        className="docusign-delete-btn"
-                        title="Archive all loops"
-                        style={{ fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}
-                        onClick={() => {
-                          if (confirm('Archive all Dotloop loops?')) {
-                            handleArchiveAllLoops();
-                          }
-                        }}
-                      >
-                        Archive All
-                      </button>
-                    )}
-                  </label>
-                  {loadingLoops ? (
-                    <div style={{ padding: 8, textAlign: 'center' }}>
-                      <span className="spinner" />
+              {!syncResult && !syncError && !syncPreview && (
+                <>
+                  <div className="dotloop-mode-selector">
+                    <span className="dotloop-label">Sync Mode</span>
+                    <label className="dotloop-radio">
+                      <input
+                        type="radio"
+                        value="buying"
+                        checked={syncMode === 'buying'}
+                        onChange={() => setSyncMode('buying')}
+                      />
+                      Buying (loop per buyer)
+                    </label>
+                    <label className="dotloop-radio">
+                      <input
+                        type="radio"
+                        value="selling"
+                        checked={syncMode === 'selling'}
+                        onChange={() => setSyncMode('selling')}
+                      />
+                      Selling (loop per property, folder per buyer)
+                    </label>
+                  </div>
+                  <button
+                    className="dotloop-sync-btn"
+                    disabled={previewLoading}
+                    onClick={handlePreviewSync}
+                  >
+                    {previewLoading
+                      ? <><span className="spinner" /> Loading preview...</>
+                      : <><span className="dotloop-icon">&#x1F441;</span> Preview Sync</>
+                    }
+                  </button>
+                  {previewError && (
+                    <div className="dotloop-error" style={{ marginTop: 8 }}>
+                      Preview failed: {previewError}
                     </div>
-                  ) : (
-                    <select
-                      className="dotloop-select"
-                      value={selectedLoopId ?? ''}
-                      onChange={(e) =>
-                        setSelectedLoopId(e.target.value ? Number(e.target.value) : null)
-                      }
-                    >
-                      <option value="">+ Create New Loop</option>
-                      {dotloopLoops.map((loop) => (
-                        <option key={loop.id} value={loop.id}>
-                          {loop.name} ({loop.status || 'unknown'})
-                        </option>
-                      ))}
-                    </select>
                   )}
+                </>
+              )}
+
+              {/* Confirmation modal */}
+              {syncPreview && !syncResult && (
+                <div className="hitl-modal">
+                  <h3 className="hitl-modal-title">Confirm Dotloop Sync</h3>
+                  <div className="hitl-modal-row">
+                    <span className="hitl-modal-label">Loop</span>
+                    <span className="hitl-modal-value">
+                      {syncPreview.loop_action === 'create' ? '[Will create] ' : '[Will update] '}
+                      {syncPreview.loop_name}
+                    </span>
+                  </div>
+                  <div className="hitl-modal-row">
+                    <span className="hitl-modal-label">Folder</span>
+                    <input
+                      className="hitl-modal-input"
+                      value={previewFolderName}
+                      onChange={(e) => setPreviewFolderName(e.target.value)}
+                    />
+                  </div>
+                  {syncPreview.participants.length > 0 && (
+                    <div className="hitl-modal-row">
+                      <span className="hitl-modal-label">Participants</span>
+                      <span className="hitl-modal-value">
+                        {syncPreview.participants
+                          .slice(0, 3)
+                          .map((p) => `${p.fullName} (${p.role})`)
+                          .join(', ')}
+                        {syncPreview.participants.length > 3 && ` +${syncPreview.participants.length - 3} more`}
+                      </span>
+                    </div>
+                  )}
+                  {syncPreview.document_name && (
+                    <div className="hitl-modal-row">
+                      <span className="hitl-modal-label">Document</span>
+                      <span className="hitl-modal-value">{syncPreview.document_name}</span>
+                    </div>
+                  )}
+                  <div className="hitl-modal-actions">
+                    <button
+                      className="btn-secondary"
+                      onClick={() => setSyncPreview(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="btn-primary"
+                      disabled={isSyncing}
+                      onClick={handleExecuteSync}
+                    >
+                      {isSyncing ? <><span className="spinner" /> Syncing...</> : 'Confirm Sync'}
+                    </button>
+                  </div>
                 </div>
               )}
-              {!syncResult && !syncError && (
-                <button
-                  className={`dotloop-sync-btn ${isSyncing ? 'syncing' : ''}`}
-                  disabled={isSyncing || loadingLoops}
-                  onClick={handleDotloopSync}
-                >
-                  {isSyncing ? (
-                    <><span className="spinner" /> Syncing to Dotloop...</>
-                  ) : (
-                    <><span className="dotloop-icon">&#x21C4;</span> Sync to Dotloop</>
-                  )}
-                </button>
-              )}
+
               {syncResult && (
                 <div className="dotloop-success">
                   <span className="dotloop-check">&#x2713;</span>
@@ -1203,146 +1087,14 @@ export function ExtractionPage() {
               {syncError && (
                 <div className="dotloop-error">
                   Sync failed: {syncError}
-                  <button className="dotloop-retry" onClick={handleDotloopSync}>Retry</button>
+                  <button className="dotloop-retry" onClick={() => { setSyncError(null); setSyncResult(null); }}>
+                    Try Again
+                  </button>
                 </div>
               )}
             </div>
           )}
 
-          {/* DocuSign Section — link to Profile when not connected */}
-          {mode === 'real_estate' && !docusignConfigured && (
-            <div className="dotloop-section">
-              <Link to="/profile" className="integration-profile-link">
-                <span className="dotloop-icon">&#x1F4DD;</span> DocuSign not connected &mdash; Set up in Profile &rarr;
-              </Link>
-            </div>
-          )}
-
-          {/* DocuSign — always visible when configured in real_estate mode */}
-          {mode === 'real_estate' && docusignConfigured && (
-            <div className="dotloop-section">
-              <div className="dotloop-loop-selector">
-                <label className="dotloop-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>
-                    DocuSign Envelopes
-                    {!loadingEnvelopes && docusignEnvelopes.length > 0 && (
-                      <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>
-                        ({docusignEnvelopes.length})
-                      </span>
-                    )}
-                  </span>
-                  {docusignEnvelopes.length > 0 && (
-                    <button
-                      className="docusign-delete-btn"
-                      title="Delete all envelopes"
-                      style={{ fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}
-                      onClick={() => {
-                        if (confirm('Delete all DocuSign envelopes?')) {
-                          handleDeleteAllEnvelopes();
-                        }
-                      }}
-                    >
-                      Delete All
-                    </button>
-                  )}
-                </label>
-                {loadingEnvelopes ? (
-                  <div style={{ padding: 8, textAlign: 'center' }}>
-                    <span className="spinner" />
-                  </div>
-                ) : docusignEnvelopes.length === 0 ? (
-                  <div style={{ padding: '8px 0', color: 'var(--text-muted)', fontSize: 12 }}>
-                    No envelopes found
-                  </div>
-                ) : (
-                  <div className="docusign-envelope-list">
-                    {docusignEnvelopes.map((env) => (
-                      <div
-                        key={env.envelopeId}
-                        className={`docusign-envelope-item ${selectedEnvelopeId === env.envelopeId ? 'selected' : ''}`}
-                        onClick={() => setSelectedEnvelopeId(
-                          selectedEnvelopeId === env.envelopeId ? null : env.envelopeId
-                        )}
-                      >
-                        <div className="docusign-envelope-info">
-                          <div className="docusign-envelope-subject">
-                            {env.emailSubject || 'Untitled'}
-                          </div>
-                          <div className="docusign-envelope-meta">
-                            <span className={`docusign-status-badge ${env.status}`}>
-                              {env.status}
-                            </span>
-                            {env.createdDateTime && (
-                              <span className="docusign-envelope-date">
-                                {new Date(env.createdDateTime).toLocaleDateString()}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <button
-                          className="docusign-delete-btn"
-                          title={env.status === 'created' ? 'Delete draft' : 'Void envelope'}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (confirm(`${env.status === 'created' ? 'Delete' : 'Void'} this envelope?`)) {
-                              handleVoidEnvelope(env.envelopeId);
-                            }
-                          }}
-                        >
-                          &#x2715;
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {finalResult && extractionId && !docusignSyncResult && !docusignSyncError && (
-                <button
-                  className={`dotloop-sync-btn ${isDocusignSyncing ? 'syncing' : ''}`}
-                  disabled={isDocusignSyncing || loadingEnvelopes}
-                  onClick={handleDocuSignSync}
-                >
-                  {isDocusignSyncing ? (
-                    <><span className="spinner" /> Syncing to DocuSign...</>
-                  ) : selectedEnvelopeId ? (
-                    <><span className="dotloop-icon">&#x21C4;</span> Update Selected Envelope</>
-                  ) : (
-                    <><span className="dotloop-icon">&#x21C4;</span> Create New Envelope</>
-                  )}
-                </button>
-              )}
-
-              {docusignSyncResult && (
-                <div className="dotloop-success">
-                  <span className="dotloop-check">&#x2713;</span>
-                  {docusignSyncResult.action} envelope in DocuSign
-                  {docusignSyncResult.envelope_url && (
-                    <a href={docusignSyncResult.envelope_url} target="_blank" rel="noopener noreferrer" className="dotloop-link">
-                      Open in DocuSign &#x2192;
-                    </a>
-                  )}
-                  <div className="docusign-envelope-id">
-                    Envelope: {docusignSyncResult.envelope_id}
-                  </div>
-                  {docusignSyncResult.errors.length > 0 && (
-                    <div className="dotloop-warnings">
-                      {docusignSyncResult.errors.map((e, i) => (
-                        <div key={i} className="dotloop-warning">{e}</div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {docusignSyncError && (
-                <div className="dotloop-error">
-                  {docusignSyncError}
-                  <button className="dotloop-retry" onClick={() => setDocusignSyncError(null)}>Dismiss</button>
-                </div>
-              )}
-            </div>
-          )}
 
           {/* Error Banner */}
           {errorMessage && (
@@ -1742,12 +1494,11 @@ function JSONOutput({ data }: { data: ExtractionResult }) {
 }
 
 // ---------------------------------------------------------------------------
-// Loop Browser — unified Dotloop + DocuSign browser
+// Loop Browser — Dotloop browser
 // ---------------------------------------------------------------------------
 
 interface LoopBrowserProps {
   dotloopConfigured: boolean;
-  docusignConfigured: boolean;
   onCompare: (fromId: string, toId: string) => void;
 }
 
@@ -1762,7 +1513,7 @@ interface UnifiedLoopItem {
   documentCount?: number;
 }
 
-function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopBrowserProps) {
+function LoopBrowser({ dotloopConfigured, onCompare }: LoopBrowserProps) {
   const [items, setItems] = useState<UnifiedLoopItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1770,7 +1521,6 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [expandedItem, setExpandedItem] = useState<string | null>(null);
   const [loopDetail, setLoopDetail] = useState<LoopDetail | null>(null);
-  const [envelopeDetail, setEnvelopeDetail] = useState<EnvelopeDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [extractionIds, setExtractionIds] = useState<Record<string, string>>({});
@@ -1779,7 +1529,7 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
   // Load initial items
   useEffect(() => {
     loadItems();
-  }, [dotloopConfigured, docusignConfigured]);
+  }, [dotloopConfigured]);
 
   async function loadItems() {
     setLoading(true);
@@ -1801,21 +1551,6 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
       }
     } catch { /* ignore */ }
 
-    try {
-      if (docusignConfigured) {
-        const envelopes = await fetchDocuSignEnvelopes();
-        for (const env of envelopes) {
-          unified.push({
-            id: `ds-${env.envelopeId}`,
-            source: 'docusign',
-            name: env.emailSubject || 'Untitled',
-            status: env.status,
-            updated: env.createdDateTime,
-          });
-        }
-      }
-    } catch { /* ignore */ }
-
     setItems(unified);
     setLoading(false);
   }
@@ -1827,7 +1562,6 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
     }
     setSearching(true);
     const unified: UnifiedLoopItem[] = [];
-    const q = searchQuery.trim().toLowerCase();
 
     try {
       if (dotloopConfigured) {
@@ -1845,25 +1579,6 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
       }
     } catch { /* ignore */ }
 
-    // Client-side filter DocuSign
-    try {
-      if (docusignConfigured) {
-        const envelopes = await fetchDocuSignEnvelopes();
-        for (const env of envelopes) {
-          const subject = (env.emailSubject || '').toLowerCase();
-          if (subject.includes(q)) {
-            unified.push({
-              id: `ds-${env.envelopeId}`,
-              source: 'docusign',
-              name: env.emailSubject || 'Untitled',
-              status: env.status,
-              updated: env.createdDateTime,
-            });
-          }
-        }
-      }
-    } catch { /* ignore */ }
-
     setItems(unified);
     setSearching(false);
   }
@@ -1872,24 +1587,16 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
     if (expandedItem === item.id) {
       setExpandedItem(null);
       setLoopDetail(null);
-      setEnvelopeDetail(null);
       return;
     }
     setExpandedItem(item.id);
     setLoadingDetail(true);
     setLoopDetail(null);
-    setEnvelopeDetail(null);
 
     try {
-      if (item.source === 'dotloop') {
-        const rawId = parseInt(item.id.replace('dl-', ''));
-        const detail = await fetchLoopDetail(rawId);
-        setLoopDetail(detail);
-      } else {
-        const rawId = item.id.replace('ds-', '');
-        const detail = await fetchEnvelopeDetail(rawId);
-        setEnvelopeDetail(detail);
-      }
+      const rawId = parseInt(item.id.replace('dl-', ''));
+      const detail = await fetchLoopDetail(rawId);
+      setLoopDetail(detail);
     } catch {
       // ignore
     } finally {
@@ -1915,8 +1622,6 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
     for (const id of selectedItems) {
       if (id.startsWith('dl-')) {
         sources.push({ type: 'dotloop', id: id.replace('dl-', '') });
-      } else if (id.startsWith('ds-')) {
-        sources.push({ type: 'docusign', id: id.replace('ds-', '') });
       }
     }
 
@@ -1996,10 +1701,10 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
         <div className="loops-error">{extractError}</div>
       )}
 
-      {!dotloopConfigured && !docusignConfigured && (
+      {!dotloopConfigured && (
         <div className="loops-empty">
           <div className="loops-empty-icon">&#x1F517;</div>
-          <div>Connect Dotloop or DocuSign to browse your loops and envelopes</div>
+          <div>Connect Dotloop to browse your loops</div>
           <Link to="/profile" className="integration-profile-link" style={{ marginTop: 12 }}>
             Set up integrations in Profile →
           </Link>
@@ -2064,8 +1769,6 @@ function LoopBrowser({ dotloopConfigured, docusignConfigured, onCompare }: LoopB
                     <div style={{ padding: 12, textAlign: 'center' }}><span className="spinner" /></div>
                   ) : loopDetail ? (
                     <LoopDetailPanel detail={loopDetail} />
-                  ) : envelopeDetail ? (
-                    <EnvelopeDetailPanel detail={envelopeDetail} />
                   ) : (
                     <div style={{ padding: 12, color: 'var(--text-muted)' }}>Failed to load details</div>
                   )}
@@ -2137,46 +1840,6 @@ function LoopDetailPanel({ detail }: { detail: LoopDetail }) {
     </div>
   );
 }
-
-function EnvelopeDetailPanel({ detail }: { detail: EnvelopeDetail }) {
-  return (
-    <div className="loop-detail-panel">
-      <div className="loop-detail-field">
-        <span className="loop-detail-label">Status</span>
-        <span className={`docusign-status-badge ${detail.status}`}>{detail.status}</span>
-      </div>
-      {detail.created && (
-        <div className="loop-detail-field">
-          <span className="loop-detail-label">Created</span>
-          <span className="loop-detail-value">{new Date(detail.created).toLocaleString()}</span>
-        </div>
-      )}
-      {detail.recipients && detail.recipients.length > 0 && (
-        <div className="loop-detail-section">
-          <div className="loop-detail-section-title">Recipients</div>
-          {detail.recipients.map((r, i) => (
-            <div key={i} className="loop-detail-field">
-              <span className="loop-detail-label">{String(r.role || r.recipientType || 'Signer')}</span>
-              <span className="loop-detail-value">{String(r.name || r.email || '—')}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {detail.documents && detail.documents.length > 0 && (
-        <div className="loop-detail-section">
-          <div className="loop-detail-section-title">Documents ({detail.documents.length})</div>
-          {detail.documents.map((doc, i) => (
-            <div key={i} className="loop-detail-doc">
-              <span className="doc-icon" style={{ fontSize: 14 }}>PDF</span>
-              <span>{String(doc.name || 'Untitled')}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 
 // ---------------------------------------------------------------------------
 // Comparison View — side-by-side delta table

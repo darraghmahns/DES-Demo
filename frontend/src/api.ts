@@ -77,15 +77,6 @@ export interface ExtractionResult {
   cost_usd: number;
 }
 
-export interface AggregateUsage {
-  total_extractions: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  total_cost_usd: number;
-  avg_cost_per_extraction: number;
-}
-
 // ---------------------------------------------------------------------------
 // SSE event types (kept for App.tsx compatibility)
 // ---------------------------------------------------------------------------
@@ -367,16 +358,6 @@ export function runExtraction(
 }
 
 // ---------------------------------------------------------------------------
-// API Usage & Cost Tracking
-// ---------------------------------------------------------------------------
-
-export async function fetchAggregateUsage(): Promise<AggregateUsage> {
-  const resp = await fetch(`${API_BASE}/api/usage`, { headers: { ...await authHeaders() } });
-  if (!resp.ok) throw new Error(`Failed to fetch usage: ${resp.status}`);
-  return resp.json();
-}
-
-// ---------------------------------------------------------------------------
 // Dotloop integration
 // ---------------------------------------------------------------------------
 
@@ -442,79 +423,12 @@ export async function syncToDotloop(
   return resp.json();
 }
 
-// ---------------------------------------------------------------------------
-// DocuSign integration
-// ---------------------------------------------------------------------------
-
-export async function checkDocuSignStatus(): Promise<boolean> {
-  try {
-    const resp = await fetch(`${API_BASE}/api/docusign/status`, { headers: { ...await authHeaders() } });
-    if (!resp.ok) return false;
-    const data = await resp.json();
-    return data.configured === true;
-  } catch {
-    return false;
-  }
-}
-
-export function getDocuSignConnectUrl(): string {
-  return `${API_BASE}/api/docusign/oauth/connect`;
-}
-
 export async function disconnectDotloop(): Promise<{ status: string }> {
   const resp = await fetch(`${API_BASE}/api/dotloop/oauth/disconnect`, {
     method: 'DELETE',
     headers: { ...await authHeaders() },
   });
   if (!resp.ok) throw new Error('Failed to disconnect Dotloop');
-  return resp.json();
-}
-
-export async function disconnectDocuSign(): Promise<{ status: string }> {
-  const resp = await fetch(`${API_BASE}/api/docusign/oauth/disconnect`, {
-    method: 'DELETE',
-    headers: { ...await authHeaders() },
-  });
-  if (!resp.ok) throw new Error('Failed to disconnect DocuSign');
-  return resp.json();
-}
-
-export interface DocuSignEnvelope {
-  envelopeId: string;
-  emailSubject: string;
-  status: string;
-  createdDateTime?: string;
-  statusChangedDateTime?: string;
-  sentDateTime?: string;
-  completedDateTime?: string;
-}
-
-export async function fetchDocuSignEnvelopes(): Promise<DocuSignEnvelope[]> {
-  const resp = await fetch(`${API_BASE}/api/docusign/envelopes`, { headers: { ...await authHeaders() } });
-  if (!resp.ok) throw new Error(`Failed to fetch envelopes: ${resp.status}`);
-  const data = await resp.json();
-  return data.envelopes || [];
-}
-
-export async function voidDocuSignEnvelope(envelopeId: string): Promise<void> {
-  const resp = await fetch(`${API_BASE}/api/docusign/envelopes/${envelopeId}`, {
-    method: 'DELETE',
-    headers: { ...await authHeaders() },
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: 'Delete failed' }));
-    throw new Error(err.detail || `Delete failed (${resp.status})`);
-  }
-}
-
-export async function deleteAllDocuSignEnvelopes(): Promise<{ removed: number }> {
-  const resp = await fetch(`${API_BASE}/api/docusign/envelopes`, {
-    method: 'DELETE',
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: 'Delete all failed' }));
-    throw new Error(err.detail || `Delete all failed (${resp.status})`);
-  }
   return resp.json();
 }
 
@@ -527,68 +441,6 @@ export async function archiveAllDotloopLoops(): Promise<{ archived: number }> {
     const err = await resp.json().catch(() => ({ detail: 'Archive all failed' }));
     throw new Error(err.detail || `Archive all failed (${resp.status})`);
   }
-  return resp.json();
-}
-
-export interface DocuSignSyncResult {
-  envelope_id: string;
-  action: string;
-  errors: string[];
-  envelope_url?: string;
-}
-
-export async function syncToDocuSign(
-  extractionId: string,
-  envelopeId?: string,
-): Promise<DocuSignSyncResult> {
-  const resp = await fetch(`${API_BASE}/api/docusign/sync/${extractionId}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
-    body: JSON.stringify({ envelope_id: envelopeId ?? null }),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: 'Sync failed' }));
-    throw new Error(err.detail || `Sync failed (${resp.status})`);
-  }
-
-  return resp.json();
-}
-
-// ---------------------------------------------------------------------------
-// Extraction cache
-// ---------------------------------------------------------------------------
-
-export interface CachedExtractionResponse {
-  cached: boolean;
-  extraction?: Record<string, unknown>;
-}
-
-export async function computeFileHash(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-export async function checkCachedExtraction(
-  fileHash: string,
-  mode: string = 'real_estate',
-): Promise<CachedExtractionResponse> {
-  const resp = await fetch(
-    `${API_BASE}/api/extractions/cached?file_hash=${encodeURIComponent(fileHash)}&mode=${encodeURIComponent(mode)}`,
-    { headers: { ...await authHeaders() } },
-  );
-  if (!resp.ok) return { cached: false };
-  return resp.json();
-}
-
-export async function clearExtractionCache(mode?: string): Promise<{ deleted: number }> {
-  const url = mode
-    ? `${API_BASE}/api/extractions/cache?mode=${encodeURIComponent(mode)}`
-    : `${API_BASE}/api/extractions/cache`;
-  const resp = await fetch(url, { method: 'DELETE', headers: { ...await authHeaders() } });
-  if (!resp.ok) throw new Error(`Failed to clear cache: ${resp.status}`);
   return resp.json();
 }
 
@@ -616,18 +468,6 @@ export interface LoopDetail {
   documents?: LoopDocument[];
 }
 
-export interface EnvelopeDetail {
-  envelope_id: string;
-  email_subject?: string;
-  status: string;
-  created?: string;
-  sent?: string;
-  completed?: string;
-  recipients?: Array<Record<string, unknown>>;
-  documents?: Array<Record<string, unknown>>;
-  custom_fields?: Record<string, string>;
-}
-
 export async function fetchLoopDetail(loopId: number, profileId?: number): Promise<LoopDetail> {
   let url = `${API_BASE}/api/dotloop/loops/${loopId}`;
   if (profileId) url += `?profile_id=${profileId}`;
@@ -645,18 +485,12 @@ export async function searchDotloopLoops(query: string, profileId?: number): Pro
   return data.loops || [];
 }
 
-export async function fetchEnvelopeDetail(envelopeId: string): Promise<EnvelopeDetail> {
-  const resp = await fetch(`${API_BASE}/api/docusign/envelopes/${envelopeId}`, { headers: { ...await authHeaders() } });
-  if (!resp.ok) throw new Error(`Failed to fetch envelope detail: ${resp.status}`);
-  return resp.json();
-}
-
 // ---------------------------------------------------------------------------
 // Batch Extraction from Dotloop/DocuSign sources
 // ---------------------------------------------------------------------------
 
 export interface BatchSource {
-  type: 'dotloop' | 'docusign';
+  type: 'dotloop';
   id: string;
 }
 
@@ -811,7 +645,6 @@ export async function lookupProperty(
 export type OnboardingStepId =
   | 'welcome'
   | 'profile'
-  | 'ai_chat'
   | 'documents'
   | 'extraction'
   | 'complete';
@@ -880,4 +713,101 @@ export async function completeOnboarding(skippedSteps: string[]): Promise<void> 
     headers: { 'Content-Type': 'application/json', ...await authHeaders() },
     body: JSON.stringify({ skipped_steps: skippedSteps }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Offer Comparison (N-way)
+// ---------------------------------------------------------------------------
+
+export interface OfferField {
+  key: string;
+  label: string;
+  type: 'string' | 'currency' | 'date' | 'boolean' | 'text';
+}
+
+export interface OfferData {
+  extraction_id: string;
+  filename: string;
+  fields: Record<string, string | number | boolean | null>;
+}
+
+export interface OffersComparisonResult {
+  offers: OfferData[];
+  field_definitions: OfferField[];
+}
+
+export async function fetchOffersComparison(
+  extractionIds: string[],
+): Promise<OffersComparisonResult> {
+  const ids = extractionIds.join(',');
+  const resp = await fetch(
+    `${API_BASE}/api/offers/compare?extraction_ids=${encodeURIComponent(ids)}`,
+    { headers: { ...await authHeaders() } },
+  );
+  if (!resp.ok) throw new Error(`Failed to fetch comparison: ${resp.status}`);
+  return resp.json();
+}
+
+// ---------------------------------------------------------------------------
+// HITL Dotloop Sync
+// ---------------------------------------------------------------------------
+
+export interface DotloopSyncPreview {
+  loop_name: string;
+  loop_action: 'create' | 'update';
+  existing_loop: { id: number; name: string } | null;
+  folder_name: string;
+  participants: Array<Record<string, string>>;
+  document_name: string | null;
+  mode: string;
+}
+
+export async function previewDotloopSync(
+  extractionId: string,
+  mode: 'selling' | 'buying',
+): Promise<DotloopSyncPreview> {
+  const resp = await fetch(`${API_BASE}/api/dotloop/sync-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({ extraction_id: extractionId, mode }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Preview failed' }));
+    throw new Error(err.detail || `Preview failed (${resp.status})`);
+  }
+  return resp.json();
+}
+
+export interface DotloopSyncResult {
+  loop_id: string;
+  loop_url: string | null;
+  action: string;
+  document_uploaded: boolean;
+  document_name: string | null;
+  errors: string[];
+}
+
+export async function executeDotloopSync(
+  extractionId: string,
+  mode: 'selling' | 'buying',
+  loopId?: number,
+  folderName?: string,
+  uploadDocument: boolean = true,
+): Promise<DotloopSyncResult> {
+  const resp = await fetch(`${API_BASE}/api/dotloop/sync-execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({
+      extraction_id: extractionId,
+      mode,
+      loop_id: loopId ?? null,
+      folder_name: folderName ?? null,
+      upload_document: uploadDocument,
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Sync failed' }));
+    throw new Error(err.detail || `Sync failed (${resp.status})`);
+  }
+  return resp.json();
 }

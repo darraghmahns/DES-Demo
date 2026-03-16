@@ -6,6 +6,7 @@ const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: '\u229E' },
   { to: '/extraction', label: 'Extraction', icon: '\u229C' },
   { to: '/transactions', label: 'Transactions', icon: '\u22A1' },
+  { to: '/comparison', label: 'Comparison', icon: '\u22CF' },
   { to: '/profile', label: 'Profile', icon: '\u2299' },
   { to: '/profile/documents', label: 'Documents', icon: '\u229F' },
 ];

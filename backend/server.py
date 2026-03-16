@@ -1191,6 +1191,107 @@ async def create_comparison(
 
 
 # ---------------------------------------------------------------------------
+# Offer Comparison (N-way)
+# ---------------------------------------------------------------------------
+
+_OFFER_FIELD_DEFINITIONS = [
+    {"key": "purchase_price", "label": "Purchase Price", "type": "currency"},
+    {"key": "earnest_money_amount", "label": "Earnest Money", "type": "currency"},
+    {"key": "buyer_name", "label": "Buyer Name", "type": "string"},
+    {"key": "agent_name", "label": "Buyer's Agent", "type": "string"},
+    {"key": "closing_date", "label": "Closing Date", "type": "date"},
+    {"key": "offer_date", "label": "Offer Date", "type": "date"},
+    {"key": "offer_expiration_date", "label": "Offer Expiration", "type": "date"},
+    {"key": "contract_agreement_date", "label": "Contract Date", "type": "date"},
+    {"key": "inspection_date", "label": "Inspection Deadline", "type": "date"},
+    {"key": "inspection_negotiation_deadline", "label": "Inspection Negotiation Deadline", "type": "date"},
+    {"key": "insurance_contingency_date", "label": "Insurance Contingency", "type": "date"},
+    {"key": "loan_application_deadline", "label": "Loan Application Deadline", "type": "date"},
+    {"key": "seller_response_time", "label": "Seller Response Time", "type": "date"},
+    {"key": "earnest_money_held_by", "label": "Earnest Money Held By", "type": "string"},
+    {"key": "escalation_clause", "label": "Escalation Clause", "type": "boolean"},
+    {"key": "financing_type", "label": "Financing Type", "type": "string"},
+    {"key": "down_payment_amount", "label": "Down Payment", "type": "currency"},
+    {"key": "possession_date", "label": "Possession Date", "type": "date"},
+    {"key": "home_warranty", "label": "Home Warranty", "type": "boolean"},
+    {"key": "inclusions", "label": "Inclusions", "type": "text"},
+    {"key": "exclusions", "label": "Exclusions", "type": "text"},
+    {"key": "hoa_approval_contingency", "label": "HOA Contingency", "type": "boolean"},
+    {"key": "survey_contingency", "label": "Survey Contingency", "type": "boolean"},
+    {"key": "as_is", "label": "As-Is", "type": "boolean"},
+]
+
+
+def _build_offer_fields(extracted_data: dict) -> dict:
+    """Map extracted_data → 24-field offer dict. Non-extracted fields return None."""
+    financials = extracted_data.get("financials") or {}
+    dates = extracted_data.get("contract_dates") or {}
+    participants = extracted_data.get("participants") or []
+
+    buyer_name = next(
+        (p.get("full_name") for p in participants if p.get("role") == "BUYER"),
+        None,
+    )
+    agent_name = next(
+        (p.get("full_name") for p in participants if p.get("role") == "BUYING_AGENT"),
+        None,
+    )
+
+    return {
+        "purchase_price": financials.get("purchase_price"),
+        "earnest_money_amount": financials.get("earnest_money_amount"),
+        "buyer_name": buyer_name,
+        "agent_name": agent_name,
+        "closing_date": dates.get("closing_date"),
+        "offer_date": dates.get("offer_date"),
+        "offer_expiration_date": dates.get("offer_expiration_date"),
+        "contract_agreement_date": dates.get("contract_agreement_date"),
+        "inspection_date": dates.get("inspection_date"),
+        "inspection_negotiation_deadline": dates.get("inspection_negotiation_deadline"),
+        "insurance_contingency_date": dates.get("insurance_contingency_date"),
+        "loan_application_deadline": dates.get("loan_application_deadline"),
+        "seller_response_time": dates.get("seller_response_time"),
+        "earnest_money_held_by": financials.get("earnest_money_held_by"),
+        # Fields not currently extracted — always null
+        "escalation_clause": None,
+        "financing_type": None,
+        "down_payment_amount": None,
+        "possession_date": None,
+        "home_warranty": None,
+        "inclusions": None,
+        "exclusions": None,
+        "hoa_approval_contingency": None,
+        "survey_contingency": None,
+        "as_is": None,
+    }
+
+
+@app.get("/api/offers/compare")
+async def compare_offers(
+    extraction_ids: str = Query(..., description="Comma-separated extraction IDs"),
+    user=Depends(get_optional_user),
+):
+    """N-way offer comparison. Returns structured field rows for each extraction."""
+    ids = [eid.strip() for eid in extraction_ids.split(",") if eid.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="No extraction IDs provided")
+
+    offers = []
+    for eid in ids:
+        ext = await get_extraction(eid)
+        if not ext:
+            raise HTTPException(status_code=404, detail=f"Extraction {eid} not found")
+        extracted_data = ext.get("extracted_data") or ext.get("result") or {}
+        offers.append({
+            "extraction_id": eid,
+            "filename": ext.get("source_file") or ext.get("filename") or eid,
+            "fields": _build_offer_fields(extracted_data),
+        })
+
+    return {"offers": offers, "field_definitions": _OFFER_FIELD_DEFINITIONS}
+
+
+# ---------------------------------------------------------------------------
 # Compliance Endpoints
 # ---------------------------------------------------------------------------
 

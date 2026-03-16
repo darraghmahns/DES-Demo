@@ -1,11 +1,10 @@
-/** Hook for managing integration connection status (Dotloop, DocuSign). */
+/** Hook for managing integration connection status (Dotloop). */
 
 import { useState, useEffect, useCallback } from 'react';
-import { checkDotloopStatus, checkDocuSignStatus } from '../api';
+import { checkDotloopStatus } from '../api';
 
 export interface UseIntegrationsReturn {
   dotloopConnected: boolean;
-  docusignConnected: boolean;
   loading: boolean;
   /** Re-check integration status from the backend. */
   refresh: () => Promise<void>;
@@ -13,18 +12,13 @@ export interface UseIntegrationsReturn {
 
 export function useIntegrations(): UseIntegrationsReturn {
   const [dotloopConnected, setDotloopConnected] = useState(false);
-  const [docusignConnected, setDocusignConnected] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [dl, ds] = await Promise.all([
-        checkDotloopStatus(),
-        checkDocuSignStatus(),
-      ]);
+      const dl = await checkDotloopStatus();
       setDotloopConnected(dl);
-      setDocusignConnected(ds);
     } finally {
       setLoading(false);
     }
@@ -34,5 +28,5 @@ export function useIntegrations(): UseIntegrationsReturn {
     refresh();
   }, [refresh]);
 
-  return { dotloopConnected, docusignConnected, loading, refresh };
+  return { dotloopConnected, loading, refresh };
 }

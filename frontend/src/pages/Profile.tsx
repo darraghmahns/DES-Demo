@@ -38,7 +38,7 @@ export function Profile() {
 
   const { markStepAction } = useOnboardingContext();
   const { avatarUrl } = useClerkAvatar();
-  const { dotloopConnected, docusignConnected, refresh: refreshIntegrations } = useIntegrations();
+  const { dotloopConnected, refresh: refreshIntegrations } = useIntegrations();
   const chatState = useChat();
   const [viewMode, setViewMode] = useState<ViewMode>('form');
   const [name, setName] = useState('');
@@ -234,7 +234,6 @@ export function Profile() {
           {/* Connected Services */}
           <IntegrationsSection
             dotloopConnected={dotloopConnected}
-            docusignConnected={docusignConnected}
             onRefresh={refreshIntegrations}
           />
 

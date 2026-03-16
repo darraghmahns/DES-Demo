@@ -97,10 +97,86 @@ def _get_profile_id() -> int:
 # Flow A: Push extraction to Dotloop
 # ---------------------------------------------------------------------------
 
+async def preview_sync_to_dotloop(
+    extraction_id: str,
+    mode: str = "buying",
+    user_tokens: dict | None = None,
+) -> dict[str, Any]:
+    """Build sync preview without writing to Dotloop.
+
+    Args:
+        extraction_id: Extraction reference string.
+        mode: 'selling' or 'buying'.
+        user_tokens: Optional OAuth tokens.
+
+    Returns:
+        Dict with loop_name, loop_action, existing_loop, folder_name,
+        participants, document_name, mode.
+    """
+    ext = await get_extraction(extraction_id)
+    if not ext:
+        return {"error": f"Extraction {extraction_id} not found"}
+
+    payload = ext.get("dotloop_api_payload")
+    if not payload:
+        return {"error": "No dotloop_api_payload on this extraction (not real_estate mode?)"}
+
+    profile_id = _get_profile_id()
+    participants = payload.get("participants", [])
+
+    if mode == "selling":
+        # Loop per property, folder per buyer
+        loop_details = payload.get("loopDetails", {})
+        prop_addr = loop_details.get("propertyInformation", {}).get("address", {})
+        street = f"{prop_addr.get('streetNumber', '')} {prop_addr.get('streetName', '')}".strip()
+        city = prop_addr.get("city", "")
+        loop_name = f"{street}, {city}".strip(", ") if street else payload.get("name", "Untitled Loop")
+        buyer = next((p for p in participants if p.get("role") == "BUYER"), None)
+        folder_name = buyer.get("fullName", "Buyer") if buyer else "Buyer Documents"
+    else:
+        # Buying: loop per buyer (use loop_name from payload), fixed folder
+        loop_name = payload.get("name", "Untitled Loop")
+        folder_name = "Extracted Documents"
+
+    # Check for existing loop (read-only)
+    existing_loop = None
+    loop_action = "create"
+    if is_configured(user_tokens=user_tokens):
+        try:
+            with get_dotloop_client(user_tokens=user_tokens) as client:
+                existing = client.find_existing_loop(profile_id, loop_name)
+                if existing:
+                    existing_loop = {"id": existing["id"], "name": existing.get("name", "")}
+                    loop_action = "update"
+        except Exception:
+            pass  # Read-only preview — ignore errors
+
+    doc_record = None
+    document_name = None
+    try:
+        doc_record = await DocumentRecord.get(ext["document_id"])
+        if doc_record:
+            document_name = doc_record.filename
+    except Exception:
+        pass
+
+    return {
+        "loop_name": loop_name,
+        "loop_action": loop_action,
+        "existing_loop": existing_loop,
+        "folder_name": folder_name,
+        "participants": participants,
+        "document_name": document_name,
+        "mode": mode,
+    }
+
+
 async def sync_to_dotloop(
     extraction_id: str,
     loop_id: int | None = None,
+    folder_name: str | None = None,
     upload_document: bool = True,
+    mode: str = "buying",
     user_tokens: dict | None = None,
 ) -> dict[str, Any]:
     """Push a saved extraction to Dotloop as a loop.
@@ -228,8 +304,9 @@ async def sync_to_dotloop(
                 file_path = doc_record.file_path if doc_record else None
 
                 if file_path and Path(file_path).exists():
+                    _folder_name = folder_name or "Extracted Documents"
                     folder = client.find_or_create_folder(
-                        profile_id, loop_id, "Extracted Documents"
+                        profile_id, loop_id, _folder_name
                     )
                     folder_id = folder["id"]
                     client.upload_document(

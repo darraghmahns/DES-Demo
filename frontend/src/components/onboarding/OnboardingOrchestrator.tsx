@@ -28,7 +28,6 @@ export function OnboardingOrchestrator({
     panelOpen,
     loading,
     dotloopConnected,
-    docusignConnected,
     advanceStep,
     skipStep,
     dismissPanel,
@@ -88,7 +87,6 @@ export function OnboardingOrchestrator({
           currentIndex={currentStepIndex}
           steps={steps}
           dotloopConnected={dotloopConnected}
-          docusignConnected={docusignConnected}
           onAdvance={advanceStep}
           onSkip={skipStep}
           onDismiss={dismissPanel}

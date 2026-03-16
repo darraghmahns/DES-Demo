@@ -15,6 +15,7 @@ import { Profile } from './pages/Profile';
 import { ProfileDocuments } from './pages/ProfileDocuments';
 import { TransactionList } from './pages/TransactionList';
 import { TransactionDetail } from './pages/TransactionDetail';
+import { OfferComparison } from './pages/OfferComparison';
 import { InviteLanding } from './pages/InviteLanding';
 import { Login } from './pages/Login';
 
@@ -58,6 +59,7 @@ function App() {
             <Route path="/profile/documents" element={<ProfileDocuments />} />
             <Route path="/transactions" element={<TransactionList />} />
             <Route path="/transactions/:id" element={<TransactionDetail />} />
+            <Route path="/comparison" element={<OfferComparison />} />
           </Route>
         </Routes>
       </DemoAuthProvider>

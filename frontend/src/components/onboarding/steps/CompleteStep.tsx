@@ -1,4 +1,4 @@
-/** Step 6: Complete — summary + next steps (integrations, transactions). */
+/** Step 6: Complete — summary + next steps. */
 
 import { Link } from 'react-router-dom';
 import type { OnboardingStepStatus } from '../../../api';
@@ -6,14 +6,12 @@ import type { OnboardingStepStatus } from '../../../api';
 interface CompleteStepProps {
   steps: OnboardingStepStatus[];
   dotloopConnected: boolean;
-  docusignConnected: boolean;
   onFinish: () => void;
 }
 
 export function CompleteStep({
   steps,
   dotloopConnected,
-  docusignConnected,
   onFinish,
 }: CompleteStepProps) {
   // Build summary of actionable steps (skip welcome and complete)
@@ -23,7 +21,6 @@ export function CompleteStep({
 
   const stepLabels: Record<string, string> = {
     profile: 'Profile Setup',
-    ai_chat: 'AI Assistant',
     documents: 'Document Upload',
     extraction: 'Document Intelligence',
   };
@@ -52,10 +49,10 @@ export function CompleteStep({
 
       <div className="ob-next-steps">
         <h3 className="ob-next-steps-heading">Next Steps</h3>
-        {!dotloopConnected && !docusignConnected && (
+        {!dotloopConnected && (
           <Link to="/profile" className="ob-next-steps-card" onClick={onFinish}>
             <span className="ob-next-steps-icon">&#x1F517;</span>
-            <span>Connect Dotloop or DocuSign</span>
+            <span>Connect Dotloop</span>
           </Link>
         )}
         <Link to="/transactions" className="ob-next-steps-card" onClick={onFinish}>

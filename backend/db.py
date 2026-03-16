@@ -36,7 +36,7 @@ DB_NAME = os.getenv("MONGODB_DB", "des")
 # Onboarding constants
 # ---------------------------------------------------------------------------
 
-VALID_STEP_IDS = ["welcome", "profile", "ai_chat", "documents", "extraction", "complete"]
+VALID_STEP_IDS = ["welcome", "profile", "documents", "extraction", "complete"]
 
 
 # ---------------------------------------------------------------------------
