@@ -159,7 +159,7 @@ export function ProfileDocuments() {
                         <div key={key} className="extracted-field">
                           <span className="field-key">{key.replace(/_/g, ' ')}</span>
                           <span className="field-value">
-                            {val === null ? '—' : Array.isArray(val) ? val.join(', ') : String(val)}
+                            {val === null ? '--' : Array.isArray(val) ? val.join(', ') : String(val)}
                           </span>
                         </div>
                       ))}

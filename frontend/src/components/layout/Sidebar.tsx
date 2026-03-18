@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Menu, useMantineColorScheme } from '@mantine/core';
+import { useClerk } from '@clerk/clerk-react';
 import { useOnboardingContext } from '../../context/OnboardingContext';
 import { ONBOARDING_STEPS } from '../../hooks/useOnboarding';
 import { useClerkAvatar } from '../../hooks/useClerkAvatar';
@@ -9,9 +10,11 @@ import type { ProfileCompletion } from '../../api/profile';
 import { getProfileCompletion } from '../../api/profile';
 import { CompletionIndicator } from '../common/CompletionIndicator';
 
+const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+
 const NAV_ITEMS = [
-  { to: '/transactions', label: 'Transactions', icon: '≡' },
-  { to: '/comparison',   label: 'Comparison',   icon: '⋏' },
+  { to: '/transactions', label: 'Transactions', icon: 'T' },
+  { to: '/comparison',   label: 'Comparison',   icon: 'C' },
 ];
 
 function SunIcon() {
@@ -42,10 +45,33 @@ function SidebarSettings() {
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const [completion, setCompletion] = useState<ProfileCompletion | null>(null);
   const { avatarUrl, clerkName } = useClerkAvatar();
-  const { demoUser } = useDemoAuth();
+  const { isDemoMode, demoUser, exitDemo } = useDemoAuth();
+  const clerk = CLERK_ENABLED
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    ? useClerk()
+    : null;
 
   const name = clerkName || demoUser?.name || 'User';
   const initials = name.split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase();
+
+  const clearOnboardingCache = () => {
+    localStorage.removeItem('des_onboarding_v2');
+    localStorage.removeItem('des_onboarding_step');
+  };
+
+  const handleLogout = async () => {
+    clearOnboardingCache();
+
+    if (isDemoMode) {
+      exitDemo();
+      return;
+    }
+
+    if (clerk) {
+      await clerk.signOut();
+      window.location.href = '/login';
+    }
+  };
 
   // Keep data-theme attribute in sync for legacy CSS still in App.css
   useEffect(() => {
@@ -95,6 +121,14 @@ function SidebarSettings() {
           >
             {colorScheme === 'light' ? 'Dark mode' : 'Light mode'}
           </Menu.Item>
+          {(isDemoMode || clerk) && (
+            <>
+              <Menu.Divider />
+              <Menu.Item color="red" onClick={() => void handleLogout()}>
+                {isDemoMode ? 'Exit Demo' : 'Log Out'}
+              </Menu.Item>
+            </>
+          )}
         </Menu.Dropdown>
       </Menu>
     </div>

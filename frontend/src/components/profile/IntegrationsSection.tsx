@@ -69,7 +69,7 @@ export function IntegrationsSection({
         {/* Dotloop */}
         <Card withBorder padding="md" className={dotloopConnected ? 'connected' : undefined}>
           <div className="integration-header">
-            <span className="integration-icon">&#x1F517;</span>
+            <span className="integration-icon">DL</span>
             <span className="integration-name">Dotloop</span>
             <span className={`integration-badge ${dotloopConnected ? 'connected' : ''}`}>
               {dotloopConnected ? 'Connected' : 'Ready to Connect'}

@@ -29,7 +29,7 @@ export function ChatMessage({ message }: Props) {
           message.completionAfter !== undefined &&
           message.completionAfter > message.completionBefore && (
             <div className="chat-completion-bump">
-              Profile: {Math.round(message.completionBefore)}% → {Math.round(message.completionAfter)}%
+              Profile: {Math.round(message.completionBefore)}% to {Math.round(message.completionAfter)}%
             </div>
           )}
       </div>

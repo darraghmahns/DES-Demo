@@ -33,7 +33,7 @@ export function RoleSelector({ currentRoles, onAddRole, onRemoveRole, disabled }
             >
               <span className="role-chip-icon">{role.icon}</span>
               <span className="role-chip-label">{role.label}</span>
-              <span className="role-chip-action">{active ? '×' : '+'}</span>
+              <span className="role-chip-action">{active ? 'x' : '+'}</span>
             </button>
           );
         })}

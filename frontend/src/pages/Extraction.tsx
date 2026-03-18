@@ -687,7 +687,7 @@ export function ExtractionPage() {
                         <div className="doc-info">
                           <div className="doc-name">{doc.name}</div>
                           <div className="doc-meta">
-                            {doc.size_human} &middot; {doc.pages} page{doc.pages !== 1 ? 's' : ''}
+                            {doc.size_human} - {doc.pages} page{doc.pages !== 1 ? 's' : ''}
                           </div>
                         </div>
                       </div>
@@ -795,7 +795,6 @@ export function ExtractionPage() {
           {propertyEnrichment && propertyEnrichment.match_quality !== 'none' && (
             <div className="property-enrichment-section">
               <div className="property-enrichment-title">
-                <span style={{ marginRight: 6 }}>&#x1F4CD;</span>
                 Property Enrichment (Regrid)
               </div>
               <div className="property-enrichment-grid">
@@ -884,7 +883,7 @@ export function ExtractionPage() {
           {!dotloopConfigured && (
             <div className="dotloop-section">
               <Link to="/profile" className="integration-profile-link">
-                Dotloop not connected &mdash; Set up in Profile &rarr;
+                Dotloop not connected - Set up in Profile
               </Link>
             </div>
           )}
@@ -990,14 +989,14 @@ export function ExtractionPage() {
 
               {syncResult && (
                 <div className="dotloop-success">
-                  <span className="dotloop-check">&#x2713;</span>
+                  <span className="dotloop-check">OK</span>
                   {syncResult.action} loop in Dotloop
                   {syncResult.document_uploaded && syncResult.document_name && (
-                    <span className="dotloop-doc-uploaded"> &middot; Uploaded {syncResult.document_name}</span>
+                    <span className="dotloop-doc-uploaded"> - Uploaded {syncResult.document_name}</span>
                   )}
                   {syncResult.loop_url && (
                     <a href={syncResult.loop_url} target="_blank" rel="noopener noreferrer" className="dotloop-link">
-                      Open in Dotloop &#x2192;
+                      Open in Dotloop
                     </a>
                   )}
                   {syncResult.errors.length > 0 && (

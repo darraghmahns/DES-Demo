@@ -27,7 +27,7 @@ const STATUS_FLOW: TransactionStatus[] = [
   'draft', 'active', 'under_contract', 'pending_close', 'closed',
 ];
 
-type TabKey = 'overview' | 'documents' | 'offers' | 'compliance';
+type TabKey = 'overview' | 'documents' | 'offers';
 
 function formatPrice(amount?: number): string {
   if (!amount) return '--';
@@ -168,8 +168,8 @@ export function TransactionDetail() {
   const isSeller = transaction.agent_side === 'seller';
 
   const visibleTabs: TabKey[] = isSeller
-    ? ['overview', 'documents', 'offers', 'compliance']
-    : ['overview', 'documents', 'compliance'];
+    ? ['overview', 'documents', 'offers']
+    : ['overview', 'documents'];
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -210,14 +210,13 @@ export function TransactionDetail() {
     overview: 'Overview',
     documents: 'Documents',
     offers: 'Offers',
-    compliance: 'Compliance',
   };
 
   return (
     <div className="page-transaction-detail">
       <div className="txn-detail-header">
         <div>
-          <Link to="/transactions" className="back-link">&larr; All Transactions</Link>
+          <Link to="/transactions" className="back-link">Back to Transactions</Link>
           <h1>{transaction.name}</h1>
           {addr && (
             <p className="txn-address">
@@ -267,7 +266,7 @@ export function TransactionDetail() {
                   ) : uploadState.status === 'done' ? (
                     `${uploadState.filename} extracted and linked.`
                   ) : (
-                    `${uploadState.filename} — ${uploadState.progress}`
+                    `${uploadState.filename} - ${uploadState.progress}`
                   )}
                 </span>
                 {(uploadState.status === 'error' || uploadState.status === 'done') && (
@@ -285,7 +284,9 @@ export function TransactionDetail() {
                 <Tabs.Tab
                   key={tab}
                   value={tab}
-                  rightSection={tab === 'offers' && extractions.length > 0 ? <Badge size="xs">{extractions.length}</Badge> : undefined}
+                  rightSection={
+                    tab === 'offers' && extractions.length > 0 ? <Badge size="xs">{extractions.length}</Badge> : undefined
+                  }
                 >
                   {TAB_LABELS[tab]}
                 </Tabs.Tab>
@@ -325,12 +326,6 @@ export function TransactionDetail() {
                   }
                 />
               )}
-            </Tabs.Panel>
-            <Tabs.Panel value="compliance">
-              <div className="tab-placeholder">
-                <p>Compliance integration coming soon.</p>
-                <p>This tab will show jurisdiction requirements from JACE.</p>
-              </div>
             </Tabs.Panel>
           </Tabs>
         </div>
@@ -459,7 +454,7 @@ function exportDatesICS(offer: OfferData, dateFields: OfferField[], txnName: str
         `DTSTAMP:${stamp}`,
         `DTSTART;VALUE=DATE:${icsDate}`,
         `DTEND;VALUE=DATE:${icsDate}`,
-        `SUMMARY:${txnName} — ${f.label}`,
+        `SUMMARY:${txnName} - ${f.label}`,
         'END:VEVENT',
       ].join('\r\n');
     })
@@ -500,6 +495,15 @@ function OverviewTab({
   const [mls, setMls] = useState(transaction.mls_number || '');
   const [closingDate, setClosingDate] = useState(transaction.closing_date || '');
   const [txnType, setTxnType] = useState(transaction.transaction_type || '');
+  const [streetNumber, setStreetNumber] = useState(transaction.property_address?.street_number || '');
+  const [streetName, setStreetName] = useState(transaction.property_address?.street_name || '');
+  const [unitNumber, setUnitNumber] = useState(transaction.property_address?.unit_number || '');
+  const [city, setCity] = useState(transaction.property_address?.city || '');
+  const [stateOrProvince, setStateOrProvince] = useState(transaction.property_address?.state_or_province || '');
+  const [postalCode, setPostalCode] = useState(transaction.property_address?.postal_code || '');
+  const [county, setCounty] = useState(transaction.property_address?.county || '');
+  const [parcelTaxId, setParcelTaxId] = useState(transaction.property_address?.parcel_tax_id || '');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const { dotloopConnected } = useIntegrations();
   const [loops, setLoops] = useState<DotloopLoop[]>([]);
   const [selectedLoop, setSelectedLoop] = useState('');
@@ -514,6 +518,25 @@ function OverviewTab({
       .then(setLoops)
       .catch(() => setLoops([]));
   }, [dotloopConnected]);
+
+  useEffect(() => {
+    if (editing) return;
+    setName(transaction.name);
+    setPrice(transaction.purchase_price?.toString() || '');
+    setEarnest(transaction.earnest_money?.toString() || '');
+    setMls(transaction.mls_number || '');
+    setClosingDate(transaction.closing_date || '');
+    setTxnType(transaction.transaction_type || '');
+    setStreetNumber(transaction.property_address?.street_number || '');
+    setStreetName(transaction.property_address?.street_name || '');
+    setUnitNumber(transaction.property_address?.unit_number || '');
+    setCity(transaction.property_address?.city || '');
+    setStateOrProvince(transaction.property_address?.state_or_province || '');
+    setPostalCode(transaction.property_address?.postal_code || '');
+    setCounty(transaction.property_address?.county || '');
+    setParcelTaxId(transaction.property_address?.parcel_tax_id || '');
+    setSaveError(null);
+  }, [transaction, editing]);
 
   const handleLoopSearch = (query: string) => {
     if (loopSearchTimer.current) clearTimeout(loopSearchTimer.current);
@@ -536,15 +559,60 @@ function OverviewTab({
   };
 
   const handleSave = async () => {
-    await onUpdate({
-      name: name || undefined,
-      transaction_type: txnType || undefined,
-      purchase_price: price ? parseFloat(price) : undefined,
-      earnest_money: earnest ? parseFloat(earnest) : undefined,
-      mls_number: mls || undefined,
-      closing_date: closingDate || undefined,
-    });
-    setEditing(false);
+    const hasAddressInput = [
+      streetNumber,
+      streetName,
+      unitNumber,
+      city,
+      stateOrProvince,
+      postalCode,
+      county,
+      parcelTaxId,
+    ].some((value) => value.trim().length > 0);
+
+    const propertyAddress = hasAddressInput
+      ? {
+        street_number: streetNumber.trim(),
+        street_name: streetName.trim(),
+        city: city.trim(),
+        state_or_province: stateOrProvince.trim().toUpperCase(),
+        postal_code: postalCode.trim(),
+        ...(unitNumber.trim() ? { unit_number: unitNumber.trim() } : {}),
+        ...(county.trim() ? { county: county.trim() } : {}),
+        ...(parcelTaxId.trim() ? { parcel_tax_id: parcelTaxId.trim() } : {}),
+      }
+      : undefined;
+
+    if (
+      propertyAddress
+      && (
+        !propertyAddress.street_number
+        || !propertyAddress.street_name
+        || !propertyAddress.city
+        || !propertyAddress.state_or_province
+        || !propertyAddress.postal_code
+      )
+    ) {
+      setSaveError('To save the property address, add street number, street name, city, state, and ZIP.');
+      return;
+    }
+
+    setSaveError(null);
+
+    try {
+      await onUpdate({
+        name: name || undefined,
+        transaction_type: txnType || undefined,
+        purchase_price: price ? parseFloat(price) : undefined,
+        earnest_money: earnest ? parseFloat(earnest) : undefined,
+        mls_number: mls || undefined,
+        closing_date: closingDate || undefined,
+        property_address: propertyAddress,
+      });
+      setEditing(false);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Failed to save transaction details.');
+    }
   };
 
   const handleLinkLoop = async () => {
@@ -662,6 +730,73 @@ function OverviewTab({
                 size="sm"
               />
             </SimpleGrid>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Property Address</div>
+            <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm" mb="xs">
+              <TextInput
+                label="Street Number"
+                value={streetNumber}
+                onChange={e => setStreetNumber(e.target.value)}
+                placeholder="2760"
+                size="sm"
+              />
+              <TextInput
+                label="Street Name"
+                value={streetName}
+                onChange={e => setStreetName(e.target.value)}
+                placeholder="Carla Jo Lane"
+                size="sm"
+              />
+              <TextInput
+                label="Unit Number"
+                value={unitNumber}
+                onChange={e => setUnitNumber(e.target.value)}
+                placeholder="Optional"
+                size="sm"
+              />
+              <TextInput
+                label="City"
+                value={city}
+                onChange={e => setCity(e.target.value)}
+                placeholder="Missoula"
+                size="sm"
+              />
+              <TextInput
+                label="State"
+                value={stateOrProvince}
+                onChange={e => setStateOrProvince(e.target.value)}
+                placeholder="MT"
+                size="sm"
+              />
+              <TextInput
+                label="ZIP"
+                value={postalCode}
+                onChange={e => setPostalCode(e.target.value)}
+                placeholder="59801"
+                size="sm"
+              />
+              <TextInput
+                label="County"
+                value={county}
+                onChange={e => setCounty(e.target.value)}
+                placeholder="Optional"
+                size="sm"
+              />
+              <TextInput
+                label="Parcel / Tax ID"
+                value={parcelTaxId}
+                onChange={e => setParcelTaxId(e.target.value)}
+                placeholder="Optional"
+                size="sm"
+              />
+            </SimpleGrid>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+              Add a complete property address so the deal record stays consistent.
+            </div>
+            {saveError && (
+              <Alert color="red" mb="sm">
+                {saveError}
+              </Alert>
+            )}
             <Group mb="sm">
               <Button variant="filled" color="cyan" onClick={handleSave}>Save</Button>
             </Group>
@@ -763,7 +898,7 @@ function OverviewTab({
                 <span className="date-value">
                   {selectedOffer.fields[field.key] != null
                     ? formatDate(String(selectedOffer.fields[field.key]))
-                    : '—'}
+                    : '--'}
                 </span>
               </div>
             ))}
@@ -773,31 +908,43 @@ function OverviewTab({
 
       <RawExtrasPanel offer={selectedOffer} />
 
-      {transaction.property_address && (
-        <div className="overview-section">
-          <h3>Property</h3>
-          <div className="overview-grid">
-            <div className="overview-item">
-              <span className="overview-label">Address</span>
-              <span className="overview-value">
-                {transaction.property_address.street_number} {transaction.property_address.street_name}
-              </span>
-            </div>
-            <div className="overview-item">
-              <span className="overview-label">City</span>
-              <span className="overview-value">{transaction.property_address.city}</span>
-            </div>
-            <div className="overview-item">
-              <span className="overview-label">State</span>
-              <span className="overview-value">{transaction.property_address.state_or_province}</span>
-            </div>
-            <div className="overview-item">
-              <span className="overview-label">ZIP</span>
-              <span className="overview-value">{transaction.property_address.postal_code}</span>
-            </div>
+      <div className="overview-section">
+        <h3>Property</h3>
+        <div className="overview-grid">
+          <div className="overview-item">
+            <span className="overview-label">Address</span>
+            <span className="overview-value">
+              {[transaction.property_address?.street_number, transaction.property_address?.street_name]
+                .filter(Boolean)
+                .join(' ') || '--'}
+            </span>
+          </div>
+          <div className="overview-item">
+            <span className="overview-label">Unit</span>
+            <span className="overview-value">{transaction.property_address?.unit_number || '--'}</span>
+          </div>
+          <div className="overview-item">
+            <span className="overview-label">City</span>
+            <span className="overview-value">{transaction.property_address?.city || '--'}</span>
+          </div>
+          <div className="overview-item">
+            <span className="overview-label">State</span>
+            <span className="overview-value">{transaction.property_address?.state_or_province || '--'}</span>
+          </div>
+          <div className="overview-item">
+            <span className="overview-label">ZIP</span>
+            <span className="overview-value">{transaction.property_address?.postal_code || '--'}</span>
+          </div>
+          <div className="overview-item">
+            <span className="overview-label">County</span>
+            <span className="overview-value">{transaction.property_address?.county || '--'}</span>
+          </div>
+          <div className="overview-item">
+            <span className="overview-label">Parcel / Tax ID</span>
+            <span className="overview-value">{transaction.property_address?.parcel_tax_id || '--'}</span>
           </div>
         </div>
-      )}
+      </div>
 
       <div className="overview-section">
         <h3>Dotloop Loop</h3>
@@ -815,13 +962,13 @@ function OverviewTab({
             <Select
               value={selectedLoop || null}
               onChange={(val) => setSelectedLoop(val ?? '')}
-              data={loops.map(l => ({ value: String(l.id), label: `${l.name}${l.status ? ` · ${l.status}` : ''}` }))}
+              data={loops.map(l => ({ value: String(l.id), label: `${l.name}${l.status ? ` - ${l.status}` : ''}` }))}
               placeholder="Search loops..."
               size="sm"
               style={{ flex: 1 }}
               searchable
               onSearchChange={handleLoopSearch}
-              rightSection={loopSearching ? <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>…</span> : undefined}
+              rightSection={loopSearching ? <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>...</span> : undefined}
               nothingFoundMessage="No loops found"
             />
             <Button
@@ -850,7 +997,7 @@ function formatRawKey(key: string): string {
   return key
     .split('.')
     .map(part => part.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
-    .join(' › ');
+    .join(' > ');
 }
 
 function RawExtrasPanel({ offer }: { offer: import('../api').OfferData | null }) {
@@ -862,7 +1009,7 @@ function RawExtrasPanel({ offer }: { offer: import('../api').OfferData | null })
   return (
     <div className="overview-section raw-extras-section">
       <button className="raw-extras-toggle" onClick={() => setOpen(o => !o)}>
-        <span>{open ? '▾' : '▸'} All extracted data</span>
+        <span>{open ? 'v' : '>'} All extracted data</span>
         <span className="raw-extras-count">{entries.length} additional field{entries.length !== 1 ? 's' : ''}</span>
       </button>
       {open && (
@@ -871,7 +1018,7 @@ function RawExtrasPanel({ offer }: { offer: import('../api').OfferData | null })
             <div key={key} className="deal-date-row">
               <span className="date-label">{formatRawKey(key)}</span>
               <span className="date-value raw-extras-value">
-                {val === null || val === undefined ? '—' : String(val)}
+                {val === null || val === undefined ? '--' : String(val)}
               </span>
             </div>
           ))}
@@ -928,7 +1075,7 @@ function DocumentsTab({
           <div className="doc-requirements-list">
             {extractions.map(ext => (
               <div key={ext.id} className="doc-requirement satisfied">
-                <span className="doc-req-icon">&#x2713;</span>
+                <span className="doc-req-icon">OK</span>
                 <span className="doc-req-type">{ext.filename}</span>
                 <span className="doc-req-role">{ext.mode}</span>
                 <span className="doc-req-status status-ok">
@@ -949,7 +1096,7 @@ function DocumentsTab({
           <div className="doc-requirements-list">
             {docs.map(doc => (
               <div key={doc._id} className="doc-requirement satisfied">
-                <span className="doc-req-icon">&#x2713;</span>
+                <span className="doc-req-icon">OK</span>
                 <span className="doc-req-type">{doc.filename}</span>
                 <span className="doc-req-role">{doc.doc_type.replace(/_/g, ' ')}</span>
                 <span className="doc-req-status status-ok">{doc.source === 'user_profile' ? 'From Profile' : 'Uploaded'}</span>

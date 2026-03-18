@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from auth import get_current_user, AUTH_ENABLED
 from db import Transaction, UserProfile, UserDocument, TransactionDocument, DocumentRecord
@@ -55,6 +55,7 @@ class SetDotloopLoopBody(BaseModel):
 class UpdateTransactionRequest(BaseModel):
     name: Optional[str] = None
     status: Optional[TransactionStatus] = None
+    transaction_type: Optional[str] = None
     property_address: Optional[dict] = None
     mls_number: Optional[str] = None
     purchase_price: Optional[float] = None
@@ -122,6 +123,33 @@ async def _get_transaction_for_user(txn_id: str, user: UserProfile) -> Transacti
     return txn
 
 
+def _merge_property_address(
+    existing: Optional[DotloopPropertyAddress],
+    updates: Optional[dict],
+) -> Optional[DotloopPropertyAddress]:
+    """Merge partial property address updates onto the existing address."""
+    if updates is None:
+        return existing
+
+    cleaned_updates = {}
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        if value == "":
+            continue
+        cleaned_updates[key] = value
+
+    merged = existing.model_dump(mode="json") if existing else {}
+    merged.update(cleaned_updates)
+
+    if not merged:
+        return None
+
+    return DotloopPropertyAddress.model_validate(merged)
+
+
 # ---------------------------------------------------------------------------
 # Transaction CRUD
 # ---------------------------------------------------------------------------
@@ -139,7 +167,7 @@ async def create_transaction(
     prop_addr = None
     if req.property_address:
         try:
-            prop_addr = DotloopPropertyAddress.model_validate(req.property_address)
+            prop_addr = _merge_property_address(None, req.property_address)
         except Exception:
             pass  # Allow partial address data
 
@@ -267,6 +295,8 @@ async def update_transaction(
         txn.name = req.name
     if req.status is not None:
         txn.status = req.status
+    if req.transaction_type is not None:
+        txn.transaction_type = req.transaction_type
     if req.mls_number is not None:
         txn.mls_number = req.mls_number
     if req.purchase_price is not None:
@@ -280,9 +310,15 @@ async def update_transaction(
             pass
     if req.property_address is not None:
         try:
-            txn.property_address = DotloopPropertyAddress.model_validate(req.property_address)
-        except Exception:
-            pass
+            txn.property_address = _merge_property_address(txn.property_address, req.property_address)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Property address is incomplete. Street number, street name, city, "
+                    "state, and ZIP are required to save the address."
+                ),
+            ) from exc
     if req.document_requirements is not None:
         txn.document_requirements = [
             DocumentRequirement.model_validate(r) for r in req.document_requirements

@@ -70,7 +70,7 @@ export function FileUpload({
       />
       <div className="file-upload-icon">+</div>
       <p className="file-upload-label">{label}</p>
-      <p className="file-upload-hint">PDF, PNG, JPG, TIFF — max {maxSizeMB} MB</p>
+      <p className="file-upload-hint">PDF, PNG, JPG, TIFF - max {maxSizeMB} MB</p>
       {error && <p className="file-upload-error">{error}</p>}
     </div>
   );

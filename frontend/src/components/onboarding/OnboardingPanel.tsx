@@ -40,7 +40,7 @@ export function OnboardingPanel({
           title="Minimize"
           aria-label="Minimize setup guide"
         >
-          &#x2715;
+          X
         </button>
       </div>
 

@@ -133,7 +133,6 @@ from clerk_webhook import router as clerk_webhook_router
 
 app.include_router(clerk_webhook_router)
 
-
 # ---------------------------------------------------------------------------
 # Demo Login (Phase 2 — bypass Clerk for @deslabs.local demo accounts)
 # ---------------------------------------------------------------------------
@@ -186,20 +185,146 @@ def _default_v2_steps() -> list[dict]:
     ]
 
 
+def _coerce_completed_at(value) -> Optional[str]:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _normalize_v2_step_statuses(
+    step_statuses,
+    *,
+    completed: bool,
+    completed_at,
+) -> list[OnboardingStepStatus]:
+    """Normalize stored onboarding steps to the current VALID_STEP_IDS schema."""
+    completed_iso = _coerce_completed_at(completed_at)
+    valid_statuses = {"pending", "completed", "skipped"}
+    existing: dict[str, OnboardingStepStatus] = {}
+
+    for step in step_statuses or []:
+        step_id = getattr(step, "step_id", None)
+        status = getattr(step, "status", None)
+        step_completed_at = _coerce_completed_at(getattr(step, "completed_at", None))
+
+        if step_id not in VALID_STEP_IDS or step_id in existing:
+            continue
+        if status not in valid_statuses:
+            status = "pending"
+
+        existing[step_id] = OnboardingStepStatus(
+            step_id=step_id,
+            status=status,
+            completed_at=step_completed_at if status == "completed" else None,
+        )
+
+    normalized: list[OnboardingStepStatus] = []
+    for step_id in VALID_STEP_IDS:
+        if step_id in existing:
+            normalized.append(existing[step_id])
+        elif completed:
+            normalized.append(
+                OnboardingStepStatus(
+                    step_id=step_id,
+                    status="completed",
+                    completed_at=completed_iso,
+                )
+            )
+        else:
+            normalized.append(
+                OnboardingStepStatus(
+                    step_id=step_id,
+                    status="pending",
+                    completed_at=None,
+                )
+            )
+
+    return normalized
+
+
+def _all_steps_resolved(step_statuses: list[OnboardingStepStatus]) -> bool:
+    return all(step.status in ("completed", "skipped") for step in step_statuses)
+
+
+def _next_pending_step_index(step_statuses: list[OnboardingStepStatus]) -> int:
+    for index, step in enumerate(step_statuses):
+        if step.status == "pending":
+            return index
+    return len(VALID_STEP_IDS)
+
+
+def _step_signature(step_statuses: list[OnboardingStepStatus]) -> list[tuple[str, str, Optional[str]]]:
+    return [
+        (step.step_id, step.status, step.completed_at)
+        for step in step_statuses
+    ]
+
+
+async def _reconcile_user_onboarding_state(user) -> None:
+    """Repair stale onboarding state to the current 5-step schema."""
+    completed = bool(user.onboarding_completed)
+    completed_at = user.onboarding_completed_at
+
+    normalized_steps = _normalize_v2_step_statuses(
+        user.onboarding_step_statuses,
+        completed=completed,
+        completed_at=completed_at,
+    )
+
+    if not completed and _all_steps_resolved(normalized_steps):
+        completed = True
+
+    if completed and completed_at is None:
+        completed_at = datetime.now(timezone.utc)
+
+    if completed:
+        normalized_steps = _normalize_v2_step_statuses(
+            normalized_steps,
+            completed=True,
+            completed_at=completed_at,
+        )
+        current_step = len(VALID_STEP_IDS)
+    else:
+        completed_at = None
+        current_step = _next_pending_step_index(normalized_steps)
+
+    skipped_steps = [step.step_id for step in normalized_steps if step.status == "skipped"]
+
+    changed = (
+        user.onboarding_version != 2
+        or user.onboarding_completed != completed
+        or user.onboarding_completed_at != completed_at
+        or user.onboarding_current_step != current_step
+        or user.onboarding_skipped_steps != skipped_steps
+        or _step_signature(user.onboarding_step_statuses or []) != _step_signature(normalized_steps)
+    )
+
+    if not changed:
+        return
+
+    user.onboarding_version = 2
+    user.onboarding_completed = completed
+    user.onboarding_completed_at = completed_at
+    user.onboarding_current_step = current_step
+    user.onboarding_skipped_steps = skipped_steps
+    user.onboarding_step_statuses = normalized_steps
+    await user.save()
+
+
 def _build_v2_status_response(user, dotloop_connected: bool, docusign_connected: bool) -> dict:
     """Build the v2 onboarding status response from a UserProfile."""
-    # If user has v2 step statuses, use them; otherwise generate defaults
-    if user.onboarding_step_statuses:
-        steps = [
-            {
-                "step_id": s.step_id,
-                "status": s.status,
-                "completed_at": s.completed_at,
-            }
-            for s in user.onboarding_step_statuses
-        ]
-    else:
-        steps = _default_v2_steps()
+    steps = [
+        {
+            "step_id": s.step_id,
+            "status": s.status,
+            "completed_at": s.completed_at,
+        }
+        for s in _normalize_v2_step_statuses(
+            user.onboarding_step_statuses,
+            completed=bool(user.onboarding_completed),
+            completed_at=user.onboarding_completed_at,
+        )
+    ]
 
     return {
         "version": 2,
@@ -249,27 +374,7 @@ async def onboarding_status(user=Depends(get_current_user)):
     dotloop_connected = bool(user.dotloop_tokens and user.dotloop_tokens.access_token)
     docusign_connected = bool(user.docusign_tokens and user.docusign_tokens.access_token)
 
-    # --- v1 → v2 migration ---
-    if user.onboarding_version < 2:
-        if user.onboarding_completed:
-            # v1 completed user: mark all steps complete, keep completed state
-            user.onboarding_version = 2
-            now_iso = user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None
-            user.onboarding_step_statuses = [
-                OnboardingStepStatus(step_id=sid, status="completed", completed_at=now_iso)
-                for sid in VALID_STEP_IDS
-            ]
-            user.onboarding_current_step = len(VALID_STEP_IDS)
-            await user.save()
-        else:
-            # v1 mid-flow user: start fresh at v2 step 0
-            user.onboarding_version = 2
-            user.onboarding_step_statuses = [
-                OnboardingStepStatus(step_id=sid, status="pending", completed_at=None)
-                for sid in VALID_STEP_IDS
-            ]
-            user.onboarding_current_step = 0
-            await user.save()
+    await _reconcile_user_onboarding_state(user)
 
     return _build_v2_status_response(user, dotloop_connected, docusign_connected)
 
@@ -320,15 +425,7 @@ async def onboarding_step_update(request: OnboardingStepUpdate, user=Depends(get
     if request.step_id not in VALID_STEP_IDS:
         raise HTTPException(status_code=400, detail=f"Invalid step_id: {request.step_id}")
 
-    # Ensure user is on v2
-    if user.onboarding_version < 2:
-        # Auto-upgrade
-        user.onboarding_version = 2
-        if not user.onboarding_step_statuses:
-            user.onboarding_step_statuses = [
-                OnboardingStepStatus(step_id=sid, status="pending", completed_at=None)
-                for sid in VALID_STEP_IDS
-            ]
+    await _reconcile_user_onboarding_state(user)
 
     # Update the step
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -381,9 +478,12 @@ async def onboarding_complete(request: OnboardingCompleteRequest, user=Depends(g
     if not user:
         return {"completed": True}
     if not user.onboarding_completed:
+        valid_skipped_steps = [
+            step_id for step_id in request.skipped_steps if step_id in VALID_STEP_IDS
+        ]
         user.onboarding_completed = True
         user.onboarding_completed_at = datetime.now(timezone.utc)
-        user.onboarding_skipped_steps = request.skipped_steps
+        user.onboarding_skipped_steps = valid_skipped_steps
 
         # Sync v2 step statuses
         now_iso = user.onboarding_completed_at.isoformat()
@@ -391,8 +491,8 @@ async def onboarding_complete(request: OnboardingCompleteRequest, user=Depends(g
         user.onboarding_step_statuses = [
             OnboardingStepStatus(
                 step_id=sid,
-                status="skipped" if sid in request.skipped_steps else "completed",
-                completed_at=now_iso if sid not in request.skipped_steps else None,
+                status="skipped" if sid in valid_skipped_steps else "completed",
+                completed_at=now_iso if sid not in valid_skipped_steps else None,
             )
             for sid in VALID_STEP_IDS
         ]
@@ -1715,7 +1815,7 @@ async def scout_get_result(result_id: str):
 
     try:
         result = await ScoutResult.get(ObjectId(result_id))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, Exception):
         raise HTTPException(status_code=404, detail="Scout result not found")
 
     if not result:
@@ -1732,7 +1832,7 @@ async def scout_verify_result(result_id: str, verified_by: str = Query("admin"),
 
     try:
         result = await ScoutResult.get(ObjectId(result_id))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, Exception):
         raise HTTPException(status_code=404, detail="Scout result not found")
 
     if not result:
@@ -1762,7 +1862,7 @@ async def scout_reject_result(result_id: str):
 
     try:
         result = await ScoutResult.get(ObjectId(result_id))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, Exception):
         raise HTTPException(status_code=404, detail="Scout result not found")
 
     if not result:

@@ -37,14 +37,19 @@ export function Login() {
   return (
     <div className="page-login">
       <div className="login-container">
-        <h1>Comparari</h1>
-        <p>Sign in to continue</p>
+        <div className="login-brand">
+          <h1 className="login-title">Comparari</h1>
+          <p className="login-subtitle">Sign in to continue</p>
+        </div>
+        <div className="login-clerk">
         <SignIn
           routing="hash"
           appearance={{
             elements: {
-              rootBox: { width: '100%', maxWidth: 400 },
+              rootBox: { width: '100%' },
               card: {
+                width: '100%',
+                boxSizing: 'border-box',
                 background: 'var(--mantine-color-body)',
                 border: '1px solid var(--mantine-color-default-border)',
                 borderRadius: '12px',
@@ -75,6 +80,7 @@ export function Login() {
             },
           }}
         />
+        </div>
         <div className="login-divider">
           <span>or</span>
         </div>

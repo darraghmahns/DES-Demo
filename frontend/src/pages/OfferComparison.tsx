@@ -124,7 +124,7 @@ function EditableCell({ value, field, extractionId, allValues, onSave }: Editabl
         title="Click to toggle"
       >
         <span className="comparison-cell-value">{formatValue(value, field.type)}</span>
-        {saved && <span className="comparison-cell-saved">✓</span>}
+        {saved && <span className="comparison-cell-saved">Saved</span>}
       </td>
     );
   }
@@ -138,9 +138,9 @@ function EditableCell({ value, field, extractionId, allValues, onSave }: Editabl
           defaultValue={value != null ? String(value) : ''}
           onChange={e => triggerSave(e.target.value)}
           rows={3}
-          placeholder="—"
+          placeholder="--"
         />
-        {saved && <span className="comparison-cell-saved">✓</span>}
+        {saved && <span className="comparison-cell-saved">Saved</span>}
       </td>
     );
   }
@@ -186,7 +186,7 @@ function EditableCell({ value, field, extractionId, allValues, onSave }: Editabl
       title="Click to edit"
     >
       <span className="comparison-cell-value">{formatValue(value, field.type)}</span>
-      {saved && <span className="comparison-cell-saved">✓</span>}
+      {saved && <span className="comparison-cell-saved">Saved</span>}
     </td>
   );
 }
@@ -222,7 +222,7 @@ function ComparisonTable({ result, localEdits, highlightedRow, onRowHover, onRem
         >
           {hideEmpty ? 'Show empty fields' : 'Hide empty fields'}
         </button>
-        <span className="comparison-table-hint">Click any cell to edit · changes auto-save</span>
+        <span className="comparison-table-hint">Click any cell to edit - changes auto-save</span>
       </div>
       <div className="comparison-table-wrapper comparison-table-sticky">
         <table className="comparison-table">
@@ -510,15 +510,15 @@ export function OfferComparison() {
                     <div className="comparison-card-info">
                       <span className="comparison-card-filename">{ext.filename}</span>
                       <span className="comparison-card-meta">
-                        {ext.pages_processed}p &middot;{' '}
+                        {ext.pages_processed}p -{' '}
                         <span className={`conf-badge-inline ${ext.overall_confidence >= 0.85 ? 'high' : ext.overall_confidence >= 0.65 ? 'medium' : 'low'}`}>
                           {Math.round(ext.overall_confidence * 100)}%
                         </span>
                         {ext.created_at && (
-                          <> &middot; {formatDate(ext.created_at)}</>
+                          <> - {formatDate(ext.created_at)}</>
                         )}
                         {linkedTxn && (
-                          <> &middot; <span className="comparison-card-txn">{linkedTxn.name}</span></>
+                          <> - <span className="comparison-card-txn">{linkedTxn.name}</span></>
                         )}
                       </span>
                     </div>
@@ -529,7 +529,7 @@ export function OfferComparison() {
                     onClick={() => handleDelete(ext)}
                     title="Permanently delete this extraction"
                   >
-                    {deleting.has(ext.id) ? '…' : 'Delete'}
+                    {deleting.has(ext.id) ? '...' : 'Delete'}
                   </button>
                 </div>
               );

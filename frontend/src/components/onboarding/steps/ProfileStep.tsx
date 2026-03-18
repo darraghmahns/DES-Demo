@@ -8,7 +8,7 @@ interface ProfileStepProps {
 export function ProfileStep({ onNext, onSkip }: ProfileStepProps) {
   return (
     <div className="ob-step">
-      <div className="ob-step-icon">&#x1F464;</div>
+      <div className="ob-step-icon">02</div>
       <h2 className="ob-step-heading">Set Up Your Profile</h2>
       <p className="ob-step-body">
         Fill in your basic information and select your role. This helps Comparari

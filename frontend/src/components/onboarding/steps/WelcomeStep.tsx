@@ -7,7 +7,7 @@ interface WelcomeStepProps {
 export function WelcomeStep({ onNext }: WelcomeStepProps) {
   return (
     <div className="ob-step">
-      <div className="ob-step-icon">&#x1F44B;</div>
+      <div className="ob-step-icon">01</div>
       <h2 className="ob-step-title">Welcome to Comparari</h2>
       <p className="ob-step-body">
         Comparari uses AI to extract structured data from real estate documents,

@@ -48,7 +48,7 @@ class TestUserProfileOnboardingDefaults:
     def test_onboarding_skipped_steps_not_shared_across_instances(self):
         user_a = UserProfile(clerk_user_id="test_a", email="a@example.com")
         user_b = UserProfile(clerk_user_id="test_b", email="b@example.com")
-        user_a.onboarding_skipped_steps.append("integration")
+        user_a.onboarding_skipped_steps.append("documents")
         assert user_b.onboarding_skipped_steps == []
 
     def test_onboarding_v2_defaults(self):
@@ -129,7 +129,7 @@ class TestOnboardingStatusEndpoint:
         assert data["completed"] is False
         assert data["completed_at"] is None
         assert data["current_step"] == 0
-        assert len(data["steps"]) == 6
+        assert len(data["steps"]) == len(VALID_STEP_IDS)
         assert all(s["status"] == "pending" for s in data["steps"])
         assert data["dotloop_connected"] is False
         assert data["docusign_connected"] is False
@@ -175,7 +175,7 @@ class TestOnboardingStatusEndpoint:
         user = _make_v1_user(
             onboarding_completed=True,
             onboarding_completed_at=ts,
-            onboarding_skipped_steps=["integration"],
+            onboarding_skipped_steps=["documents"],
         )
 
         app.dependency_overrides[get_current_user] = lambda: user
@@ -191,6 +191,44 @@ class TestOnboardingStatusEndpoint:
         # v1 completed user should have all steps marked completed
         assert all(s["status"] == "completed" for s in data["steps"])
         assert user.onboarding_version == 2
+        user.save.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stale_v2_state_is_normalized_to_current_steps(self):
+        from server import app
+        from auth import get_current_user
+        from httpx import ASGITransport, AsyncClient
+
+        ts = datetime(2026, 2, 20, 12, 0, 0, tzinfo=timezone.utc)
+        user = _make_v2_user(
+            onboarding_completed=False,
+            onboarding_completed_at=ts,
+            onboarding_current_step=6,
+            onboarding_step_statuses=[
+                OnboardingStepStatus(step_id="welcome", status="completed", completed_at=ts.isoformat()),
+                OnboardingStepStatus(step_id="profile", status="completed", completed_at=ts.isoformat()),
+                OnboardingStepStatus(step_id="ai_chat", status="completed", completed_at=ts.isoformat()),
+                OnboardingStepStatus(step_id="documents", status="completed", completed_at=ts.isoformat()),
+                OnboardingStepStatus(step_id="extraction", status="completed", completed_at=ts.isoformat()),
+                OnboardingStepStatus(step_id="complete", status="completed", completed_at=ts.isoformat()),
+            ],
+        )
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.get("/api/onboarding/status")
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["completed"] is True
+        assert data["current_step"] == len(VALID_STEP_IDS)
+        assert [step["step_id"] for step in data["steps"]] == VALID_STEP_IDS
+        assert all(step["status"] == "completed" for step in data["steps"])
+        assert user.onboarding_completed is True
+        assert user.onboarding_current_step == len(VALID_STEP_IDS)
         user.save.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -424,7 +462,7 @@ class TestOnboardingCompleteEndpoint:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 resp = await client.patch(
                     "/api/onboarding/complete",
-                    json={"skipped_steps": ["integration"]},
+                    json={"skipped_steps": ["documents"]},
                 )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
@@ -432,7 +470,7 @@ class TestOnboardingCompleteEndpoint:
         assert resp.status_code == 200
         assert user.onboarding_completed is True
         assert user.onboarding_completed_at is not None
-        assert user.onboarding_skipped_steps == ["integration"]
+        assert user.onboarding_skipped_steps == ["documents"]
         user.save.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -585,5 +623,5 @@ class TestResetOnboardingEndpoint:
         assert data["version"] == 2
         assert data["completed"] is False
         assert data["current_step"] == 0
-        assert len(data["steps"]) == 6
+        assert len(data["steps"]) == len(VALID_STEP_IDS)
         assert all(s["status"] == "pending" for s in data["steps"])

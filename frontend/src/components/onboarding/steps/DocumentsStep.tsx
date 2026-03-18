@@ -1,4 +1,4 @@
-/** Step 4: Documents — guidance for uploading personal supporting docs. */
+/** Step 3: Documents - guidance for uploading personal supporting docs. */
 
 interface DocumentsStepProps {
   onNext: () => void;
@@ -8,10 +8,10 @@ interface DocumentsStepProps {
 export function DocumentsStep({ onNext, onSkip }: DocumentsStepProps) {
   return (
     <div className="ob-step">
-      <div className="ob-step-icon">&#x1F4C1;</div>
+      <div className="ob-step-icon">03</div>
       <h2 className="ob-step-heading">Upload Your Documents</h2>
       <p className="ob-step-body">
-        Upload your supporting documents — pre-approval letters, bank
+        Upload your supporting documents, including pre-approval letters, bank
         statements, pay stubs, and more. Comparari will automatically extract
         and organize the data for your transactions.
       </p>

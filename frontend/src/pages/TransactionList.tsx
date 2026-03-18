@@ -204,7 +204,7 @@ export function TransactionList() {
               <div>
                 <p><strong>Connect Dotloop</strong> to see your loops here.</p>
                 <Link to="/profile" className="integration-profile-link">
-                  Set up integrations in Profile &rarr;
+                  Set up integrations in Profile &gt;
                 </Link>
               </div>
             </div>
@@ -260,7 +260,7 @@ export function TransactionList() {
               <div>
                 <p>Connect <strong>Dotloop</strong> to see your loops alongside your transactions.</p>
                 <Link to="/profile" className="integration-profile-link">
-                  Set up integrations in Profile &rarr;
+                  Set up integrations in Profile &gt;
                 </Link>
               </div>
             </div>

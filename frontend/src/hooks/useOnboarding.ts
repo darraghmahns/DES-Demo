@@ -10,12 +10,12 @@ import { fetchOnboardingStatus, updateOnboardingStep } from '../api';
 
 const STORAGE_KEY = 'des_onboarding_v2';
 
-/** Ordered step definitions — route each step navigates to. */
+/** Ordered step definitions - route each step navigates to. */
 export const ONBOARDING_STEPS: { id: OnboardingStepId; route: string }[] = [
   { id: 'welcome', route: '/transactions' },
   { id: 'profile', route: '/profile' },
   { id: 'documents', route: '/profile/documents' },
-  { id: 'extraction', route: '/extraction' },
+  { id: 'extraction', route: '/transactions' },
   { id: 'complete', route: '/transactions' },
 ];
 
@@ -60,6 +60,25 @@ interface PersistedState {
   dismissed: boolean;
 }
 
+const STEP_IDS = new Set<OnboardingStepId>(ONBOARDING_STEPS.map((step) => step.id));
+
+function normalizeSteps(rawSteps: OnboardingStepStatus[]): OnboardingStepStatus[] {
+  const byId = new Map(rawSteps
+    .filter((step): step is OnboardingStepStatus => STEP_IDS.has(step.step_id))
+    .map((step) => [step.step_id, step]));
+
+  return ONBOARDING_STEPS.map((step) => byId.get(step.id) ?? {
+    step_id: step.id,
+    status: 'pending',
+    completed_at: null,
+  });
+}
+
+function nextPendingIndex(steps: OnboardingStepStatus[]): number {
+  const index = steps.findIndex((step) => step.status === 'pending');
+  return index === -1 ? ONBOARDING_STEPS.length - 1 : index;
+}
+
 function loadPersistedState(): PersistedState | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -74,7 +93,7 @@ function persistState(state: PersistedState): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
-    // localStorage unavailable — ignore
+    // localStorage unavailable - ignore
   }
 }
 
@@ -123,10 +142,16 @@ export function useOnboarding(): UseOnboardingReturn {
 
       // Onboarding active — restore local state or use backend
       setCompleted(false);
-      setSteps(status.steps);
+      const normalizedSteps = normalizeSteps(status.steps);
+      setSteps(normalizedSteps);
 
       const persisted = loadPersistedState();
-      const stepIdx = persisted?.currentStepIndex ?? status.current_step;
+      const backendStepIdx = (
+        status.current_step >= 0 && status.current_step < ONBOARDING_STEPS.length
+          ? status.current_step
+          : nextPendingIndex(normalizedSteps)
+      );
+      const stepIdx = persisted?.currentStepIndex ?? backendStepIdx;
       // Clamp to valid range
       const clampedIdx = Math.min(Math.max(0, stepIdx), ONBOARDING_STEPS.length - 1);
       setCurrentStepIndex(clampedIdx);
@@ -155,7 +180,8 @@ export function useOnboarding(): UseOnboardingReturn {
 
     try {
       const updated = await updateOnboardingStep(stepId, 'completed');
-      setSteps(updated.steps);
+      const normalizedSteps = normalizeSteps(updated.steps);
+      setSteps(normalizedSteps);
 
       if (updated.completed) {
         setCompleted(true);
@@ -163,8 +189,17 @@ export function useOnboarding(): UseOnboardingReturn {
         clearPersistedState();
         return;
       }
+
+      const nextIdx = (
+        updated.current_step >= 0 && updated.current_step < ONBOARDING_STEPS.length
+          ? updated.current_step
+          : nextPendingIndex(normalizedSteps)
+      );
+      setCurrentStepIndex(nextIdx);
+      stepActionsRef.current.clear();
+      return;
     } catch {
-      // API failed — still advance locally so user isn't stuck
+      // API failed - still advance locally so user isn't stuck
     }
 
     const nextIdx = currentStepIndex + 1;
@@ -188,7 +223,8 @@ export function useOnboarding(): UseOnboardingReturn {
 
     try {
       const updated = await updateOnboardingStep(stepId, 'skipped');
-      setSteps(updated.steps);
+      const normalizedSteps = normalizeSteps(updated.steps);
+      setSteps(normalizedSteps);
 
       if (updated.completed) {
         setCompleted(true);
@@ -196,8 +232,17 @@ export function useOnboarding(): UseOnboardingReturn {
         clearPersistedState();
         return;
       }
+
+      const nextIdx = (
+        updated.current_step >= 0 && updated.current_step < ONBOARDING_STEPS.length
+          ? updated.current_step
+          : nextPendingIndex(normalizedSteps)
+      );
+      setCurrentStepIndex(nextIdx);
+      stepActionsRef.current.clear();
+      return;
     } catch {
-      // API failed — still advance locally
+      // API failed - still advance locally
     }
 
     const nextIdx = currentStepIndex + 1;
