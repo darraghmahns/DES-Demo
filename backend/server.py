@@ -1219,7 +1219,7 @@ async def extract_batch(request: BatchExtractRequest, user=Depends(get_current_u
     async def _process_one(source: BatchSource) -> dict:
         try:
             if source.type == "dotloop":
-                if not dotloop_configured(user_tokens=dl_tokens):
+                if not dotloop_configured(user_tokens=dl_tokens, allow_fallback=not AUTH_ENABLED):
                     return {"source": source.model_dump(), "error": "Dotloop not configured"}
                 result = await process_from_dotloop(loop_id=int(source.id), user_tokens=dl_tokens)
                 return {"source": source.model_dump(), **result}

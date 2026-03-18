@@ -216,6 +216,10 @@ def _user_dotloop_tokens(user: UserProfile | None) -> dict | None:
     }
 
 
+def _dotloop_connected_for_request(user_tokens: dict | None) -> bool:
+    return dotloop_configured(user_tokens=user_tokens, allow_fallback=not AUTH_ENABLED)
+
+
 def _parse_datetimeish(value: str | None) -> Optional[datetime]:
     if not value:
         return None
@@ -685,7 +689,7 @@ async def preview_transaction_from_dotloop(
     """Preview a local transaction draft created from a Dotloop loop."""
     u = await _get_user_or_dev(user)
     user_tokens = _user_dotloop_tokens(u)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=400, detail="Dotloop is not connected")
 
     try:
@@ -723,7 +727,7 @@ async def create_transaction_from_dotloop(
         )
 
     user_tokens = _user_dotloop_tokens(u)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=400, detail="Dotloop is not connected")
 
     try:
@@ -811,7 +815,7 @@ async def list_dotloop_documents_for_transaction(txn_id: str, user=Depends(get_c
         raise HTTPException(status_code=400, detail="Transaction is not linked to a Dotloop loop")
 
     user_tokens = _user_dotloop_tokens(u)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=400, detail="Dotloop is not connected")
 
     try:
@@ -871,7 +875,7 @@ async def import_dotloop_documents(
         raise HTTPException(status_code=400, detail="Transaction is not linked to a Dotloop loop")
 
     user_tokens = _user_dotloop_tokens(u)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=400, detail="Dotloop is not connected")
 
     try:

@@ -52,3 +52,22 @@ async def test_dotloop_oauth_callback_stores_profile_id_on_user():
     assert user.dotloop_tokens.access_token == "access-token"
     assert user.dotloop_tokens.refresh_token == "refresh-token"
     user.save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dotloop_status_ignores_module_fallback_when_user_is_disconnected():
+    from auth import get_optional_user
+    from server import app
+
+    disconnected_user = MagicMock(dotloop_tokens=None)
+
+    app.dependency_overrides[get_optional_user] = lambda: disconnected_user
+    try:
+        with patch("routers.integrations.AUTH_ENABLED", True):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/dotloop/status")
+    finally:
+        app.dependency_overrides.pop(get_optional_user, None)
+
+    assert response.status_code == 200
+    assert response.json() == {"configured": False}

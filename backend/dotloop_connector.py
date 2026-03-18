@@ -62,13 +62,19 @@ def clear_oauth_tokens() -> None:
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
-def is_configured(user_tokens: dict | None = None) -> bool:
+def is_configured(
+    user_tokens: dict | None = None,
+    *,
+    allow_fallback: bool = True,
+) -> bool:
     """Return True if Dotloop tokens are available.
 
     Priority: user_tokens > module-level OAuth > env vars.
     """
-    if user_tokens and user_tokens.get("access_token"):
-        return True
+    if user_tokens is not None:
+        return bool(user_tokens.get("access_token"))
+    if not allow_fallback:
+        return False
     return bool(os.getenv("DOTLOOP_API_TOKEN") or _oauth_tokens.get("access_token"))
 
 

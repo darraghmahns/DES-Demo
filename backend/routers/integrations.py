@@ -121,6 +121,11 @@ def _user_dotloop_tokens(user) -> dict | None:
     }
 
 
+def _dotloop_connected_for_request(user_tokens: dict | None) -> bool:
+    """Per-user Dotloop connection status in auth mode, fallback-friendly in dev."""
+    return dotloop_configured(user_tokens=user_tokens, allow_fallback=not AUTH_ENABLED)
+
+
 def _resolve_dotloop_profile_id_for_tokens(
     access_token: str,
     refresh_token: str | None,
@@ -161,14 +166,14 @@ def _user_docusign_tokens(user) -> dict | None:
 async def dotloop_status(user=Depends(get_optional_user)):
     """Check whether Dotloop integration is configured for this user."""
     user_tokens = _user_dotloop_tokens(user)
-    return {"configured": dotloop_configured(user_tokens=user_tokens)}
+    return {"configured": _dotloop_connected_for_request(user_tokens)}
 
 
 @router.get("/api/dotloop/loops")
 async def dotloop_loops(profile_id: int | None = None, batch_size: int = 20, user=Depends(get_optional_user)):
     """List recent loops from Dotloop."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
         loops = await asyncio.to_thread(list_dotloop_loops, profile_id, batch_size, user_tokens=user_tokens)
@@ -185,7 +190,7 @@ async def dotloop_search_loops(
 ):
     """Search Dotloop loops by name or property address."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     from dotloop_connector import search_loops
     try:
@@ -199,7 +204,7 @@ async def dotloop_search_loops(
 async def dotloop_loop_detail(loop_id: int, profile_id: int | None = None, user=Depends(get_optional_user)):
     """Get full loop detail including property, participants, and documents."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     from dotloop_connector import get_loop_with_details
     try:
@@ -213,7 +218,7 @@ async def dotloop_loop_detail(loop_id: int, profile_id: int | None = None, user=
 async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyncRequest(), user=Depends(get_current_user)):
     """Push a saved extraction to Dotloop as a loop."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
         result = await sync_to_dotloop(
@@ -254,7 +259,7 @@ async def dotloop_sync_preview(body: DotloopSyncPreviewRequest, user=Depends(get
 async def dotloop_sync_execute(body: DotloopSyncExecuteRequest, user=Depends(get_current_user)):
     """Execute a confirmed sync to Dotloop with folder support."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
         result = await sync_to_dotloop(
@@ -278,7 +283,7 @@ async def dotloop_sync_execute(body: DotloopSyncExecuteRequest, user=Depends(get
 async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user=Depends(get_current_user)):
     """Pull a PDF from a Dotloop loop, extract, and optionally sync back."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
         result = await process_from_dotloop(request.profile_id, loop_id, request.sync_back, user_tokens=user_tokens)
@@ -295,7 +300,7 @@ async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user
 async def dotloop_archive_loop(loop_id: int, user=Depends(get_current_user)):
     """Archive a single Dotloop loop."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
         result = await asyncio.to_thread(archive_dotloop_loop, loop_id, user_tokens=user_tokens)
@@ -308,7 +313,7 @@ async def dotloop_archive_loop(loop_id: int, user=Depends(get_current_user)):
 async def dotloop_archive_all_loops(user=Depends(get_current_user)):
     """Archive all Dotloop loops."""
     user_tokens = _user_dotloop_tokens(user)
-    if not dotloop_configured(user_tokens=user_tokens):
+    if not _dotloop_connected_for_request(user_tokens):
         raise HTTPException(status_code=503, detail="Dotloop not configured")
     try:
         loops = await asyncio.to_thread(list_dotloop_loops, None, 100, user_tokens=user_tokens)
@@ -455,10 +460,14 @@ async def dotloop_oauth_callback(
 @router.delete("/api/dotloop/oauth/disconnect")
 async def dotloop_oauth_disconnect(user=Depends(get_current_user)):
     """Remove Dotloop OAuth tokens from the user's profile."""
+    from dotloop_connector import clear_oauth_tokens
+
     if not user or not user.dotloop_tokens:
         return {"status": "not_connected"}
     user.dotloop_tokens = None
     await user.save()
+    if not AUTH_ENABLED:
+        clear_oauth_tokens()
     log.info("Disconnected Dotloop for user %s", getattr(user, "clerk_user_id", "unknown"))
     return {"status": "disconnected"}
 
