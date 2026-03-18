@@ -24,6 +24,7 @@ from dotloop_connector import (
     get_dotloop_client,
     get_loop_with_details,
     is_configured as dotloop_configured,
+    resolve_profile_id as resolve_dotloop_profile_id,
 )
 from ocr_engine import get_engine
 from pdf_converter import get_pdf_info, image_to_base64, pdf_to_images
@@ -211,6 +212,7 @@ def _user_dotloop_tokens(user: UserProfile | None) -> dict | None:
     return {
         "access_token": tokens.access_token,
         "refresh_token": tokens.refresh_token,
+        "profile_id": tokens.profile_id,
     }
 
 
@@ -234,13 +236,6 @@ def _parse_datetimeish(value: str | None) -> Optional[datetime]:
         except ValueError:
             continue
     return None
-
-
-def _get_dotloop_profile_id() -> int:
-    profile_id = os.getenv("DOTLOOP_PROFILE_ID")
-    if not profile_id:
-        raise HTTPException(status_code=500, detail="DOTLOOP_PROFILE_ID is not configured")
-    return int(profile_id)
 
 
 def _parse_floatish(value: Any) -> Optional[float]:
@@ -879,6 +874,11 @@ async def import_dotloop_documents(
     if not dotloop_configured(user_tokens=user_tokens):
         raise HTTPException(status_code=400, detail="Dotloop is not connected")
 
+    try:
+        profile_id = resolve_dotloop_profile_id(user_tokens=user_tokens)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     results = []
     failures = 0
     loop_id = int(txn.dotloop_loop_id)
@@ -898,7 +898,7 @@ async def import_dotloop_documents(
             imported = await _import_dotloop_document(
                 txn=txn,
                 user=u,
-                profile_id=_get_dotloop_profile_id(),
+                profile_id=profile_id,
                 loop_id=loop_id,
                 folder_id=document.folder_id,
                 document_id=document.document_id,

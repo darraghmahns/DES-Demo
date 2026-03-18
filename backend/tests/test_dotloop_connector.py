@@ -49,3 +49,29 @@ async def test_handle_webhook_ignores_other_events():
 
     result = await handle_webhook({'event_type': 'LOOP_ARCHIVED', 'loop_id': '321'})
     assert result['status'] == 'ignored'
+
+
+def test_resolve_profile_id_prefers_user_token_profile_id():
+    from dotloop_connector import resolve_profile_id
+
+    profile_id = resolve_profile_id(user_tokens={"access_token": "token", "profile_id": "77"})
+
+    assert profile_id == 77
+
+
+def test_resolve_profile_id_discovers_profile_id_from_connected_user():
+    from dotloop_connector import resolve_profile_id
+
+    client = MagicMock()
+    client.resolve_default_profile_id.return_value = 81
+    context_manager = MagicMock()
+    context_manager.__enter__.return_value = client
+    context_manager.__exit__.return_value = None
+
+    user_tokens = {"access_token": "token", "refresh_token": "refresh"}
+
+    with patch("dotloop_connector.get_dotloop_client", return_value=context_manager):
+        profile_id = resolve_profile_id(user_tokens=user_tokens)
+
+    assert profile_id == 81
+    assert user_tokens["profile_id"] == 81

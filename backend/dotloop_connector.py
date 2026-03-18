@@ -32,17 +32,23 @@ log = logging.getLogger(__name__)
 # In-memory OAuth token storage (single-user for now)
 # ---------------------------------------------------------------------------
 
-_oauth_tokens: dict[str, str] = {}
+_oauth_tokens: dict[str, Any] = {}
 
 
-def set_oauth_tokens(access_token: str, refresh_token: str | None = None) -> None:
+def set_oauth_tokens(
+    access_token: str,
+    refresh_token: str | None = None,
+    profile_id: int | None = None,
+) -> None:
     """Store OAuth tokens from browser flow."""
     _oauth_tokens["access_token"] = access_token
     if refresh_token:
         _oauth_tokens["refresh_token"] = refresh_token
+    if profile_id is not None:
+        _oauth_tokens["profile_id"] = int(profile_id)
 
 
-def get_oauth_tokens() -> dict[str, str]:
+def get_oauth_tokens() -> dict[str, Any]:
     """Get stored OAuth tokens."""
     return dict(_oauth_tokens)
 
@@ -85,12 +91,64 @@ def get_dotloop_client(user_tokens: dict | None = None) -> DotloopClient:
     )
 
 
-def _get_profile_id() -> int:
-    """Read DOTLOOP_PROFILE_ID from env, raising if missing."""
-    pid = os.getenv("DOTLOOP_PROFILE_ID")
-    if not pid:
-        raise ValueError("DOTLOOP_PROFILE_ID not set in environment")
-    return int(pid)
+def _coerce_profile_id(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid Dotloop profile id: {value!r}") from exc
+
+
+def _discover_profile_id(user_tokens: dict | None = None) -> int:
+    with get_dotloop_client(user_tokens=user_tokens) as client:
+        profile_id = client.resolve_default_profile_id()
+    if user_tokens is not None:
+        user_tokens["profile_id"] = profile_id
+    else:
+        _oauth_tokens["profile_id"] = profile_id
+    return profile_id
+
+
+def resolve_profile_id(
+    profile_id: int | None = None,
+    *,
+    user_tokens: dict | None = None,
+) -> int:
+    """Resolve a Dotloop profile id for the current request.
+
+    Priority:
+      1. explicit route/function argument
+      2. stored per-user Dotloop OAuth profile id
+      3. discover the user's default Dotloop profile from the OAuth token
+      4. module-level OAuth fallback
+      5. legacy env fallback
+    """
+    explicit_profile_id = _coerce_profile_id(profile_id)
+    if explicit_profile_id is not None:
+        return explicit_profile_id
+
+    token_profile_id = _coerce_profile_id((user_tokens or {}).get("profile_id"))
+    if token_profile_id is not None:
+        return token_profile_id
+
+    fallback_profile_id = _coerce_profile_id(_oauth_tokens.get("profile_id"))
+    if fallback_profile_id is not None:
+        return fallback_profile_id
+
+    if user_tokens and user_tokens.get("access_token"):
+        return _discover_profile_id(user_tokens=user_tokens)
+
+    if _oauth_tokens.get("access_token") or os.getenv("DOTLOOP_API_TOKEN"):
+        return _discover_profile_id()
+
+    env_profile_id = _coerce_profile_id(os.getenv("DOTLOOP_PROFILE_ID"))
+    if env_profile_id is not None:
+        return env_profile_id
+
+    raise ValueError(
+        "Dotloop profile id is unavailable. Reconnect Dotloop or configure DOTLOOP_PROFILE_ID."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +179,7 @@ async def preview_sync_to_dotloop(
     if not payload:
         return {"error": "No dotloop_api_payload on this extraction (not real_estate mode?)"}
 
-    profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(user_tokens=user_tokens)
     participants = payload.get("participants", [])
 
     if mode == "selling":
@@ -206,7 +264,7 @@ async def sync_to_dotloop(
     if not payload:
         return {"error": "No dotloop_api_payload on this extraction (not real_estate mode?)"}
 
-    profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(user_tokens=user_tokens)
     errors: list[str] = []
 
     loop_name = payload.get("name", "Untitled Loop")
@@ -367,15 +425,14 @@ async def process_from_dotloop(
       6. Optionally sync extracted data back to Dotloop
 
     Args:
-        profile_id: Dotloop profile ID (falls back to env).
+        profile_id: Dotloop profile ID (falls back to the connected user's profile).
         loop_id: The loop ID to process.
         sync_back: If True, push extracted data back to Dotloop after extraction.
 
     Returns:
         Dict with extraction_id, document_id, loop_id, synced_back flag.
     """
-    if not profile_id:
-        profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(profile_id, user_tokens=user_tokens)
 
     with get_dotloop_client(user_tokens=user_tokens) as client:
         # Get loop info
@@ -501,14 +558,13 @@ def list_dotloop_loops(
     """List recent loops from Dotloop.
 
     Args:
-        profile_id: Dotloop profile ID (falls back to env).
+        profile_id: Dotloop profile ID (falls back to the connected user's profile).
         batch_size: Number of loops to return.
 
     Returns:
         List of loop dicts with id, name, transactionType, status, etc.
     """
-    if not profile_id:
-        profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(profile_id, user_tokens=user_tokens)
 
     with get_dotloop_client(user_tokens=user_tokens) as client:
         result = client.list_loops(profile_id, batch_size=batch_size)
@@ -521,8 +577,7 @@ def archive_dotloop_loop(
     user_tokens: dict | None = None,
 ) -> dict[str, Any]:
     """Archive a Dotloop loop by setting its status to 'Archived'."""
-    if not profile_id:
-        profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(profile_id, user_tokens=user_tokens)
 
     with get_dotloop_client(user_tokens=user_tokens) as client:
         return client.update_loop(profile_id, loop_id, status="Archived")
@@ -551,8 +606,7 @@ def get_loop_with_details(
 
     This is the "loop viewer" endpoint that powers the comparison UI.
     """
-    if not profile_id:
-        profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(profile_id, user_tokens=user_tokens)
 
     with get_dotloop_client(user_tokens=user_tokens) as client:
         # Core loop info
@@ -646,14 +700,13 @@ def search_loops(
 
     Args:
         query: Search string to match against loop name and property address.
-        profile_id: Dotloop profile ID (falls back to env).
+        profile_id: Dotloop profile ID (falls back to the connected user's profile).
         batch_size: Number of loops to scan (max 100).
 
     Returns:
         List of matching loop summary dicts.
     """
-    if not profile_id:
-        profile_id = _get_profile_id()
+    profile_id = resolve_profile_id(profile_id, user_tokens=user_tokens)
 
     query_lower = query.strip().lower()
 

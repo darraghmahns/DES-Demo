@@ -21,6 +21,7 @@ from auth import (
     sign_oauth_state,
     verify_oauth_state,
 )
+from dotloop_client import DotloopClient
 
 
 def _external_base_url(request: Request) -> str:
@@ -113,7 +114,31 @@ def _user_dotloop_tokens(user) -> dict | None:
     if not user or not getattr(user, "dotloop_tokens", None):
         return None
     t = user.dotloop_tokens
-    return {"access_token": t.access_token, "refresh_token": t.refresh_token}
+    return {
+        "access_token": t.access_token,
+        "refresh_token": t.refresh_token,
+        "profile_id": t.profile_id,
+    }
+
+
+def _resolve_dotloop_profile_id_for_tokens(
+    access_token: str,
+    refresh_token: str | None,
+    client_id: str | None,
+    client_secret: str | None,
+) -> int | None:
+    """Resolve the connected Dotloop user's primary profile id."""
+    try:
+        with DotloopClient(
+            api_token=access_token,
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
+        ) as client:
+            return client.resolve_default_profile_id()
+    except Exception as exc:
+        log.warning("Failed to resolve Dotloop profile id during OAuth callback: %s", exc)
+        return None
 
 
 def _user_docusign_tokens(user) -> dict | None:
@@ -380,6 +405,13 @@ async def dotloop_oauth_callback(
         log.error("Dotloop token exchange failed: %s", e)
         return RedirectResponse(url=f"{frontend_url}/profile?dotloop_error=token_exchange_failed")
 
+    profile_id = _resolve_dotloop_profile_id_for_tokens(
+        token_data["access_token"],
+        token_data.get("refresh_token"),
+        client_id,
+        client_secret,
+    )
+
     # If we have a signed state, store tokens on the user's record
     if state and AUTH_ENABLED:
         try:
@@ -390,6 +422,7 @@ async def dotloop_oauth_callback(
                 user.dotloop_tokens = OAuthTokenSet(
                     access_token=token_data["access_token"],
                     refresh_token=token_data.get("refresh_token"),
+                    profile_id=profile_id,
                 )
                 await user.save()
                 log.info("Stored Dotloop tokens on user %s", clerk_user_id)
@@ -404,6 +437,7 @@ async def dotloop_oauth_callback(
             dev_user.dotloop_tokens = OAuthTokenSet(
                 access_token=token_data["access_token"],
                 refresh_token=token_data.get("refresh_token"),
+                profile_id=profile_id,
             )
             await dev_user.save()
             log.info("Stored Dotloop tokens on dev user profile")
@@ -412,6 +446,7 @@ async def dotloop_oauth_callback(
     set_oauth_tokens(
         access_token=token_data["access_token"],
         refresh_token=token_data.get("refresh_token"),
+        profile_id=profile_id,
     )
 
     return RedirectResponse(url=f"{frontend_url}/profile?dotloop_connected=true")

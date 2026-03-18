@@ -267,3 +267,47 @@ class TestTransactionRouteUpdates:
             import_mock.assert_not_awaited()
         finally:
             app.dependency_overrides.clear()
+
+    async def test_import_dotloop_documents_uses_connected_user_profile_id(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.dotloop_loop_id = "321"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_transaction_for_user", AsyncMock(return_value=txn)),
+            patch("transaction_routes.dotloop_configured", return_value=True),
+            patch("transaction_routes.resolve_dotloop_profile_id", return_value=77),
+            patch(
+                "transaction_routes._import_dotloop_document",
+                AsyncMock(
+                    return_value={
+                        "local_document_id": "doc-1",
+                        "extraction_id": "doc-1:0",
+                        "filename": "BuySell.pdf",
+                        "duplicate": False,
+                        "linked_existing": False,
+                    }
+                ),
+            ) as import_mock,
+            patch("transaction_routes._mark_transaction_dotloop_state", AsyncMock()),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/api/transactions/txn-123/dotloop/import-documents",
+                    json={
+                        "documents": [
+                            {"folder_id": 11, "document_id": 22, "name": "BuySell.pdf"},
+                        ]
+                    },
+                )
+
+        try:
+            assert response.status_code == 200
+            import_mock.assert_awaited_once()
+            assert import_mock.await_args.kwargs["profile_id"] == 77
+            assert response.json()["imported"] == 1
+        finally:
+            app.dependency_overrides.clear()

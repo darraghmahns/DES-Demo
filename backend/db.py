@@ -99,6 +99,7 @@ class OAuthTokenSet(BaseModel):
     access_token: str
     refresh_token: Optional[str] = None
     account_id: Optional[str] = None
+    profile_id: Optional[int] = None
     expires_at: Optional[datetime] = None
 
 

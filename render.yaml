@@ -32,11 +32,11 @@ services:
         sync: false
       - key: DOTLOOP_CLIENT_SECRET
         sync: false
+      # Optional fallback tokens for a single shared Dotloop account.
+      # Per-user OAuth does not require these.
       - key: DOTLOOP_API_TOKEN
         sync: false
       - key: DOTLOOP_REFRESH_TOKEN
-        sync: false
-      - key: DOTLOOP_PROFILE_ID
         sync: false
       # DocuSign integration
       - key: DOCUSIGN_CLIENT_ID

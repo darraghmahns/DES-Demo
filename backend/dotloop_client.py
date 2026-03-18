@@ -212,6 +212,31 @@ class DotloopClient:
         data = self._handle_response(resp)
         return data.get("data", {})
 
+    def resolve_default_profile_id(self) -> int:
+        """Resolve the current user's primary Dotloop profile ID.
+
+        Dotloop OAuth is user-scoped, so we must derive the usable profile from
+        the authenticated account instead of relying on a deployment-wide env var.
+        """
+        profiles = self.list_profiles()
+        if not profiles:
+            raise DotloopAPIError(404, "No Dotloop profiles are available for this account")
+
+        preferred = None
+        for profile in profiles:
+            if profile.get("default") or profile.get("isDefault") or profile.get("defaultProfile"):
+                preferred = profile
+                break
+        chosen = preferred or profiles[0]
+        profile_id = chosen.get("id") or chosen.get("profileId")
+        if profile_id in (None, ""):
+            raise DotloopAPIError(
+                502,
+                "Dotloop profile response did not include a profile id",
+                {"profile": chosen},
+            )
+        return int(profile_id)
+
     # ==================================================================
     # LOOP MANAGEMENT
     # ==================================================================
