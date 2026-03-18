@@ -95,6 +95,11 @@ class DotloopFinancials(BaseModel):
     earnest_money_held_by: Optional[str] = Field(default=None, description="Entity holding earnest money")
     sale_commission_rate: Optional[str] = Field(default=None, description="Commission rate (e.g., '6%')")
     sale_commission_total: Optional[float] = Field(default=None, description="Total commission in USD")
+    financing_type: Optional[str] = Field(default=None, description="Financing type (e.g. 'conventional', 'FHA', 'VA', 'cash')")
+    down_payment_amount: Optional[float] = Field(default=None, description="Down payment amount in USD")
+    down_payment_percentage: Optional[str] = Field(default=None, description="Down payment as percentage of purchase price (e.g. '5%')")
+    closing_fee_paid_by: Optional[str] = Field(default=None, description="Who pays the title/closing company fee (Seller, Buyer, or Equally Shared)")
+    fincen_fee_paid_by: Optional[str] = Field(default=None, description="Who pays the FinCEN reports fee (Seller, Buyer, or Equally Shared)")
 
 
 class DotloopParticipant(BaseModel):
@@ -117,6 +122,32 @@ class DotloopContractDates(BaseModel):
     insurance_contingency_date: Optional[str] = Field(default=None, description="Insurance contingency deadline date")
     loan_application_deadline: Optional[str] = Field(default=None, description="Date by which buyer must submit loan application")
     seller_response_time: Optional[str] = Field(default=None, description="Date/time by which seller must respond to the offer")
+    possession_date: Optional[str] = Field(default=None, description="Date buyer takes possession")
+    opd_delivery_date: Optional[str] = Field(default=None, description="Deadline for seller to deliver Owner's Property Disclosure form")
+    title_contingency_date: Optional[str] = Field(default=None, description="Deadline for buyer to complete title review")
+
+
+class DotloopTerms(BaseModel):
+    """Contract terms, contingencies, and inclusions/exclusions."""
+    escalation_clause: Optional[bool] = Field(default=None, description="True if an escalation clause/addendum is included")
+    home_warranty: Optional[bool] = Field(default=None, description="True if buyer is requesting a home warranty")
+    hoa_approval_contingency: Optional[bool] = Field(default=None, description="True if sale is contingent on HOA approval")
+    survey_contingency: Optional[bool] = Field(default=None, description="True if sale is contingent on a satisfactory survey")
+    as_is: Optional[bool] = Field(default=None, description="True if property is being sold as-is")
+    inclusions: Optional[str] = Field(default=None, description="Personal property included in the sale (comma-separated)")
+    exclusions: Optional[str] = Field(default=None, description="Items excluded from the sale (comma-separated)")
+    leased_items: Optional[str] = Field(default=None, description="Leased/rented personal property not included in sale (comma-separated)")
+    detection_devices: Optional[str] = Field(default=None, description="Checked detection devices (smoke detector, CO detector, etc., comma-separated)")
+    opd_delivered: Optional[bool] = Field(default=None, description="True if Owner's Property Disclosure has already been delivered to buyer")
+    inspection_contingency: Optional[bool] = Field(default=None, description="True if offer contains an inspection contingency")
+    financing_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on buyer obtaining financing")
+    appraisal_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on property appraising at purchase price")
+    appraisal_contingency_amount: Optional[float] = Field(default=None, description="Minimum appraisal value required for the contingency (defaults to purchase price if not specified)")
+    title_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on satisfactory title review")
+    insurance_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on buyer obtaining homeowner's insurance")
+    sale_of_home_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on buyer selling their current home")
+    additional_provisions: Optional[str] = Field(default=None, description="Verbatim text of additional provisions or addendum titles")
+    notes: Optional[str] = Field(default=None, description="Other noteworthy terms not captured in other fields")
 
 
 class DotloopLoopDetails(BaseModel):
@@ -131,6 +162,7 @@ class DotloopLoopDetails(BaseModel):
     financials: DotloopFinancials
     contract_dates: DotloopContractDates
     participants: List[DotloopParticipant]
+    terms: Optional[DotloopTerms] = Field(default=None)
 
     def to_dotloop_api_format(self) -> dict:
         """Serialize to Dotloop's actual API section format.
@@ -608,6 +640,11 @@ class UserDocumentType(str, Enum):
     PROOF_OF_FUNDS = "proof_of_funds"
     DRIVERS_LICENSE = "drivers_license"
     PROOF_OF_INSURANCE = "proof_of_insurance"
+    ESCALATION_ADDENDUM = "escalation_addendum"
+    INSPECTION_ADDENDUM = "inspection_addendum"
+    HOA_DOCUMENTS = "hoa_documents"
+    SALE_CONTINGENCY_ADDENDUM = "sale_contingency_addendum"
+    APPRAISAL_CONTINGENCY_ADDENDUM = "appraisal_contingency_addendum"
     OTHER = "other"
 
 

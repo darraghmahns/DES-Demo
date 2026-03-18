@@ -69,6 +69,28 @@ async def lifespan(app: FastAPI):
             "(needed for OAuth callback redirects)"
         )
     await init_db()
+
+    # Dev mode: restore persisted OAuth tokens from the dev user profile so
+    # integrations survive backend restarts without needing to re-authenticate.
+    if not AUTH_ENABLED:
+        from db import UserProfile
+        from dotloop_connector import set_oauth_tokens as dl_set_tokens
+        from docusign_connector import set_oauth_tokens as ds_set_tokens
+        dev_user = await UserProfile.find_one({"email": "dev@deslabs.local"})
+        if dev_user:
+            if dev_user.dotloop_tokens:
+                dl_set_tokens(
+                    access_token=dev_user.dotloop_tokens.access_token,
+                    refresh_token=dev_user.dotloop_tokens.refresh_token,
+                )
+                log.info("Restored Dotloop tokens from dev user profile")
+            if dev_user.docusign_tokens:
+                ds_set_tokens(
+                    access_token=dev_user.docusign_tokens.access_token,
+                    refresh_token=dev_user.docusign_tokens.refresh_token,
+                )
+                log.info("Restored DocuSign tokens from dev user profile")
+
     yield
     await close_db()
 
@@ -1088,6 +1110,21 @@ async def get_extractions(mode: str | None = None, limit: int = Query(50), user=
     return {"extractions": results}
 
 
+@app.delete("/api/extractions/{doc_id}")
+async def delete_extraction(doc_id: str, user=Depends(get_current_user)):
+    """Permanently delete a DocumentRecord and remove it from any linked transactions."""
+    from db import DocumentRecord, Transaction
+    doc = await DocumentRecord.get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    # Remove from any transactions that reference this doc
+    async for txn in Transaction.find({"extraction_ids": doc_id}):
+        txn.extraction_ids = [eid for eid in txn.extraction_ids if eid != doc_id]
+        await txn.save()
+    await doc.delete()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Batch Extraction (Multi-Source)
 # ---------------------------------------------------------------------------
@@ -1193,77 +1230,126 @@ async def create_comparison(
 # ---------------------------------------------------------------------------
 # Offer Comparison (N-way)
 # ---------------------------------------------------------------------------
+#
+# FIELD_REGISTRY is the single source of truth for what we can display.
+# Each entry maps a dot-notation path into extracted_data → a display key.
+# To add a new displayed field: add one entry here. That's it.
+#
+# Participant paths use the pattern  participants.<role_lowercase>.<field>
+# Everything extracted by the LLM that is NOT in the registry is still
+# returned as raw_extras so nothing is silently dropped.
+# ---------------------------------------------------------------------------
 
-_OFFER_FIELD_DEFINITIONS = [
-    {"key": "purchase_price", "label": "Purchase Price", "type": "currency"},
-    {"key": "earnest_money_amount", "label": "Earnest Money", "type": "currency"},
-    {"key": "buyer_name", "label": "Buyer Name", "type": "string"},
-    {"key": "agent_name", "label": "Buyer's Agent", "type": "string"},
-    {"key": "closing_date", "label": "Closing Date", "type": "date"},
-    {"key": "offer_date", "label": "Offer Date", "type": "date"},
-    {"key": "offer_expiration_date", "label": "Offer Expiration", "type": "date"},
-    {"key": "contract_agreement_date", "label": "Contract Date", "type": "date"},
-    {"key": "inspection_date", "label": "Inspection Deadline", "type": "date"},
-    {"key": "inspection_negotiation_deadline", "label": "Inspection Negotiation Deadline", "type": "date"},
-    {"key": "insurance_contingency_date", "label": "Insurance Contingency", "type": "date"},
-    {"key": "loan_application_deadline", "label": "Loan Application Deadline", "type": "date"},
-    {"key": "seller_response_time", "label": "Seller Response Time", "type": "date"},
-    {"key": "earnest_money_held_by", "label": "Earnest Money Held By", "type": "string"},
-    {"key": "escalation_clause", "label": "Escalation Clause", "type": "boolean"},
-    {"key": "financing_type", "label": "Financing Type", "type": "string"},
-    {"key": "down_payment_amount", "label": "Down Payment", "type": "currency"},
-    {"key": "possession_date", "label": "Possession Date", "type": "date"},
-    {"key": "home_warranty", "label": "Home Warranty", "type": "boolean"},
-    {"key": "inclusions", "label": "Inclusions", "type": "text"},
-    {"key": "exclusions", "label": "Exclusions", "type": "text"},
-    {"key": "hoa_approval_contingency", "label": "HOA Contingency", "type": "boolean"},
-    {"key": "survey_contingency", "label": "Survey Contingency", "type": "boolean"},
-    {"key": "as_is", "label": "As-Is", "type": "boolean"},
+FIELD_REGISTRY = [
+    # Parties
+    {"path": "participants.buyer.full_name",          "key": "buyer_name",          "label": "Buyer's Name",       "type": "string", "group": "Parties"},
+    {"path": "participants.buyer.email",              "key": "buyer_email",         "label": "Buyer Email",        "type": "string", "group": "Parties"},
+    {"path": "participants.buyer.phone",              "key": "buyer_phone",         "label": "Buyer Phone",        "type": "string", "group": "Parties"},
+    {"path": "participants.seller.full_name",         "key": "seller_name",         "label": "Seller Name",        "type": "string", "group": "Parties"},
+    {"path": "participants.seller.email",             "key": "seller_email",        "label": "Seller Email",       "type": "string", "group": "Parties"},
+    {"path": "participants.buying_agent.full_name",   "key": "agent_name",          "label": "Agent Name",         "type": "string", "group": "Parties"},
+    {"path": "participants.buying_agent.email",       "key": "agent_email",         "label": "Agent Email",        "type": "string", "group": "Parties"},
+    {"path": "participants.buying_agent.phone",       "key": "agent_phone",         "label": "Agent Phone",        "type": "string", "group": "Parties"},
+    {"path": "participants.buying_agent.company_name","key": "agent_company",       "label": "Agent Company",      "type": "string", "group": "Parties"},
+    {"path": "participants.listing_agent.full_name",  "key": "listing_agent_name",  "label": "Listing Agent",      "type": "string", "group": "Parties"},
+    {"path": "participants.listing_agent.email",      "key": "listing_agent_email", "label": "Listing Agent Email","type": "string", "group": "Parties"},
+    # Financials
+    {"path": "financials.purchase_price",        "key": "purchase_price",        "label": "Purchase Price",             "type": "currency", "group": "Financials"},
+    {"path": "financials.earnest_money_amount",  "key": "earnest_money_amount",  "label": "Earnest Money",              "type": "currency", "group": "Financials"},
+    {"path": "financials.earnest_money_held_by", "key": "earnest_money_held_by", "label": "Earnest Money Held By",      "type": "string",   "group": "Financials"},
+    {"path": "financials.down_payment_amount",     "key": "down_payment_amount",     "label": "Down Payment ($)",           "type": "currency", "group": "Financials"},
+    {"path": "financials.down_payment_percentage","key": "down_payment_percentage", "label": "Down Payment (%)",           "type": "string",   "group": "Financials"},
+    {"path": "financials.financing_type",        "key": "financing_type",        "label": "Financing Terms / Loan Type","type": "string",   "group": "Financials"},
+    {"path": "financials.sale_commission_rate",  "key": "sale_commission_rate",  "label": "Commission Rate",            "type": "string",   "group": "Financials"},
+    {"path": "financials.sale_commission_total", "key": "sale_commission_total", "label": "Commission Total",           "type": "currency", "group": "Financials"},
+    {"path": "financials.closing_fee_paid_by",   "key": "closing_fee_paid_by",   "label": "Title Company Closing Fee",  "type": "string",   "group": "Financials"},
+    {"path": "financials.fincen_fee_paid_by",    "key": "fincen_fee_paid_by",    "label": "FinCEN Reports Fee (503)",   "type": "string",   "group": "Financials"},
+    # Property
+    {"path": "property_address.mls_number",    "key": "mls_number",    "label": "MLS Number",   "type": "string", "group": "Property"},
+    {"path": "property_address.county",        "key": "county",        "label": "County",       "type": "string", "group": "Property"},
+    {"path": "property_address.parcel_tax_id", "key": "parcel_tax_id", "label": "Parcel/Tax ID","type": "string", "group": "Property"},
+    # Key Dates
+    {"path": "contract_dates.offer_date",              "key": "offer_date",              "label": "Offer Date",           "type": "date", "group": "Key Dates"},
+    {"path": "contract_dates.offer_expiration_date",   "key": "offer_expiration_date",   "label": "Offer Expiration",     "type": "date", "group": "Key Dates"},
+    {"path": "contract_dates.contract_agreement_date", "key": "contract_agreement_date", "label": "Contract Date",        "type": "date", "group": "Key Dates"},
+    {"path": "contract_dates.closing_date",            "key": "closing_date",            "label": "Closing Date",         "type": "date", "group": "Key Dates"},
+    {"path": "contract_dates.possession_date",         "key": "possession_date",         "label": "Possession",           "type": "date", "group": "Key Dates"},
+    {"path": "contract_dates.opd_delivery_date",       "key": "opd_delivery_date",       "label": "Delivery of OPD",      "type": "date", "group": "Key Dates"},
+    {"path": "contract_dates.seller_response_time",    "key": "seller_response_time",    "label": "Seller Response Time", "type": "date", "group": "Key Dates"},
+    # Contingency Deadlines
+    {"path": "contract_dates.loan_application_deadline",       "key": "loan_application_deadline",       "label": "Loan Application Deadline",       "type": "date", "group": "Contingency Deadlines"},
+    {"path": "contract_dates.inspection_date",                 "key": "inspection_date",                 "label": "Inspection Deadline",             "type": "date", "group": "Contingency Deadlines"},
+    {"path": "contract_dates.inspection_negotiation_deadline", "key": "inspection_negotiation_deadline", "label": "Inspection Negotiation Deadline", "type": "date", "group": "Contingency Deadlines"},
+    {"path": "contract_dates.insurance_contingency_date",      "key": "insurance_contingency_date",      "label": "Insurance Contingency Deadline",  "type": "date", "group": "Contingency Deadlines"},
+    {"path": "contract_dates.title_contingency_date",          "key": "title_contingency_date",          "label": "Title Review Deadline",           "type": "date", "group": "Contingency Deadlines"},
+    # Contingencies
+    {"path": "terms.escalation_clause",         "key": "escalation_clause",         "label": "Escalation Clause",          "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.opd_delivered",             "key": "opd_delivered",             "label": "OPD Contingency",            "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.inspection_contingency",    "key": "inspection_contingency",    "label": "Inspection Contingency",     "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.financing_contingency",     "key": "financing_contingency",     "label": "Financing Contingency",      "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.appraisal_contingency",        "key": "appraisal_contingency",        "label": "Appraisal Contingency",       "type": "boolean",  "group": "Contingencies"},
+    {"path": "terms.appraisal_contingency_amount","key": "appraisal_contingency_amount","label": "Appraisal Amount",            "type": "currency", "group": "Contingencies"},
+    {"path": "terms.title_contingency",           "key": "title_contingency",           "label": "Title Contingency",           "type": "boolean",  "group": "Contingencies"},
+    {"path": "terms.insurance_contingency",     "key": "insurance_contingency",     "label": "Insurance Contingency",      "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.sale_of_home_contingency",  "key": "sale_of_home_contingency",  "label": "Sale of House Contingency",  "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.home_warranty",             "key": "home_warranty",             "label": "Home Warranty",              "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.hoa_approval_contingency",  "key": "hoa_approval_contingency",  "label": "HOA Contingency",            "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.survey_contingency",        "key": "survey_contingency",        "label": "Survey Contingency",         "type": "boolean", "group": "Contingencies"},
+    {"path": "terms.as_is",                     "key": "as_is",                     "label": "As-Is",                      "type": "boolean", "group": "Contingencies"},
+    # Personal Property
+    {"path": "terms.inclusions",    "key": "inclusions",    "label": "Personal Property Included",         "type": "text", "group": "Personal Property"},
+    {"path": "terms.exclusions",    "key": "exclusions",    "label": "Excluded Fixtures",                  "type": "text", "group": "Personal Property"},
+    {"path": "terms.leased_items",  "key": "leased_items",  "label": "Leased / Rented Personal Property",  "type": "text", "group": "Personal Property"},
+    # Additional
+    {"path": "terms.detection_devices",    "key": "detection_devices",    "label": "Detection Devices",    "type": "text", "group": "Additional"},
+    {"path": "terms.additional_provisions","key": "additional_provisions","label": "Additional Provisions","type": "text", "group": "Additional"},
+    {"path": "terms.notes",                "key": "notes",                "label": "Other / Notes",         "type": "text", "group": "Additional"},
+]
+
+# field_definitions sent to frontend: strip internal 'path' field
+_FIELD_DEFINITIONS = [
+    {k: v for k, v in entry.items() if k != "path"}
+    for entry in FIELD_REGISTRY
 ]
 
 
-def _build_offer_fields(extracted_data: dict) -> dict:
-    """Map extracted_data → 24-field offer dict. Non-extracted fields return None."""
-    financials = extracted_data.get("financials") or {}
-    dates = extracted_data.get("contract_dates") or {}
-    participants = extracted_data.get("participants") or []
+def _flatten_extracted(extracted_data: dict) -> dict:
+    """Flatten extracted_data's nested structure to dot-notation key → value.
 
-    buyer_name = next(
-        (p.get("full_name") for p in participants if p.get("role") == "BUYER"),
-        None,
-    )
-    agent_name = next(
-        (p.get("full_name") for p in participants if p.get("role") == "BUYING_AGENT"),
-        None,
-    )
+    Participants are indexed by role:  participants.<role_lower>.<field>
+    All other sections:                <section>.<field>
+    Top-level scalars:                 <key>
+    """
+    flat: dict = {}
+    for section, values in extracted_data.items():
+        if section == "participants":
+            for p in (values or []):
+                role = (p.get("role") or "UNKNOWN").lower()
+                for k, v in p.items():
+                    if k != "role":
+                        flat[f"participants.{role}.{k}"] = v
+        elif isinstance(values, dict):
+            for k, v in values.items():
+                flat[f"{section}.{k}"] = v
+        else:
+            flat[section] = values
+    return flat
 
-    return {
-        "purchase_price": financials.get("purchase_price"),
-        "earnest_money_amount": financials.get("earnest_money_amount"),
-        "buyer_name": buyer_name,
-        "agent_name": agent_name,
-        "closing_date": dates.get("closing_date"),
-        "offer_date": dates.get("offer_date"),
-        "offer_expiration_date": dates.get("offer_expiration_date"),
-        "contract_agreement_date": dates.get("contract_agreement_date"),
-        "inspection_date": dates.get("inspection_date"),
-        "inspection_negotiation_deadline": dates.get("inspection_negotiation_deadline"),
-        "insurance_contingency_date": dates.get("insurance_contingency_date"),
-        "loan_application_deadline": dates.get("loan_application_deadline"),
-        "seller_response_time": dates.get("seller_response_time"),
-        "earnest_money_held_by": financials.get("earnest_money_held_by"),
-        # Fields not currently extracted — always null
-        "escalation_clause": None,
-        "financing_type": None,
-        "down_payment_amount": None,
-        "possession_date": None,
-        "home_warranty": None,
-        "inclusions": None,
-        "exclusions": None,
-        "hoa_approval_contingency": None,
-        "survey_contingency": None,
-        "as_is": None,
-    }
+
+def _build_offer_fields(extracted_data: dict) -> tuple[dict, dict]:
+    """Return (structured_fields, raw_extras).
+
+    structured_fields  — FIELD_REGISTRY keys → values (None when not extracted)
+    raw_extras         — every non-None extracted value NOT covered by the registry
+                         so nothing the LLM pulls is silently dropped
+    """
+    flat = _flatten_extracted(extracted_data)
+    registered_paths = {entry["path"] for entry in FIELD_REGISTRY}
+
+    fields = {entry["key"]: flat.get(entry["path"]) for entry in FIELD_REGISTRY}
+    raw_extras = {k: v for k, v in flat.items() if k not in registered_paths and v is not None}
+
+    return fields, raw_extras
 
 
 @app.get("/api/offers/compare")
@@ -1282,13 +1368,43 @@ async def compare_offers(
         if not ext:
             raise HTTPException(status_code=404, detail=f"Extraction {eid} not found")
         extracted_data = ext.get("extracted_data") or ext.get("result") or {}
+        fields, raw_extras = _build_offer_fields(extracted_data)
+        # Apply user overrides on top of extracted values
+        overrides = ext.get("field_overrides") or {}
+        fields.update({k: v for k, v in overrides.items() if k in fields})
         offers.append({
             "extraction_id": eid,
             "filename": ext.get("source_file") or ext.get("filename") or eid,
-            "fields": _build_offer_fields(extracted_data),
+            "fields": fields,
+            "raw_extras": raw_extras,
         })
 
-    return {"offers": offers, "field_definitions": _OFFER_FIELD_DEFINITIONS}
+    return {"offers": offers, "field_definitions": _FIELD_DEFINITIONS}
+
+
+class _OfferFieldUpdates(BaseModel):
+    updates: dict
+
+
+@app.patch("/api/offers/{extraction_id}/fields")
+async def update_offer_fields(
+    extraction_id: str,
+    body: _OfferFieldUpdates,
+    user=Depends(get_optional_user),
+):
+    """Persist user-edited field overrides for an offer extraction."""
+    from db import DocumentRecord
+    parts = str(extraction_id).split(":")
+    doc_id = parts[0]
+    idx = int(parts[1]) if len(parts) > 1 else 0
+
+    doc = await DocumentRecord.get(doc_id)
+    if not doc or idx >= len(doc.extractions):
+        raise HTTPException(status_code=404, detail="Extraction not found")
+
+    doc.extractions[idx].field_overrides.update(body.updates)
+    await doc.save()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

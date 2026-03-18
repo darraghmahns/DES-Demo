@@ -384,8 +384,8 @@ async def dotloop_oauth_callback(
     if state and AUTH_ENABLED:
         try:
             clerk_user_id = verify_oauth_state(state)
-            from db import UserRecord, OAuthTokenSet
-            user = await UserRecord.find_one(UserRecord.clerk_user_id == clerk_user_id)
+            from db import UserProfile, OAuthTokenSet
+            user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
             if user:
                 user.dotloop_tokens = OAuthTokenSet(
                     access_token=token_data["access_token"],
@@ -395,6 +395,18 @@ async def dotloop_oauth_callback(
                 log.info("Stored Dotloop tokens on user %s", clerk_user_id)
         except HTTPException:
             log.warning("Invalid OAuth state in Dotloop callback, falling back to module-level storage")
+    elif not AUTH_ENABLED:
+        # Dev mode: persist tokens on the dev user profile so they survive restarts
+        from db import UserProfile, OAuthTokenSet
+        from datetime import datetime, timezone
+        dev_user = await UserProfile.find_one({"email": "dev@deslabs.local"})
+        if dev_user:
+            dev_user.dotloop_tokens = OAuthTokenSet(
+                access_token=token_data["access_token"],
+                refresh_token=token_data.get("refresh_token"),
+            )
+            await dev_user.save()
+            log.info("Stored Dotloop tokens on dev user profile")
 
     # Always store module-level as fallback (for webhooks, etc.)
     set_oauth_tokens(

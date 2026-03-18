@@ -1,5 +1,7 @@
 /** Circular/bar completion percentage indicator. */
 
+import { Progress, Group, Text } from '@mantine/core';
+
 interface CompletionIndicatorProps {
   percentage: number;
   label?: string;
@@ -8,22 +10,16 @@ interface CompletionIndicatorProps {
 
 export function CompletionIndicator({ percentage, label, size = 'md' }: CompletionIndicatorProps) {
   const clamped = Math.min(100, Math.max(0, percentage));
-  const color = clamped >= 80 ? '#4caf50' : clamped >= 50 ? '#ff9800' : '#f44336';
-
-  const sizeClass = `completion-indicator completion-${size}`;
+  const color = clamped >= 80 ? 'green' : clamped >= 50 ? 'yellow' : 'red';
+  const progressSize = size === 'sm' ? 'xs' : size === 'md' ? 'sm' : 'md';
 
   return (
-    <div className={sizeClass}>
-      <div className="completion-bar-track">
-        <div
-          className="completion-bar-fill"
-          style={{ width: `${clamped}%`, backgroundColor: color }}
-        />
-      </div>
-      <span className="completion-label">
-        {label && <span className="completion-label-text">{label}</span>}
-        <span className="completion-pct" style={{ color }}>{Math.round(clamped)}%</span>
-      </span>
+    <div>
+      <Group justify="space-between" mb={4}>
+        {label && <Text size="xs" c="dimmed">{label}</Text>}
+        <Text size="xs" c={color} fw={500}>{Math.round(clamped)}%</Text>
+      </Group>
+      <Progress value={clamped} color={color} size={progressSize} />
     </div>
   );
 }

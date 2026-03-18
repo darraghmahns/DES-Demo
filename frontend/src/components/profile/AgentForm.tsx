@@ -1,6 +1,7 @@
 /** Agent-specific profile form. */
 
 import { useState } from 'react';
+import { Button, SimpleGrid, TextInput } from '@mantine/core';
 import type { AgentProfile } from '../../types/user';
 
 interface AgentFormProps {
@@ -28,66 +29,57 @@ export function AgentForm({ data, onSave, disabled }: AgentFormProps) {
   return (
     <div className="role-form">
       <h3>Agent Details</h3>
-      <div className="form-grid">
-        <label>
-          <span>License Number</span>
-          <input
-            type="text"
-            value={form.license_number || ''}
-            onChange={e => set('license_number', e.target.value)}
-            placeholder="e.g., RE-12345678"
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>License State</span>
-          <input
-            type="text"
-            value={form.license_state || ''}
-            onChange={e => set('license_state', e.target.value)}
-            placeholder="e.g., CA"
-            maxLength={2}
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>Brokerage Name</span>
-          <input
-            type="text"
-            value={form.brokerage_name || ''}
-            onChange={e => set('brokerage_name', e.target.value)}
-            placeholder="e.g., Keller Williams"
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>MLS ID</span>
-          <input
-            type="text"
-            value={form.mls_id || ''}
-            onChange={e => set('mls_id', e.target.value)}
-            placeholder="MLS member ID"
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>NAR Member ID</span>
-          <input
-            type="text"
-            value={form.nar_member_id || ''}
-            onChange={e => set('nar_member_id', e.target.value)}
-            placeholder="NAR member ID"
-            disabled={disabled}
-          />
-        </label>
-      </div>
-      <button
-        className="btn-primary"
+      <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm" mb="sm">
+        <TextInput
+          label="License Number"
+          value={form.license_number || ''}
+          onChange={e => set('license_number', e.target.value)}
+          placeholder="e.g., RE-12345678"
+          disabled={disabled}
+          size="sm"
+        />
+        <TextInput
+          label="License State"
+          value={form.license_state || ''}
+          onChange={e => set('license_state', e.target.value)}
+          placeholder="e.g., CA"
+          maxLength={2}
+          disabled={disabled}
+          size="sm"
+        />
+        <TextInput
+          label="Brokerage Name"
+          value={form.brokerage_name || ''}
+          onChange={e => set('brokerage_name', e.target.value)}
+          placeholder="e.g., Keller Williams"
+          disabled={disabled}
+          size="sm"
+        />
+        <TextInput
+          label="MLS ID"
+          value={form.mls_id || ''}
+          onChange={e => set('mls_id', e.target.value)}
+          placeholder="MLS member ID"
+          disabled={disabled}
+          size="sm"
+        />
+        <TextInput
+          label="NAR Member ID"
+          value={form.nar_member_id || ''}
+          onChange={e => set('nar_member_id', e.target.value)}
+          placeholder="NAR member ID"
+          disabled={disabled}
+          size="sm"
+        />
+      </SimpleGrid>
+      <Button
+        variant="filled"
+        color="cyan"
         onClick={handleSave}
         disabled={disabled || saving}
       >
         {saving ? 'Saving...' : 'Save Agent Details'}
-      </button>
+      </Button>
     </div>
   );
 }

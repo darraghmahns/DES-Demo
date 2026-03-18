@@ -1,6 +1,7 @@
 /** Seller-specific profile form. */
 
 import { useState } from 'react';
+import { Button, SimpleGrid, Select } from '@mantine/core';
 import type { SellerProfile, OwnershipType } from '../../types/user';
 
 interface SellerFormProps {
@@ -25,32 +26,33 @@ export function SellerForm({ data, onSave, disabled }: SellerFormProps) {
   return (
     <div className="role-form">
       <h3>Seller Details</h3>
-      <div className="form-grid">
-        <label>
-          <span>Ownership Type</span>
-          <select
-            value={form.ownership_type || ''}
-            onChange={e => setForm(prev => ({ ...prev, ownership_type: (e.target.value || undefined) as OwnershipType | undefined }))}
-            disabled={disabled}
-          >
-            <option value="">-- Select --</option>
-            <option value="sole">Sole Ownership</option>
-            <option value="joint">Joint Ownership</option>
-            <option value="trust">Trust</option>
-            <option value="llc">LLC</option>
-          </select>
-        </label>
-      </div>
+      <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm" mb="sm">
+        <Select
+          label="Ownership Type"
+          value={form.ownership_type || null}
+          onChange={(val) => setForm(prev => ({ ...prev, ownership_type: (val || undefined) as OwnershipType | undefined }))}
+          data={[
+            { value: 'sole', label: 'Sole Ownership' },
+            { value: 'joint', label: 'Joint Ownership' },
+            { value: 'trust', label: 'Trust' },
+            { value: 'llc', label: 'LLC' },
+          ]}
+          placeholder="-- Select --"
+          disabled={disabled}
+          size="sm"
+        />
+      </SimpleGrid>
       <p className="form-hint">
         Property addresses will be populated from your transactions.
       </p>
-      <button
-        className="btn-primary"
+      <Button
+        variant="filled"
+        color="cyan"
         onClick={handleSave}
         disabled={disabled || saving}
       >
         {saving ? 'Saving...' : 'Save Seller Details'}
-      </button>
+      </Button>
     </div>
   );
 }

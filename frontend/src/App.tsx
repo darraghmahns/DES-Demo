@@ -9,8 +9,6 @@ import { DemoAuthProvider } from './components/DemoAuthProvider';
 import { AppShell } from './components/layout/AppShell';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 
-import { Dashboard } from './pages/Dashboard';
-import { ExtractionPage } from './pages/Extraction';
 import { Profile } from './pages/Profile';
 import { ProfileDocuments } from './pages/ProfileDocuments';
 import { TransactionList } from './pages/TransactionList';
@@ -52,9 +50,7 @@ function App() {
               </ProtectedRoute>
             }
           >
-            <Route index element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/extraction" element={<ExtractionPage />} />
+            <Route index element={<Navigate to="/transactions" replace />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/profile/documents" element={<ProfileDocuments />} />
             <Route path="/transactions" element={<TransactionList />} />

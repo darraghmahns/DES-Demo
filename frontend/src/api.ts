@@ -540,6 +540,14 @@ export async function fetchExtractions(mode?: string): Promise<ExtractionSummary
   return data.extractions || [];
 }
 
+export async function deleteExtraction(extractionId: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/api/extractions/${encodeURIComponent(extractionId)}`, {
+    method: 'DELETE',
+    headers: { ...await authHeaders() },
+  });
+  if (!resp.ok) throw new Error(`Failed to delete extraction: ${resp.status}`);
+}
+
 // ---------------------------------------------------------------------------
 // Comparison Engine
 // ---------------------------------------------------------------------------
@@ -723,12 +731,15 @@ export interface OfferField {
   key: string;
   label: string;
   type: 'string' | 'currency' | 'date' | 'boolean' | 'text';
+  group?: string;
 }
 
 export interface OfferData {
   extraction_id: string;
   filename: string;
   fields: Record<string, string | number | boolean | null>;
+  /** All extracted values not covered by the field registry — nothing silently dropped. */
+  raw_extras: Record<string, unknown>;
 }
 
 export interface OffersComparisonResult {
@@ -746,6 +757,18 @@ export async function fetchOffersComparison(
   );
   if (!resp.ok) throw new Error(`Failed to fetch comparison: ${resp.status}`);
   return resp.json();
+}
+
+export async function updateOfferFields(
+  extractionId: string,
+  updates: Record<string, string | number | boolean | null>,
+): Promise<void> {
+  const resp = await fetch(`${API_BASE}/api/offers/${encodeURIComponent(extractionId)}/fields`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...await authHeaders() },
+    body: JSON.stringify({ updates }),
+  });
+  if (!resp.ok) throw new Error(`Failed to update offer fields: ${resp.status}`);
 }
 
 // ---------------------------------------------------------------------------

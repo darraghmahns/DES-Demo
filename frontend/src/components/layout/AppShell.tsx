@@ -1,42 +1,37 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useEffect } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
+import { AppShell as MantineAppShell } from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import { Navbar } from './Navbar';
 import { Sidebar } from './Sidebar';
 import { OnboardingOrchestrator } from '../onboarding/OnboardingOrchestrator';
 
 export function AppShell() {
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [opened, { toggle, close }] = useDisclosure();
   const location = useLocation();
 
-  // Close drawer on route change
-  useEffect(() => {
-    setDrawerOpen(false);
-  }, [location.pathname]);
-
-  // Scroll lock when drawer is open
-  useEffect(() => {
-    if (drawerOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => { document.body.style.overflow = ''; };
-  }, [drawerOpen]);
-
-  const toggleDrawer = useCallback(() => setDrawerOpen(prev => !prev), []);
-  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  // Close mobile drawer on route change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { close(); }, [location.pathname]);
 
   return (
-    <OnboardingOrchestrator onMobileNavOpen={drawerOpen} onMobileNavClose={closeDrawer}>
-      <div className="app-shell">
-        <Navbar onMenuToggle={toggleDrawer} />
-        <div className="app-shell-body">
-          <Sidebar open={drawerOpen} onClose={closeDrawer} />
-          <main className="app-shell-content">
+    <OnboardingOrchestrator onMobileNavOpen={opened} onMobileNavClose={close}>
+      <MantineAppShell
+        header={{ height: 52 }}
+        navbar={{ width: 200, breakpoint: 'sm', collapsed: { mobile: !opened } }}
+      >
+        <MantineAppShell.Header>
+          <Navbar onMenuToggle={toggle} drawerOpen={opened} />
+        </MantineAppShell.Header>
+        <MantineAppShell.Navbar p="sm">
+          <Sidebar />
+        </MantineAppShell.Navbar>
+        <MantineAppShell.Main>
+          <div style={{ padding: '24px' }}>
             <Outlet />
-          </main>
-        </div>
-      </div>
+          </div>
+        </MantineAppShell.Main>
+      </MantineAppShell>
     </OnboardingOrchestrator>
   );
 }

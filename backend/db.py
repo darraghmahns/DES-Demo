@@ -75,6 +75,9 @@ class ExtractionRecord(BaseModel):
     total_tokens: int = 0
     cost_usd: float = 0.0
 
+    # User-edited field overrides — take precedence over extracted_data in the comparison view
+    field_overrides: dict = Field(default_factory=dict)
+
     # Embedded children
     citations: List[VerificationCitation] = Field(default_factory=list)
     pii_report: Optional[PIIReport] = None
@@ -244,6 +247,12 @@ class Transaction(Document):
     # Linked extractions
     extraction_ids: List[str] = Field(default_factory=list)
 
+    # Agent perspective — "buyer" or "seller"
+    agent_side: Optional[str] = None  # "buyer" | "seller"
+
+    # Dotloop loop linked to this transaction
+    dotloop_loop_id: Optional[str] = None
+
     # Compliance
     compliance_report_id: Optional[str] = None
 
@@ -312,6 +321,9 @@ class TransactionDocument(Document):
 
     # Link to existing extraction pipeline
     document_record_id: Optional[str] = None
+
+    # If set, this document is scoped to a specific offer (extraction_id)
+    offer_extraction_id: Optional[str] = None
 
     # Metadata
     uploaded_by: str  # UserProfile ID

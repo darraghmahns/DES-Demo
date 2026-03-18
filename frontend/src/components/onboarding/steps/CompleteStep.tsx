@@ -63,7 +63,7 @@ export function CompleteStep({
 
       <div className="ob-step-actions">
         <button className="ob-btn primary" onClick={onFinish}>
-          Go to Dashboard
+          Go to Transactions
         </button>
       </div>
     </div>

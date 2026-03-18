@@ -59,8 +59,46 @@ export interface Transaction {
   purchase_price?: number;
   earnest_money?: number;
   closing_date?: string;
+  extraction_ids?: string[];
+  agent_side?: 'buyer' | 'seller';
+  dotloop_loop_id?: string;
   created_by: string;
   org_id?: string;
   created_at: string;
   updated_at: string;
 }
+
+export const STATUS_LABELS: Record<TransactionStatus, string> = {
+  draft: 'Draft',
+  active: 'Active',
+  under_contract: 'Under Contract',
+  pending_close: 'Pending Close',
+  closed: 'Closed',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+};
+
+export const ROLE_LABELS: Record<ParticipantRole, string> = {
+  BUYER: 'Buyer',
+  SELLER: 'Seller',
+  LISTING_AGENT: 'Listing Agent',
+  BUYING_AGENT: 'Buying Agent',
+  LISTING_BROKER: 'Listing Broker',
+  BUYING_BROKER: 'Buying Broker',
+  ESCROW_TITLE_REP: 'Escrow/Title',
+  LOAN_OFFICER: 'Loan Officer',
+  APPRAISER: 'Appraiser',
+  INSPECTOR: 'Inspector',
+  TRANSACTION_COORDINATOR: 'TC',
+  OTHER: 'Other',
+};
+
+export const STATUS_COLORS: Record<TransactionStatus, string> = {
+  draft: 'gray',
+  active: 'green',
+  under_contract: 'blue',
+  pending_close: 'yellow',
+  closed: 'green',
+  cancelled: 'red',
+  expired: 'red',
+};

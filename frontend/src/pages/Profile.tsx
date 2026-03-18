@@ -1,6 +1,7 @@
 /** Profile page: personal info, role management, role-specific forms, and AI chat builder. */
 
 import { useState, useEffect } from 'react';
+import { Button, Alert, SimpleGrid, TextInput, Group } from '@mantine/core';
 import { useProfile } from '../hooks/useProfile';
 import { useOnboardingContext } from '../context/OnboardingContext';
 import { useClerkAvatar } from '../hooks/useClerkAvatar';
@@ -104,7 +105,7 @@ export function Profile() {
 
   return (
     <div className="page-profile">
-      <div className="profile-header">
+      <Group justify="space-between" align="flex-start" mb="lg">
         <div>
           <h1>My Profile</h1>
           <p className="page-subtitle">Manage your personal information and roles.</p>
@@ -132,9 +133,9 @@ export function Profile() {
             </button>
           </div>
         </div>
-      </div>
+      </Group>
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && <Alert color="red" mb="sm">{error}</Alert>}
 
       {viewMode === 'chat' ? (
         <ChatInterface chatState={chatState} onProfileUpdated={() => { refresh(); window.dispatchEvent(new Event('profile-updated')); }} />
@@ -155,80 +156,69 @@ export function Profile() {
                 </span>
               </div>
             )}
-            <div className="form-grid">
-              <label>
-                <span>Full Name</span>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="Your full name"
-                />
-              </label>
-              <label>
-                <span>Email</span>
-                <input
-                  type="email"
-                  value={profile?.email || ''}
-                  disabled
-                  title="Email is managed through your login provider"
-                />
-              </label>
-              <label>
-                <span>Phone</span>
-                <input
-                  type="tel"
-                  value={phone}
-                  onChange={e => setPhone(e.target.value)}
-                  placeholder="(555) 555-5555"
-                />
-              </label>
-              <label>
-                <span>Street Address</span>
-                <input
-                  type="text"
-                  value={street}
-                  onChange={e => setStreet(e.target.value)}
-                  placeholder="123 Main St"
-                />
-              </label>
-              <label>
-                <span>City</span>
-                <input
-                  type="text"
-                  value={city}
-                  onChange={e => setCity(e.target.value)}
-                  placeholder="City"
-                />
-              </label>
-              <label>
-                <span>State</span>
-                <input
-                  type="text"
-                  value={state}
-                  onChange={e => setState(e.target.value)}
-                  placeholder="ST"
-                  maxLength={2}
-                />
-              </label>
-              <label>
-                <span>ZIP Code</span>
-                <input
-                  type="text"
-                  value={zip}
-                  onChange={e => setZip(e.target.value)}
-                  placeholder="12345"
-                  maxLength={10}
-                />
-              </label>
-            </div>
-            <button
-              className="btn-primary"
+            <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm" mb="sm">
+              <TextInput
+                label="Full Name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="Your full name"
+                size="sm"
+              />
+              <TextInput
+                label="Email"
+                type="email"
+                value={profile?.email || ''}
+                disabled
+                title="Email is managed through your login provider"
+                size="sm"
+              />
+              <TextInput
+                label="Phone"
+                type="tel"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="(555) 555-5555"
+                size="sm"
+              />
+              <TextInput
+                label="Street Address"
+                value={street}
+                onChange={e => setStreet(e.target.value)}
+                placeholder="123 Main St"
+                size="sm"
+              />
+              <TextInput
+                label="City"
+                value={city}
+                onChange={e => setCity(e.target.value)}
+                placeholder="City"
+                size="sm"
+              />
+              <TextInput
+                label="State"
+                value={state}
+                onChange={e => setState(e.target.value)}
+                placeholder="ST"
+                maxLength={2}
+                size="sm"
+              />
+              <TextInput
+                label="ZIP Code"
+                value={zip}
+                onChange={e => setZip(e.target.value)}
+                placeholder="12345"
+                maxLength={10}
+                size="sm"
+              />
+            </SimpleGrid>
+            <Button
+              variant="filled"
+              color="cyan"
               onClick={handleSaveShared}
               disabled={sharedSaving}
             >
               {sharedSaving ? 'Saving...' : 'Save Personal Info'}
-            </button>
+            </Button>
           </section>
 
           {/* Connected Services */}

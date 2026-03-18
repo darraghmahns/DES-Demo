@@ -1,33 +1,18 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { SignedIn, SignedOut, SignIn, UserButton, OrganizationSwitcher } from '@clerk/clerk-react';
+import { Burger } from '@mantine/core';
+import { SignedIn, SignedOut, SignIn, OrganizationSwitcher } from '@clerk/clerk-react';
 import { useDemoAuth } from '../../hooks/useDemoAuth';
 import { getProfile } from '../../api/profile';
-
-function ThemeToggle() {
-  const [theme, setTheme] = useState(
-    () => localStorage.getItem('theme') ?? 'light'
-  );
-  const toggle = () => {
-    const next = theme === 'light' ? 'dark' : 'light';
-    setTheme(next);
-    localStorage.setItem('theme', next);
-    document.documentElement.setAttribute('data-theme', next);
-  };
-  return (
-    <button onClick={toggle} className="theme-toggle" title="Toggle theme">
-      {theme === 'light' ? '🌙' : '☀️'}
-    </button>
-  );
-}
 
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 interface NavbarProps {
   onMenuToggle: () => void;
+  drawerOpen: boolean;
 }
 
-export function Navbar({ onMenuToggle }: NavbarProps) {
+export function Navbar({ onMenuToggle, drawerOpen }: NavbarProps) {
   const { isDemoMode, demoUser, exitDemo } = useDemoAuth();
   const [profileName, setProfileName] = useState<string | null>(null);
 
@@ -46,22 +31,18 @@ export function Navbar({ onMenuToggle }: NavbarProps) {
   return (
     <nav className="navbar">
       <div className="navbar-left">
-        <button
-          className="navbar-hamburger"
+        <Burger
+          opened={drawerOpen}
           onClick={onMenuToggle}
+          size="sm"
           aria-label="Toggle navigation menu"
-        >
-          <span className="hamburger-line" />
-          <span className="hamburger-line" />
-          <span className="hamburger-line" />
-        </button>
+          hiddenFrom="sm"
+        />
         <Link to="/" className="navbar-logo">
-          <span className="navbar-logo-text">JGP</span>
-          <span className="navbar-logo-sub">Julie Gardner Properties</span>
+          <span className="navbar-logo-text">Comparari</span>
         </Link>
       </div>
       <div className="navbar-actions">
-        <ThemeToggle />
         {isDemoMode ? (
           <>
             <span className="navbar-demo-badge">Demo Mode</span>
@@ -77,19 +58,12 @@ export function Navbar({ onMenuToggle }: NavbarProps) {
                 <OrganizationSwitcher
                   appearance={{
                     elements: {
-                      rootBox: { color: '#e0e0e0' },
-                      organizationSwitcherTrigger: { color: '#e0e0e0' },
+                      rootBox: { color: 'var(--mantine-color-text)' },
+                      organizationSwitcherTrigger: { color: 'var(--mantine-color-text)' },
                     },
                   }}
                 />
               </div>
-              <UserButton
-                appearance={{
-                  elements: {
-                    avatarBox: { width: 32, height: 32 },
-                  },
-                }}
-              />
             </SignedIn>
             <SignedOut>
               <SignIn
@@ -97,7 +71,7 @@ export function Navbar({ onMenuToggle }: NavbarProps) {
                 appearance={{
                   elements: {
                     rootBox: { width: '100%' },
-                    card: { background: '#1a1a2e', border: '1px solid #333' },
+                    card: { background: 'var(--mantine-color-body)', border: '1px solid var(--mantine-color-default-border)' },
                   },
                 }}
               />

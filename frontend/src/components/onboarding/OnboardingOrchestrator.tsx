@@ -60,7 +60,7 @@ export function OnboardingOrchestrator({
 
   const handleFinish = async () => {
     await advanceStep();
-    navigate('/dashboard');
+    navigate('/transactions');
   };
 
   const contextValue = {

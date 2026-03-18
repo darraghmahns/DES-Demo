@@ -15,6 +15,7 @@ export interface CreateTransactionPayload {
   purchase_price?: number;
   earnest_money?: number;
   closing_date?: string;
+  agent_role?: 'listing_agent' | 'buying_agent';
 }
 
 export async function createTransaction(data: CreateTransactionPayload): Promise<Transaction> {
@@ -108,6 +109,7 @@ export interface TransactionDocRecord {
   filename: string;
   uploaded_by: string;
   uploaded_at: string;
+  offer_extraction_id?: string | null;
 }
 
 export async function listTransactionDocuments(txnId: string): Promise<TransactionDocRecord[]> {
@@ -118,11 +120,32 @@ export async function linkDocumentToTransaction(
   txnId: string,
   userDocId: string,
   docType: string,
+  offerExtractionId?: string,
 ): Promise<TransactionDocRecord> {
   return apiFetch<TransactionDocRecord>(`/api/transactions/${txnId}/documents`, {
     method: 'POST',
-    body: JSON.stringify({ user_document_id: userDocId, doc_type: docType }),
+    body: JSON.stringify({
+      user_document_id: userDocId,
+      doc_type: docType,
+      offer_extraction_id: offerExtractionId ?? null,
+    }),
   });
+}
+
+export async function uploadOfferDocument(
+  txnId: string,
+  file: File,
+  docType: string,
+  offerExtractionId: string,
+): Promise<TransactionDocRecord> {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('doc_type', docType);
+  form.append('offer_extraction_id', offerExtractionId);
+  return apiFetch<TransactionDocRecord>(
+    `/api/transactions/${txnId}/documents/upload-file`,
+    { method: 'POST', body: form },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +233,46 @@ export async function validateInvitation(token: string): Promise<InvitationValid
 
 export async function acceptInvitation(token: string): Promise<{ accepted: boolean; user_id: string; transaction_id: string }> {
   return apiFetch(`/api/invitations/${token}/accept`, { method: 'POST' });
+}
+
+// ---------------------------------------------------------------------------
+// Dotloop Loop Linking
+// ---------------------------------------------------------------------------
+
+export async function linkDotloopLoop(txnId: string, loopId: string): Promise<Transaction> {
+  return apiFetch<Transaction>(`/api/transactions/${txnId}/dotloop-loop`, {
+    method: 'PATCH',
+    body: JSON.stringify({ loop_id: loopId }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Extraction Linking
+// ---------------------------------------------------------------------------
+
+export async function linkExtractionToTransaction(
+  txnId: string,
+  extractionId: string,
+): Promise<Transaction> {
+  return apiFetch<Transaction>(`/api/transactions/${txnId}/extractions/${extractionId}`, {
+    method: 'POST',
+  });
+}
+
+export async function unlinkExtractionFromTransaction(
+  txnId: string,
+  extractionId: string,
+): Promise<Transaction> {
+  return apiFetch<Transaction>(`/api/transactions/${txnId}/extractions/${extractionId}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function fetchTransactionExtractions(
+  txnId: string,
+): Promise<Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>> {
+  const data = await apiFetch<{ extractions: Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }> }>(`/api/transactions/${txnId}/extractions`);
+  return data.extractions;
 }
 
 export async function submitProfileViaMagicLink(

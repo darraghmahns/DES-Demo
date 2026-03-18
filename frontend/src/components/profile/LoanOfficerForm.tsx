@@ -1,6 +1,7 @@
 /** Loan officer-specific profile form. */
 
 import { useState } from 'react';
+import { Button, SimpleGrid, TextInput, Select } from '@mantine/core';
 import type { LoanOfficerProfile } from '../../types/user';
 
 interface LoanOfficerFormProps {
@@ -39,51 +40,45 @@ export function LoanOfficerForm({ data, onSave, disabled }: LoanOfficerFormProps
   return (
     <div className="role-form">
       <h3>Loan Officer Details</h3>
-      <div className="form-grid">
-        <label>
-          <span>NMLS ID</span>
-          <input
-            type="text"
-            value={form.nmls_id || ''}
-            onChange={e => set('nmls_id', e.target.value)}
-            placeholder="e.g., 123456"
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>Company Name</span>
-          <input
-            type="text"
-            value={form.company_name || ''}
-            onChange={e => set('company_name', e.target.value)}
-            placeholder="Lending company"
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>Company NMLS</span>
-          <input
-            type="text"
-            value={form.company_nmls || ''}
-            onChange={e => set('company_nmls', e.target.value)}
-            placeholder="Company NMLS ID"
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>Contact Preference</span>
-          <select
-            value={form.contact_preference || ''}
-            onChange={e => set('contact_preference', e.target.value)}
-            disabled={disabled}
-          >
-            <option value="">-- Select --</option>
-            <option value="email">Email</option>
-            <option value="phone">Phone</option>
-            <option value="text">Text</option>
-          </select>
-        </label>
-      </div>
+      <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm" mb="sm">
+        <TextInput
+          label="NMLS ID"
+          value={form.nmls_id || ''}
+          onChange={e => set('nmls_id', e.target.value)}
+          placeholder="e.g., 123456"
+          disabled={disabled}
+          size="sm"
+        />
+        <TextInput
+          label="Company Name"
+          value={form.company_name || ''}
+          onChange={e => set('company_name', e.target.value)}
+          placeholder="Lending company"
+          disabled={disabled}
+          size="sm"
+        />
+        <TextInput
+          label="Company NMLS"
+          value={form.company_nmls || ''}
+          onChange={e => set('company_nmls', e.target.value)}
+          placeholder="Company NMLS ID"
+          disabled={disabled}
+          size="sm"
+        />
+        <Select
+          label="Contact Preference"
+          value={form.contact_preference || null}
+          onChange={(val) => set('contact_preference', val ?? '')}
+          data={[
+            { value: 'email', label: 'Email' },
+            { value: 'phone', label: 'Phone' },
+            { value: 'text', label: 'Text' },
+          ]}
+          placeholder="-- Select --"
+          disabled={disabled}
+          size="sm"
+        />
+      </SimpleGrid>
 
       <div className="loan-types-section">
         <span className="form-label">Loan Types Offered</span>
@@ -102,13 +97,14 @@ export function LoanOfficerForm({ data, onSave, disabled }: LoanOfficerFormProps
         </div>
       </div>
 
-      <button
-        className="btn-primary"
+      <Button
+        variant="filled"
+        color="cyan"
         onClick={handleSave}
         disabled={disabled || saving}
       >
         {saving ? 'Saving...' : 'Save Loan Officer Details'}
-      </button>
+      </Button>
     </div>
   );
 }

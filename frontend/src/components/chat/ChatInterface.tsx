@@ -49,7 +49,7 @@ export function ChatInterface({ onProfileUpdated, chatState }: Props) {
     <div className="chat-interface">
       <div className="chat-header">
         <div className="chat-header-left">
-          <h3>JGP Profile Assistant</h3>
+          <h3>Comparari Profile Assistant</h3>
           <span className="chat-subtitle">AI-powered profile builder</span>
         </div>
         <div className="chat-header-right">
@@ -61,7 +61,7 @@ export function ChatInterface({ onProfileUpdated, chatState }: Props) {
       <div className="chat-messages">
         {messages.length === 0 && (
           <div className="chat-welcome">
-            <p>Hi! I'm your JGP Profile Assistant.</p>
+            <p>Hi! I'm your Comparari Profile Assistant.</p>
             <p>Tell me about yourself and I'll help fill out your profile. You can say things like:</p>
             <div className="chat-suggestions">
               <button className="chat-suggestion" onClick={() => send("I'm a real estate agent in Denver, CO")}>

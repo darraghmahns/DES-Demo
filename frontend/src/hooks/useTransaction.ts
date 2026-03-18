@@ -1,6 +1,6 @@
 /** Hook for transaction CRUD and participant management. */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Transaction, ParticipantRole } from '../types/transaction';
 import type { TransactionCompletionResult } from '../api/transactions';
 import {
@@ -14,6 +14,9 @@ import {
   autoFillTransaction,
   getTransactionCompletion,
   createInvitation,
+  linkExtractionToTransaction,
+  unlinkExtractionFromTransaction,
+  fetchTransactionExtractions,
   type CreateTransactionPayload,
 } from '../api/transactions';
 
@@ -72,29 +75,39 @@ interface UseTransactionDetailReturn {
   removeParticipantById: (userId: string) => Promise<void>;
   sendInvitation: (email: string, role: ParticipantRole, name?: string) => Promise<string>;
   runAutoFill: () => Promise<string[]>;
+  extractions: Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>;
+  linkExtraction: (extractionId: string) => Promise<void>;
+  unlinkExtraction: (extractionId: string) => Promise<void>;
 }
 
 export function useTransactionDetail(id: string | undefined): UseTransactionDetailReturn {
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [completion, setCompletion] = useState<TransactionCompletionResult | null>(null);
+  const [extractions, setExtractions] = useState<Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const initialLoadDone = useRef(false);
 
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
-      setLoading(true);
+      // Only show full-page loading on the initial fetch; background refreshes
+      // (after mutations) update state silently to avoid unmounting tab children.
+      if (!initialLoadDone.current) setLoading(true);
       setError(null);
-      const [txn, comp] = await Promise.all([
+      const [txn, comp, exts] = await Promise.all([
         getTransaction(id),
         getTransactionCompletion(id),
+        fetchTransactionExtractions(id),
       ]);
       setTransaction(txn);
       setCompletion(comp);
+      setExtractions(exts);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load transaction');
     } finally {
       setLoading(false);
+      initialLoadDone.current = true;
     }
   }, [id]);
 
@@ -137,9 +150,22 @@ export function useTransactionDetail(id: string | undefined): UseTransactionDeta
     return result.filled_fields;
   }, [id]);
 
+  const linkExtraction = useCallback(async (extractionId: string) => {
+    if (!id) return;
+    await linkExtractionToTransaction(id, extractionId);
+    await refresh();
+  }, [id, refresh]);
+
+  const unlinkExtraction = useCallback(async (extractionId: string) => {
+    if (!id) return;
+    await unlinkExtractionFromTransaction(id, extractionId);
+    await refresh();
+  }, [id, refresh]);
+
   return {
     transaction,
     completion,
+    extractions,
     loading,
     error,
     refresh,
@@ -148,5 +174,7 @@ export function useTransactionDetail(id: string | undefined): UseTransactionDeta
     removeParticipantById,
     sendInvitation,
     runAutoFill,
+    linkExtraction,
+    unlinkExtraction,
   };
 }

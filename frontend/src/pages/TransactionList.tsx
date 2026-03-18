@@ -2,21 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { Button, Badge, Alert, TextInput, Select, Group, Card, SimpleGrid } from '@mantine/core';
 import { useTransactionList } from '../hooks/useTransaction';
 import { useIntegrations } from '../hooks/useIntegrations';
 import { fetchDotloopLoops } from '../api';
 import type { DotloopLoop } from '../api';
-import type { Transaction, TransactionStatus } from '../types/transaction';
-
-const STATUS_LABELS: Record<TransactionStatus, string> = {
-  draft: 'Draft',
-  active: 'Active',
-  under_contract: 'Under Contract',
-  pending_close: 'Pending Close',
-  closed: 'Closed',
-  cancelled: 'Cancelled',
-  expired: 'Expired',
-};
+import { STATUS_LABELS, STATUS_COLORS, type Transaction } from '../types/transaction';
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -29,7 +20,7 @@ function formatPrice(amount?: number): string {
   return `$${amount.toLocaleString()}`;
 }
 
-function TransactionCard({ txn }: { txn: Transaction }) {
+function TransactionCard({ txn, highlight = false }: { txn: Transaction; highlight?: boolean }) {
   const activeParticipants = txn.participants.filter(p => p.status !== 'removed');
   const addr = txn.property_address;
   const addrLine = addr
@@ -37,12 +28,20 @@ function TransactionCard({ txn }: { txn: Transaction }) {
     : null;
 
   return (
-    <Link to={`/transactions/${txn._id}`} className="txn-card">
+    <Card
+      shadow="sm"
+      withBorder
+      radius="md"
+      component={Link}
+      to={`/transactions/${txn._id}`}
+      className={highlight ? 'txn-card-highlighted' : undefined}
+      style={{ textDecoration: 'none', color: 'inherit' }}
+    >
       <div className="txn-card-header">
         <h3 className="txn-card-name">{txn.name}</h3>
-        <span className={`txn-status-badge status-${txn.status}`}>
+        <Badge color={STATUS_COLORS[txn.status]} variant="light">
           {STATUS_LABELS[txn.status]}
-        </span>
+        </Badge>
       </div>
 
       {addrLine && <p className="txn-card-address">{addrLine}</p>}
@@ -67,18 +66,24 @@ function TransactionCard({ txn }: { txn: Transaction }) {
           Closing: {formatDate(txn.closing_date)}
         </div>
       )}
-    </Link>
+
+      {txn.dotloop_loop_id && (
+        <div className="txn-card-loop-badge">
+          <span className="source-dotloop">Dotloop</span> linked
+        </div>
+      )}
+    </Card>
   );
 }
 
 function LoopCard({ loop }: { loop: DotloopLoop }) {
   return (
-    <Link to="/extraction" className="txn-card loop-card">
+    <Card shadow="sm" withBorder radius="md" className="loop-card">
       <div className="txn-card-header">
         <h3 className="txn-card-name">{loop.name}</h3>
-        <span className="txn-status-badge status-active">
+        <Badge color="green" variant="light">
           {loop.status || 'Active'}
-        </span>
+        </Badge>
       </div>
       <div className="txn-card-details">
         <div className="txn-card-detail">
@@ -96,7 +101,8 @@ function LoopCard({ loop }: { loop: DotloopLoop }) {
           </div>
         )}
       </div>
-    </Link>
+      <p className="txn-card-loop-hint">Link to a transaction from its Overview tab</p>
+    </Card>
   );
 }
 
@@ -105,6 +111,7 @@ export function TransactionList() {
   const { dotloopConnected, loading: integrationsLoading } = useIntegrations();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
+  const [agentRole, setAgentRole] = useState<'listing_agent' | 'buying_agent'>('listing_agent');
   const [creating, setCreating] = useState(false);
 
   const [loops, setLoops] = useState<DotloopLoop[]>([]);
@@ -126,7 +133,7 @@ export function TransactionList() {
     if (!newName.trim()) return;
     setCreating(true);
     try {
-      await create({ name: newName.trim() });
+      await create({ name: newName.trim(), agent_role: agentRole });
       setNewName('');
       setShowCreate(false);
     } catch { /* handled by hook */ }
@@ -135,74 +142,56 @@ export function TransactionList() {
 
   const active = transactions.filter(t => !['closed', 'cancelled', 'expired'].includes(t.status));
   const closed = transactions.filter(t => ['closed', 'cancelled', 'expired'].includes(t.status));
-  const hasConnectedLoops = loops.length > 0;
+
+  // Only show loops that aren't already linked to a transaction
+  const linkedLoopIds = new Set(transactions.map(t => t.dotloop_loop_id).filter(Boolean));
+  const unlinkedLoops = loops.filter(l => !linkedLoopIds.has(String(l.id)));
+  const hasConnectedLoops = unlinkedLoops.length > 0;
   const dotloopNotConnected = !dotloopConnected && !integrationsLoading;
 
   return (
     <div className="page-transactions">
-      <div className="page-header-row">
+      <Group justify="space-between" mb="lg">
         <div>
           <h1>Transactions</h1>
           <p className="page-subtitle">Manage your real estate deals</p>
         </div>
-        <button className="btn-primary" onClick={() => setShowCreate(!showCreate)}>
+        <Button variant="filled" color="cyan" onClick={() => setShowCreate(!showCreate)}>
           + New Transaction
-        </button>
-      </div>
+        </Button>
+      </Group>
 
       {showCreate && (
-        <form className="txn-create-form" onSubmit={handleCreate}>
-          <input
-            type="text"
-            placeholder="Transaction name (e.g., 123 Main St Purchase)"
-            value={newName}
-            onChange={e => setNewName(e.target.value)}
-            autoFocus
-          />
-          <button type="submit" className="btn-primary" disabled={creating || !newName.trim()}>
-            {creating ? 'Creating...' : 'Create'}
-          </button>
-          <button type="button" className="btn-secondary" onClick={() => setShowCreate(false)}>
-            Cancel
-          </button>
+        <form onSubmit={handleCreate}>
+          <Group gap="sm" align="flex-end" mb="md">
+            <TextInput
+              placeholder="Transaction name (e.g., 123 Main St Purchase)"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              autoFocus
+              size="sm"
+              style={{ flex: 1 }}
+            />
+            <Select
+              value={agentRole}
+              onChange={(val) => { if (val) setAgentRole(val as 'listing_agent' | 'buying_agent'); }}
+              data={[
+                { value: 'listing_agent', label: 'Listing Agent (representing seller)' },
+                { value: 'buying_agent', label: "Buyer's Agent (representing buyer)" },
+              ]}
+              size="sm"
+            />
+            <Button type="submit" variant="filled" color="cyan" disabled={creating || !newName.trim()}>
+              {creating ? 'Creating...' : 'Create'}
+            </Button>
+            <Button type="button" variant="outline" color="cyan" onClick={() => setShowCreate(false)}>
+              Cancel
+            </Button>
+          </Group>
         </form>
       )}
 
-      {error && <div className="error-banner">{error}</div>}
-
-      {/* Connected Loops */}
-      {(hasConnectedLoops || loopsLoading) && (
-        <div className="txn-section">
-          <h2 className="txn-section-title">
-            Connected Loops
-            {loops.length > 0 && (
-              <span className="txn-section-count"> ({loops.length})</span>
-            )}
-          </h2>
-          {loopsLoading ? (
-            <div className="loading-state">Loading from Dotloop...</div>
-          ) : (
-            <div className="txn-grid">
-              {loops.map(loop => (
-                <LoopCard key={`dl-${loop.id}`} loop={loop} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Prompt to connect if no integrations */}
-      {dotloopNotConnected && transactions.length === 0 && (
-        <div className="txn-connect-banner">
-          <span className="txn-connect-icon">&#x1F517;</span>
-          <div>
-            <p><strong>Connect Dotloop</strong> to see your loops here.</p>
-            <Link to="/profile" className="integration-profile-link">
-              Set up integrations in Profile &rarr;
-            </Link>
-          </div>
-        </div>
-      )}
+      {error && <Alert color="red" mb="sm">{error}</Alert>}
 
       {loading ? (
         <div className="loading-state">Loading transactions...</div>
@@ -210,34 +199,64 @@ export function TransactionList() {
         <div className="empty-state">
           <p>No transactions yet.</p>
           <p>Create your first transaction to start managing a deal.</p>
+          {dotloopNotConnected && (
+            <div className="txn-connect-banner" style={{ marginTop: 16 }}>
+              <div>
+                <p><strong>Connect Dotloop</strong> to see your loops here.</p>
+                <Link to="/profile" className="integration-profile-link">
+                  Set up integrations in Profile &rarr;
+                </Link>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <>
           {active.length > 0 && (
             <div className="txn-section">
               <h2 className="txn-section-title">Active ({active.length})</h2>
-              <div className="txn-grid">
+              <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
                 {active.map(txn => (
-                  <TransactionCard key={txn._id} txn={txn} />
+                  <TransactionCard key={txn._id} txn={txn} highlight />
                 ))}
-              </div>
+              </SimpleGrid>
             </div>
           )}
 
           {closed.length > 0 && (
             <div className="txn-section">
               <h2 className="txn-section-title">Closed ({closed.length})</h2>
-              <div className="txn-grid">
+              <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
                 {closed.map(txn => (
                   <TransactionCard key={txn._id} txn={txn} />
                 ))}
-              </div>
+              </SimpleGrid>
+            </div>
+          )}
+
+          {/* Unlinked Dotloop Loops — only loops not yet tied to a transaction */}
+          {(hasConnectedLoops || loopsLoading) && (
+            <div className="txn-section">
+              <h2 className="txn-section-title">
+                Unlinked Loops
+                {unlinkedLoops.length > 0 && (
+                  <span className="txn-section-count"> ({unlinkedLoops.length})</span>
+                )}
+              </h2>
+              {loopsLoading ? (
+                <div className="loading-state">Loading from Dotloop...</div>
+              ) : (
+                <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
+                  {unlinkedLoops.map(loop => (
+                    <LoopCard key={`dl-${loop.id}`} loop={loop} />
+                  ))}
+                </SimpleGrid>
+              )}
             </div>
           )}
 
           {dotloopNotConnected && transactions.length > 0 && (
             <div className="txn-connect-banner" style={{ marginTop: 16 }}>
-              <span className="txn-connect-icon">&#x1F517;</span>
               <div>
                 <p>Connect <strong>Dotloop</strong> to see your loops alongside your transactions.</p>
                 <Link to="/profile" className="integration-profile-link">

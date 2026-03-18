@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { Button } from '@mantine/core';
 import {
   validateInvitation,
   acceptInvitation,
@@ -80,7 +81,7 @@ export function InviteLanding() {
   return (
     <div className="page-invite">
       <div className="invite-container">
-        <div className="invite-logo">JGP</div>
+        <div className="invite-logo">Comparari</div>
 
         {step === 'loading' && (
           <div className="invite-card">
@@ -112,9 +113,9 @@ export function InviteLanding() {
             <p>
               You're invited to join as a participant. Accept to continue and complete your profile.
             </p>
-            <button className="btn-primary" onClick={handleAccept}>
+            <Button variant="filled" color="cyan" onClick={handleAccept}>
               Accept Invitation
-            </button>
+            </Button>
           </div>
         )}
 
@@ -142,9 +143,9 @@ export function InviteLanding() {
                   placeholder="(555) 123-4567"
                 />
               </div>
-              <button type="submit" className="btn-primary" disabled={submitting}>
+              <Button type="submit" variant="filled" color="cyan" disabled={submitting}>
                 {submitting ? 'Saving...' : 'Save & Continue'}
-              </button>
+              </Button>
             </form>
           </div>
         )}

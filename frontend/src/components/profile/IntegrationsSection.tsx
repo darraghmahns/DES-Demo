@@ -1,6 +1,7 @@
 /** Connected Services section for the Profile page: Dotloop management. */
 
 import { useEffect, useState } from 'react';
+import { Button, Alert, SimpleGrid, Card } from '@mantine/core';
 import {
   getDotloopConnectUrl,
   disconnectDotloop,
@@ -35,8 +36,8 @@ export function IntegrationsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleDisconnect(service: 'dotloop') {
-    setDisconnecting(service);
+  async function handleDisconnect() {
+    setDisconnecting('dotloop');
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
@@ -58,15 +59,15 @@ export function IntegrationsSection({
       </p>
 
       {successMessage && (
-        <div className="success-banner">{successMessage}</div>
+        <Alert color="green" mb="sm">{successMessage}</Alert>
       )}
       {errorMessage && (
-        <div className="error-banner">{errorMessage}</div>
+        <Alert color="red" mb="sm">{errorMessage}</Alert>
       )}
 
-      <div className="integrations-grid">
+      <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
         {/* Dotloop */}
-        <div className={`integration-card ${dotloopConnected ? 'connected' : ''}`}>
+        <Card withBorder padding="md" className={dotloopConnected ? 'connected' : undefined}>
           <div className="integration-header">
             <span className="integration-icon">&#x1F517;</span>
             <span className="integration-name">Dotloop</span>
@@ -78,20 +79,21 @@ export function IntegrationsSection({
             Connect your Dotloop account to sync documents automatically.
           </p>
           {dotloopConnected ? (
-            <button
-              className="btn-secondary btn-danger"
-              onClick={() => handleDisconnect('dotloop')}
+            <Button
+              variant="outline"
+              color="red"
+              onClick={() => handleDisconnect()}
               disabled={disconnecting === 'dotloop'}
             >
               {disconnecting === 'dotloop' ? 'Disconnecting...' : 'Disconnect'}
-            </button>
+            </Button>
           ) : (
-            <a href={getDotloopConnectUrl()} className="btn-primary integration-connect-btn">
+            <Button component="a" href={getDotloopConnectUrl()} variant="filled" color="cyan">
               Connect Dotloop
-            </a>
+            </Button>
           )}
-        </div>
-      </div>
+        </Card>
+      </SimpleGrid>
     </section>
   );
 }

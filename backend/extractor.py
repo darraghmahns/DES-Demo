@@ -28,7 +28,12 @@ You MUST return a JSON object with this exact structure:
     "earnest_money_amount": null,
     "earnest_money_held_by": null,
     "sale_commission_rate": null,
-    "sale_commission_total": null
+    "sale_commission_total": null,
+    "financing_type": null,
+    "down_payment_amount": null,
+    "down_payment_percentage": null,
+    "closing_fee_paid_by": null,
+    "fincen_fee_paid_by": null
   },
   "contract_dates": {
     "contract_agreement_date": null,
@@ -39,7 +44,29 @@ You MUST return a JSON object with this exact structure:
     "inspection_negotiation_deadline": null,
     "insurance_contingency_date": null,
     "loan_application_deadline": null,
-    "seller_response_time": null
+    "seller_response_time": null,
+    "possession_date": null,
+    "opd_delivery_date": null
+  },
+  "terms": {
+    "escalation_clause": null,
+    "home_warranty": null,
+    "hoa_approval_contingency": null,
+    "survey_contingency": null,
+    "as_is": null,
+    "inclusions": null,
+    "exclusions": null,
+    "leased_items": null,
+    "detection_devices": null,
+    "opd_delivered": null,
+    "inspection_contingency": null,
+    "financing_contingency": null,
+    "appraisal_contingency": null,
+    "title_contingency": null,
+    "insurance_contingency": null,
+    "sale_of_home_contingency": null,
+    "additional_provisions": null,
+    "notes": null
   },
   "participants": [
     {"full_name": "", "role": "BUYER", "email": null, "phone": null, "company_name": null}
@@ -51,13 +78,128 @@ Rules:
 - For prices, use numeric values only (no $ signs or commas). Example: 485000.0
 - For dates, use MM/DD/YYYY format.
 - Valid participant roles: BUYER, SELLER, LISTING_AGENT, BUYING_AGENT, LISTING_BROKER, BUYING_BROKER, ESCROW_TITLE_REP, LOAN_OFFICER, OTHER
-- Include ALL participants found (buyers, sellers, agents, brokers, title reps).
+- Include ALL participants found anywhere in the document: buyers, sellers, agents, and brokers.
+  Use the printed name whenever possible — not a signature.
+
+  BUYERS: Look near the top of the document for names identified as the buyer. Common patterns:
+    - A name written on a line labeled "Buyer:", "Purchaser:", or similar
+    - A name written above or below a tenancy-type clause (e.g. "as joint tenants", "as tenants in common", "individually")
+    - Names printed in the buyer signature/commitment block (near "Name Printed:", "Buyer's Printed Name", etc.)
+
+  SELLERS: Look in the seller signature/acceptance block near the end of the document. Common patterns:
+    - A name written on a line labeled "Name Printed:", "Seller:", "Seller's Name:", or "Owner:"
+    - The section may be titled "SELLER'S COMMITMENT", "SELLER ACCEPTANCE", "SELLER'S AGREEMENT", or similar
+    - May include estate or trust names (e.g. "Charles T. Coston Estate, Thomas Coston PR")
+
+  AGENTS & BROKERS: Look for a licensee/agent disclosure section, usually near the end of the document
+  (often after the signature blocks). This section discloses which real estate licensees are involved
+  and in what capacity. It may be titled:
+    - "RELATIONSHIP CONFIRMATION", "AGENCY DISCLOSURE", "LICENSEE DISCLOSURE",
+      "BROKER INFORMATION", "AGENT INFORMATION", or similar
+  In this section, extract:
+    - The licensee's full name (may appear as plain text, above a label like "(name of licensee)", or on a
+      line labeled "Licensee:", "Agent:", "Salesperson:", "Broker:", etc.)
+    - Their brokerage/company name (often on the same line after "of [brokerage name]", or labeled
+      "Brokerage:", "Company:", "(name of brokerage company)", etc.)
+    - Their phone number and email address
+    - Their role — look for a checked checkbox or statement indicating Buyer's Agent / Seller's Agent /
+      Dual Agent / Transaction Broker / Listing Agent / Selling Agent. Map:
+        Buyer's Agent / Selling Agent / Buyer's Representative -> BUYING_AGENT
+        Seller's Agent / Listing Agent / Seller's Representative -> LISTING_AGENT
+        Dual Agent -> create two entries, one BUYING_AGENT and one LISTING_AGENT with the same name
+    - If multiple licensee names appear in a single entry (e.g. "Jane Smith and John Doe"), create a
+      separate participant for each name with the same role, company, phone, and email.
+
+- For financials:
+  - financing_type: the loan/financing type (e.g. "Conventional", "FHA", "VA", "USDA", "Cash"). Use null if not stated.
+  - down_payment_amount: numeric dollar amount of the down payment. Use null if not a dollar figure.
+  - down_payment_percentage: if the down payment is expressed as a percentage (e.g. "5% of Purchase Price"), store the exact string here (e.g. "5%"). Use null if a dollar amount is given instead. Do NOT calculate a dollar figure from a percentage — store the percentage string as-is.
+  - closing_fee_paid_by: who pays the title company / closing agent / settlement fee. Look for a section
+    or line about closing costs or closing fees — may be labeled "CLOSING FEE", "CLOSING COSTS",
+    "SETTLEMENT FEE", "TITLE/CLOSING FEE", or similar. Look for Seller / Buyer / Equally Shared / Split
+    checkboxes on that line. Extract the checked option as a string (e.g. "Equally Shared", "Seller", "Buyer"). Use null if not present.
+  - fincen_fee_paid_by: who pays the FinCEN reporting fee. Look for a section mentioning FinCEN,
+    federal reporting, financial crimes reporting, or similar — may be labeled "FINCEN FEE",
+    "FINCEN REPORTS", "FEDERAL REPORTING FEE". Look for Seller / Buyer / Equally Shared checkboxes.
+    Extract the checked option as a string. Use null if not present.
+
 - For contract_dates:
-  - inspection_date: the inspection contingency deadline (last day to complete inspection)
-  - inspection_negotiation_deadline: the deadline to complete negotiations following inspection
-  - insurance_contingency_date: the insurance contingency deadline date
-  - loan_application_deadline: the date by which the buyer must submit their loan application
-  - seller_response_time: the date/time by which the seller must respond to the offer
+  - contract_agreement_date: the date this agreement/offer was made or signed. Usually found near the
+    very top of the document — look for "Date:", "Agreement Date:", "Offer Date:", or a sentence like
+    "This Agreement is made this ___ day of ___". NOT the closing date.
+  - closing_date: the anticipated closing/settlement date.
+  - offer_date: use the same value as contract_agreement_date if no separate offer date is stated.
+  - offer_expiration_date: the deadline by which the seller must accept. May be labeled
+    "Offer Expiration", "Acceptance Deadline", "Buyer's Commitment" deadline, or found in a sentence
+    like "Buyer grants Seller until [date] to accept".
+  - inspection_date: the inspection contingency deadline (last day to complete inspection).
+  - inspection_negotiation_deadline: the deadline to complete negotiations following inspection.
+  - insurance_contingency_date: the insurance contingency deadline date.
+  - loan_application_deadline: the date by which the buyer must submit their loan application.
+  - seller_response_time: same as offer_expiration_date if no separate field exists; otherwise the
+    specific time/date by which the seller must respond.
+  - possession_date: when the buyer takes physical possession. If a specific date is stated, use
+    MM/DD/YYYY. If possession is described conditionally (e.g. "upon recording of the deed", "at
+    closing", "at time of closing"), store that phrase as a string. Use null only if not mentioned.
+  - opd_delivery_date: deadline for seller to deliver the Owner's Property Disclosure (OPD) form. Use null if only a checkbox (delivered/not delivered) is present without a specific date.
+
+- For terms (read the ENTIRE document including all addenda and every checkbox):
+
+  IMPORTANT — Checkbox reading: These forms use named contingency sections with checkboxes. A filled or
+  checked box (checked box symbol, checkmark, [X], bold X, or any filled square/circle) means the item
+  IS included (true). An empty box (empty box symbol or blank line) means NOT included (false). Read
+  every checkbox carefully — do not skip sections. Also look for: explicit "YES/NO" checkboxes, radio
+  buttons marked with dots, written "N/A" or "Waived" which means false, and addenda checklist items
+  where a checked box next to an addendum title confirms its inclusion.
+
+  - escalation_clause: true if an escalation clause or addendum is checked/present. May be labeled
+    "ESCALATION CLAUSE", "ESCALATION ADDENDUM", or listed in an addenda checklist as checked.
+    false if explicitly unchecked/absent; null if the section does not appear.
+  - home_warranty: true if a HOME WARRANTY section is checked or buyer requests one; false if explicitly waived or unchecked; null if not mentioned.
+  - hoa_approval_contingency: true if the offer is contingent on HOA approval or HOA documents review; null if not mentioned.
+  - survey_contingency: true if the offer is contingent on a satisfactory survey; null if not mentioned.
+  - as_is: true if property is sold "as-is" with no repairs; false if seller agrees to make repairs; null if not stated.
+  - inclusions: comma-separated list of personal property/fixtures included in the sale (e.g. "refrigerator, washer, dryer, window treatments"). Look for an INCLUSIONS or PERSONAL PROPERTY INCLUDED section. null if none stated.
+  - exclusions: comma-separated list of items explicitly excluded from the sale. Look for an EXCLUSIONS section. null if none stated.
+  - leased_items: look for a section about leased or rented personal property — may be labeled
+    "LEASED/RENTED PERSONAL PROPERTY", "LEASED ITEMS", "RENTED ITEMS", or similar. If items are checked
+    (e.g. solar panels, water softener, propane tank), list them comma-separated. If the section
+    indicates "None" or no items are checked, use null.
+  - detection_devices: look for a section about detection devices — may be labeled "DETECTION DEVICES",
+    "SMOKE DETECTORS", "SAFETY DEVICES", or similar. List ONLY the device types whose checkbox is
+    explicitly checked/filled in the document, comma-separated (e.g. "Smoke detector, Carbon monoxide
+    detector"). CRITICAL: do NOT list devices that are merely printed on the form as options — only
+    list them if their checkbox is visibly checked. If the section is present but no boxes are checked,
+    use null. If the section is absent, use null.
+  - opd_delivered: look for a section about Owner's Property Disclosure / Property Disclosure Statement
+    delivery — may be labeled "DELIVERY OF OWNER'S PROPERTY DISCLOSURE", "OPD", "PROPERTY DISCLOSURE
+    CONTINGENCY", or similar. true if a checkbox or statement indicates it HAS been delivered to the
+    buyer — common phrasing includes "Has Received A Copy of the OPD", "OPD has been delivered",
+    "Buyer acknowledges receipt", or a checked "Delivered" box. false if NOT yet delivered (e.g.
+    "Has Not Received", "OPD to be delivered within X days"). null if the section is not present.
+  - inspection_contingency: true if the document contains an active inspection contingency giving the
+    buyer the right to inspect. May be in a section labeled "INSPECTION CONTINGENCY", "PROPERTY
+    INSPECTION CONTINGENCY", "INSPECTION CLAUSE", or similar. A checked box at the start of such a
+    section = true. A crossed-out, waived, or explicitly unchecked section = false. null if absent.
+  - financing_contingency: true if contingent on buyer obtaining a loan/mortgage. Section may be labeled
+    "FINANCING CONTINGENCY", "LOAN CONTINGENCY", "FINANCING CONDITIONS", "MORTGAGE CONTINGENCY".
+    false if the section has an explicitly checked "NO" box, is crossed out, or states the offer is
+    NOT contingent on financing / is a cash offer. null if absent entirely.
+    IMPORTANT: the presence of financing details (loan type, down payment) does NOT by itself mean
+    there is a financing contingency — only mark true if a contingency section is explicitly checked.
+  - appraisal_contingency: true if contingent on the property appraising at/above purchase price.
+    Section may be labeled "APPRAISAL CONTINGENCY", "APPRAISAL PROVISION", "APPRAISAL CLAUSE".
+    false if explicitly waived or unchecked; null if absent.
+  - title_contingency: true if contingent on satisfactory title review. Section may be labeled
+    "TITLE CONTINGENCY", "TITLE INSURANCE", "TITLE REVIEW CONTINGENCY", "COMMITMENT CONTINGENCY".
+    false if explicitly waived; null if absent.
+  - insurance_contingency: true if contingent on buyer obtaining homeowner's/hazard insurance. Section
+    may be labeled "INSURANCE CONTINGENCY", "HAZARD INSURANCE CONTINGENCY", "HOMEOWNER'S INSURANCE".
+    false if explicitly waived; null if absent.
+  - sale_of_home_contingency: look for a SALE OF HOME or SALE OF BUYER'S PROPERTY contingency section. true if checked/included; false if explicitly waived; null if absent.
+  - additional_provisions: verbatim text of any ADDITIONAL PROVISIONS, special conditions, or addendum titles listed in the contract. null if none.
+  - notes: any other noteworthy terms, conditions, or information not captured above. null if none.
+
 - If a field is not present in the document, use null.
 - Do NOT make up or infer values that are not explicitly stated.
 """

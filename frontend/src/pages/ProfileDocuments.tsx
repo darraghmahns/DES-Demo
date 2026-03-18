@@ -1,6 +1,7 @@
 /** Profile Documents page: upload, list, view extraction results. */
 
 import { useEffect, useState } from 'react';
+import { Button, Badge, Alert, Card, Select } from '@mantine/core';
 import { useDocumentUpload } from '../hooks/useDocumentUpload';
 import { useOnboardingContext } from '../context/OnboardingContext';
 import { FileUpload } from '../components/common/FileUpload';
@@ -79,23 +80,19 @@ export function ProfileDocuments() {
       <h1>My Documents</h1>
       <p className="page-subtitle">Upload and manage your personal documents. AI will automatically extract structured data.</p>
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && <Alert color="red" mb="sm">{error}</Alert>}
 
       {/* Upload Section */}
       <section className="upload-section">
         <div className="upload-controls">
-          <label>
-            <span>Document Type</span>
-            <select
-              value={selectedDocType}
-              onChange={e => setSelectedDocType(e.target.value as UserDocumentType)}
-              disabled={uploading}
-            >
-              {DOC_TYPE_OPTIONS.map(opt => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          </label>
+          <Select
+            label="Document Type"
+            value={selectedDocType}
+            onChange={(val) => { if (val) setSelectedDocType(val as UserDocumentType); }}
+            data={DOC_TYPE_OPTIONS.map(opt => ({ value: opt.value, label: opt.label }))}
+            disabled={uploading}
+            size="sm"
+          />
         </div>
 
         <FileUpload
@@ -132,11 +129,11 @@ export function ProfileDocuments() {
         )}
 
         {documents.map(doc => (
-          <div key={doc._id} className="document-card">
+          <Card key={doc._id} withBorder padding="sm" mb="xs">
             <div className="document-card-header" onClick={() => setExpandedDoc(expandedDoc === doc._id ? null : doc._id)}>
               <div className="document-card-info">
                 <span className="document-filename">{doc.filename}</span>
-                <span className="document-type-badge">{formatDocType(doc.doc_type)}</span>
+                <Badge variant="light" color="blue">{formatDocType(doc.doc_type)}</Badge>
                 <span className={`document-status document-status-${doc.extraction_status}`}>
                   {STATUS_LABELS[doc.extraction_status] || doc.extraction_status}
                 </span>
@@ -172,17 +169,17 @@ export function ProfileDocuments() {
 
                 <div className="document-actions">
                   {doc.extraction_status !== 'processing' && (
-                    <button className="btn-secondary" onClick={() => reExtract(doc._id)}>
+                    <Button variant="outline" color="cyan" onClick={() => reExtract(doc._id)}>
                       Re-Extract
-                    </button>
+                    </Button>
                   )}
-                  <button className="btn-danger" onClick={() => handleDelete(doc._id)}>
+                  <Button variant="outline" color="red" onClick={() => handleDelete(doc._id)}>
                     Delete
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
-          </div>
+          </Card>
         ))}
       </section>
     </div>

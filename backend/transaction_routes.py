@@ -4,15 +4,18 @@ Handles transaction CRUD, participant management, document linking,
 auto-fill from profiles, and transaction completion tracking.
 """
 
+import hashlib
 import logging
+import os
+import shutil
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from auth import get_current_user, AUTH_ENABLED
-from db import Transaction, UserProfile, UserDocument, TransactionDocument
+from db import Transaction, UserProfile, UserDocument, TransactionDocument, DocumentRecord
 from schemas import (
     DotloopPropertyAddress,
     DocumentRequirement,
@@ -42,6 +45,11 @@ class CreateTransactionRequest(BaseModel):
     purchase_price: Optional[float] = None
     earnest_money: Optional[float] = None
     closing_date: Optional[str] = None
+    agent_role: Optional[str] = None  # "listing_agent" | "buying_agent"
+
+
+class SetDotloopLoopBody(BaseModel):
+    loop_id: str
 
 
 class UpdateTransactionRequest(BaseModel):
@@ -68,6 +76,7 @@ class UpdateParticipantRequest(BaseModel):
 class LinkDocumentRequest(BaseModel):
     user_document_id: str
     doc_type: str
+    offer_extraction_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +151,28 @@ async def create_transaction(
         except ValueError:
             pass
 
-    # Determine creator's role
+    # Determine creator's participant role and agent_side
     from schemas import UserType
-    if UserType.AGENT in u.user_types:
+
+    # Prefer explicit agent_role from request if provided
+    if req.agent_role == "listing_agent":
         creator_role = ParticipantRole.LISTING_AGENT
+        agent_side = "seller"
+    elif req.agent_role == "buying_agent":
+        creator_role = ParticipantRole.BUYING_AGENT
+        agent_side = "buyer"
+    elif UserType.AGENT in u.user_types:
+        creator_role = ParticipantRole.LISTING_AGENT
+        agent_side = "seller"
     elif UserType.BUYER in u.user_types:
         creator_role = ParticipantRole.BUYER
+        agent_side = "buyer"
     elif UserType.SELLER in u.user_types:
         creator_role = ParticipantRole.SELLER
+        agent_side = "seller"
     else:
         creator_role = ParticipantRole.OTHER
+        agent_side = None
 
     creator_participant = TransactionParticipant(
         user_id=str(u.id),
@@ -178,6 +199,7 @@ async def create_transaction(
         document_requirements=doc_reqs,
         created_by=str(u.id),
         org_id=u.org_id,
+        agent_side=agent_side,
     )
     await txn.insert()
     log.info("Transaction created: %s by user %s", txn.id, u.id)
@@ -286,6 +308,31 @@ async def delete_transaction(txn_id: str, user=Depends(get_current_user)):
 
     await txn.delete()
     return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Dotloop Loop Linking
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/{txn_id}/dotloop-loop")
+async def set_dotloop_loop(
+    txn_id: str,
+    body: SetDotloopLoopBody,
+    user=Depends(get_current_user),
+):
+    """Link a Dotloop loop ID to a transaction."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    if txn.created_by != str(u.id):
+        raise HTTPException(status_code=403, detail="Only the creator can link a loop")
+
+    txn.dotloop_loop_id = body.loop_id
+    txn.updated_at = datetime.now(timezone.utc)
+    await txn.save()
+
+    return _serialize_transaction(txn)
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +511,7 @@ async def link_document_to_transaction(
         file_path=user_doc.file_path,
         file_hash=user_doc.file_hash,
         uploaded_by=str(u.id),
+        offer_extraction_id=req.offer_extraction_id,
     )
     await txn_doc.insert()
 
@@ -482,6 +530,54 @@ async def link_document_to_transaction(
 
     txn.updated_at = datetime.now(timezone.utc)
     await txn.save()
+
+    return {
+        "_id": str(txn_doc.id),
+        **txn_doc.model_dump(mode="json"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Offer-Scoped Document Upload
+# ---------------------------------------------------------------------------
+
+_TXN_DOCS_DIR = os.path.join(os.path.dirname(__file__), "test_docs", "txn_docs")
+
+
+@router.post("/{txn_id}/documents/upload-file")
+async def upload_offer_document(
+    txn_id: str,
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    offer_extraction_id: Optional[str] = Form(None),
+    user=Depends(get_current_user),
+):
+    """Upload a supporting document scoped to a specific offer (no OCR extraction)."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+
+    u = await _get_user_or_dev(user)
+    await _get_transaction_for_user(txn_id, u)
+
+    os.makedirs(_TXN_DOCS_DIR, exist_ok=True)
+    contents = await file.read()
+    file_hash = hashlib.sha256(contents).hexdigest()
+    dest_filename = f"{file_hash[:12]}_{file.filename}"
+    dest_path = os.path.join(_TXN_DOCS_DIR, dest_filename)
+    with open(dest_path, "wb") as f:
+        f.write(contents)
+
+    txn_doc = TransactionDocument(
+        transaction_id=txn_id,
+        doc_type=doc_type,
+        source="upload",
+        filename=file.filename,
+        file_path=dest_path,
+        file_hash=file_hash,
+        uploaded_by=str(u.id),
+        offer_extraction_id=offer_extraction_id,
+    )
+    await txn_doc.insert()
 
     return {
         "_id": str(txn_doc.id),
@@ -596,3 +692,87 @@ async def get_transaction_completion(
             ],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Extraction Linking
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{txn_id}/extractions/{extraction_id}")
+async def link_extraction(
+    txn_id: str,
+    extraction_id: str,
+    user=Depends(get_current_user),
+):
+    """Link an extraction (DocumentRecord) to a transaction."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    # extraction_id may be composite "doc_id:idx" from save_extraction — use only the doc_id part
+    doc_id = extraction_id.split(':')[0] if ':' in extraction_id else extraction_id
+
+    # Validate the extraction exists
+    try:
+        doc_record = await DocumentRecord.get(doc_id)
+    except Exception:
+        doc_record = None
+    if not doc_record:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+
+    # Store the canonical doc_id (strip composite ":idx" suffix if present)
+    if doc_id not in txn.extraction_ids:
+        txn.extraction_ids.append(doc_id)
+        await txn.save()
+
+    return _serialize_transaction(txn)
+
+
+@router.delete("/{txn_id}/extractions/{extraction_id}")
+async def unlink_extraction(
+    txn_id: str,
+    extraction_id: str,
+    user=Depends(get_current_user),
+):
+    """Unlink an extraction from a transaction."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    if extraction_id in txn.extraction_ids:
+        txn.extraction_ids.remove(extraction_id)
+        await txn.save()
+
+    return _serialize_transaction(txn)
+
+
+@router.get("/{txn_id}/extractions")
+async def list_transaction_extractions(
+    txn_id: str,
+    user=Depends(get_current_user),
+):
+    """List extraction summaries linked to a transaction."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    summaries = []
+    for ext_id in txn.extraction_ids:
+        doc_id = ext_id.split(':')[0] if ':' in ext_id else ext_id
+        try:
+            doc_record = await DocumentRecord.get(doc_id)
+        except Exception:
+            continue
+        if not doc_record:
+            continue
+
+        # Use the latest extraction entry for confidence/pages/mode
+        latest = doc_record.extractions[-1] if doc_record.extractions else None
+        summaries.append({
+            "id": str(doc_record.id),
+            "filename": doc_record.filename,
+            "mode": latest.mode if latest else doc_record.mode,
+            "overall_confidence": latest.overall_confidence if latest else 0.0,
+            "pages_processed": latest.pages_processed if latest else doc_record.page_count,
+            "created_at": latest.created_at.isoformat() if latest and latest.created_at else None,
+        })
+
+    return {"extractions": summaries}

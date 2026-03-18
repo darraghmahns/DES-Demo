@@ -12,11 +12,11 @@ const STORAGE_KEY = 'des_onboarding_v2';
 
 /** Ordered step definitions — route each step navigates to. */
 export const ONBOARDING_STEPS: { id: OnboardingStepId; route: string }[] = [
-  { id: 'welcome', route: '/dashboard' },
+  { id: 'welcome', route: '/transactions' },
   { id: 'profile', route: '/profile' },
   { id: 'documents', route: '/profile/documents' },
   { id: 'extraction', route: '/extraction' },
-  { id: 'complete', route: '/dashboard' },
+  { id: 'complete', route: '/transactions' },
 ];
 
 // ---------------------------------------------------------------------------
