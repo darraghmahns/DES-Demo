@@ -508,6 +508,7 @@ class TestAsyncRunComplianceCheck:
 # =========================================================================
 
 
+@pytest.mark.skip(reason="Scout and compliance API routes are disabled on the deploy branch")
 class TestScoutAPIEndpoints:
     """Tests for the 5 scout API endpoints in server.py."""
 

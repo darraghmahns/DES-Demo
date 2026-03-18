@@ -1,13 +1,19 @@
 /** Transaction list page — view, create, and manage deals + connected loops. */
 
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { Button, Badge, Alert, TextInput, Select, Group, Card, SimpleGrid } from '@mantine/core';
+import { Link, useNavigate } from 'react-router-dom';
+import { Button, Badge, Alert, TextInput, Select, Group, Card, SimpleGrid, Modal, Stack } from '@mantine/core';
 import { useTransactionList } from '../hooks/useTransaction';
 import { useIntegrations } from '../hooks/useIntegrations';
 import { fetchDotloopLoops } from '../api';
 import type { DotloopLoop } from '../api';
+import { IconImport, IconTransactions } from '../components/common/AppIcons';
 import { STATUS_LABELS, STATUS_COLORS, type Transaction } from '../types/transaction';
+import {
+  createTransactionFromDotloop,
+  previewTransactionFromDotloop,
+  type DotloopTransactionPreview,
+} from '../api/transactions';
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -69,14 +75,22 @@ function TransactionCard({ txn, highlight = false }: { txn: Transaction; highlig
 
       {txn.dotloop_loop_id && (
         <div className="txn-card-loop-badge">
-          <span className="source-dotloop">Dotloop</span> linked
+          <span className="source-dotloop">Dotloop</span> {txn.dotloop_sync_status || 'linked'}
         </div>
       )}
     </Card>
   );
 }
 
-function LoopCard({ loop }: { loop: DotloopLoop }) {
+function LoopCard({
+  loop,
+  onCreate,
+  busy,
+}: {
+  loop: DotloopLoop;
+  onCreate: () => void;
+  busy: boolean;
+}) {
   return (
     <Card shadow="sm" withBorder radius="md" className="loop-card">
       <div className="txn-card-header">
@@ -101,12 +115,21 @@ function LoopCard({ loop }: { loop: DotloopLoop }) {
           </div>
         )}
       </div>
-      <p className="txn-card-loop-hint">Link to a transaction from its Overview tab</p>
+      <Group justify="space-between" mt="md">
+        <p className="txn-card-loop-hint">Create a local transaction from this loop.</p>
+        <Button size="xs" color="campari" variant="light" onClick={onCreate} disabled={busy}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <IconImport size={14} />
+            <span>{busy ? 'Loading...' : 'Create from Dotloop'}</span>
+          </span>
+        </Button>
+      </Group>
     </Card>
   );
 }
 
 export function TransactionList() {
+  const navigate = useNavigate();
   const { transactions, loading, error, create } = useTransactionList();
   const { dotloopConnected, loading: integrationsLoading } = useIntegrations();
   const [showCreate, setShowCreate] = useState(false);
@@ -116,6 +139,11 @@ export function TransactionList() {
 
   const [loops, setLoops] = useState<DotloopLoop[]>([]);
   const [loopsLoading, setLoopsLoading] = useState(false);
+  const [previewLoopId, setPreviewLoopId] = useState<number | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<DotloopTransactionPreview | null>(null);
+  const [creatingFromLoop, setCreatingFromLoop] = useState(false);
 
   useEffect(() => {
     if (integrationsLoading) return;
@@ -149,11 +177,52 @@ export function TransactionList() {
   const hasConnectedLoops = unlinkedLoops.length > 0;
   const dotloopNotConnected = !dotloopConnected && !integrationsLoading;
 
+  const openDotloopPreview = async (loop: DotloopLoop) => {
+    setPreviewLoopId(loop.id);
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      setPreview(await previewTransactionFromDotloop(loop.id));
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : 'Failed to preview Dotloop loop.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const closePreview = () => {
+    setPreviewLoopId(null);
+    setPreview(null);
+    setPreviewError(null);
+    setCreatingFromLoop(false);
+  };
+
+  const handleCreateFromLoop = async () => {
+    if (!previewLoopId) return;
+    setCreatingFromLoop(true);
+    setPreviewError(null);
+    try {
+      const txn = await createTransactionFromDotloop(previewLoopId, {
+        agent_role: preview?.normalized_transaction.agent_role,
+      });
+      closePreview();
+      navigate(`/transactions/${txn._id}`);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : 'Failed to create transaction from Dotloop.');
+    } finally {
+      setCreatingFromLoop(false);
+    }
+  };
+
   return (
     <div className="page-transactions">
       <Group justify="space-between" mb="lg">
         <div>
-          <h1>Transactions</h1>
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <IconTransactions size={22} />
+            <span>Transactions</span>
+          </h1>
           <p className="page-subtitle">Manage your real estate deals</p>
         </div>
         <Button variant="filled" color="cyan" onClick={() => setShowCreate(!showCreate)}>
@@ -248,7 +317,12 @@ export function TransactionList() {
               ) : (
                 <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
                   {unlinkedLoops.map(loop => (
-                    <LoopCard key={`dl-${loop.id}`} loop={loop} />
+                    <LoopCard
+                      key={`dl-${loop.id}`}
+                      loop={loop}
+                      onCreate={() => void openDotloopPreview(loop)}
+                      busy={previewLoopId === loop.id && previewLoading}
+                    />
                   ))}
                 </SimpleGrid>
               )}
@@ -267,6 +341,69 @@ export function TransactionList() {
           )}
         </>
       )}
+
+      <Modal
+        opened={previewLoopId !== null}
+        onClose={closePreview}
+        title="Create Transaction from Dotloop"
+        size="lg"
+      >
+        <Stack gap="sm">
+          {previewError && <Alert color="red">{previewError}</Alert>}
+          {previewLoading ? (
+            <div className="loading-state">Loading Dotloop preview...</div>
+          ) : preview ? (
+            <>
+              {preview.existing_transaction_id && (
+                <Alert color="yellow">
+                  This loop is already linked to transaction {preview.existing_transaction_id}.
+                </Alert>
+              )}
+              <div className="dotloop-preview-grid">
+                <div>
+                  <strong>Name</strong>
+                  <div>{preview.normalized_transaction.name}</div>
+                </div>
+                <div>
+                  <strong>Type</strong>
+                  <div>{preview.normalized_transaction.transaction_type}</div>
+                </div>
+                <div>
+                  <strong>Price</strong>
+                  <div>{preview.normalized_transaction.purchase_price ?? '--'}</div>
+                </div>
+                <div>
+                  <strong>Closing</strong>
+                  <div>{preview.normalized_transaction.closing_date ? formatDate(preview.normalized_transaction.closing_date) : '--'}</div>
+                </div>
+                <div>
+                  <strong>Participants</strong>
+                  <div>{preview.participant_suggestions.length}</div>
+                </div>
+                <div>
+                  <strong>PDF Documents</strong>
+                  <div>{preview.available_documents.pdf_count}</div>
+                </div>
+              </div>
+              {preview.warnings.length > 0 && (
+                <Alert color="yellow">
+                  {preview.warnings.join(' ')}
+                </Alert>
+              )}
+              <Group justify="flex-end">
+                <Button variant="default" onClick={closePreview}>Cancel</Button>
+                <Button
+                  color="campari"
+                  onClick={() => void handleCreateFromLoop()}
+                  disabled={Boolean(preview.existing_transaction_id) || creatingFromLoop}
+                >
+                  {creatingFromLoop ? 'Creating...' : 'Create Transaction'}
+                </Button>
+              </Group>
+            </>
+          ) : null}
+        </Stack>
+      </Modal>
     </div>
   );
 }

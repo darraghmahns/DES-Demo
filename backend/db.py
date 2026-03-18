@@ -14,15 +14,18 @@ from schemas import (
     BuyerProfile,
     ComplianceReport,
     DocumentRequirement,
+    DotloopSyncStatus,
     LoanOfficerProfile,
     PIIReport,
     SellerProfile,
     TransactionParticipant,
     TransactionStatus,
+    InvitationStatus,
     UserDocumentType,
     UserType,
     VerificationCitation,
     DotloopPropertyAddress,
+    ParticipantRole,
 )
 from scout_models import ScoutResult
 
@@ -252,6 +255,10 @@ class Transaction(Document):
 
     # Dotloop loop linked to this transaction
     dotloop_loop_id: Optional[str] = None
+    dotloop_sync_status: DotloopSyncStatus = DotloopSyncStatus.NEVER
+    dotloop_last_synced_at: Optional[datetime] = None
+    dotloop_last_remote_updated_at: Optional[datetime] = None
+    dotloop_sync_error: Optional[str] = None
 
     # Compliance
     compliance_report_id: Optional[str] = None
@@ -268,6 +275,41 @@ class Transaction(Document):
             "participants.user_id",
             "status",
             "created_by",
+            "dotloop_loop_id",
+        ]
+
+
+class TransactionInvitation(Document):
+    """A first-class invitation tied to a transaction."""
+
+    transaction_id: str
+    invitee_user_id: Optional[str] = None
+    email: str
+    name: Optional[str] = None
+    role: ParticipantRole
+    created_by: str
+    token_hash: Optional[str] = None
+    signed_token: Optional[str] = None
+    status: InvitationStatus = InvitationStatus.CREATED
+    expires_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    opened_at: Optional[datetime] = None
+    accepted_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    provider: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Settings:
+        name = "transaction_invitations"
+        indexes = [
+            "transaction_id",
+            "invitee_user_id",
+            "email",
+            "status",
+            "token_hash",
         ]
 
 
@@ -349,6 +391,7 @@ ALL_DOCUMENT_MODELS = [
     ScoutResult,
     BrokerageProfile,
     Transaction,
+    TransactionInvitation,
     UserDocument,
     TransactionDocument,
 ]

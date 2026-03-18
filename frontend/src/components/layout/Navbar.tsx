@@ -4,6 +4,7 @@ import { Burger } from '@mantine/core';
 import { SignedIn, SignedOut, SignIn, OrganizationSwitcher } from '@clerk/clerk-react';
 import { useDemoAuth } from '../../hooks/useDemoAuth';
 import { getProfile } from '../../api/profile';
+import { ComparariLogo } from '../branding/ComparariLogo';
 
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
@@ -39,7 +40,7 @@ export function Navbar({ onMenuToggle, drawerOpen }: NavbarProps) {
           hiddenFrom="sm"
         />
         <Link to="/" className="navbar-logo">
-          <span className="navbar-logo-text">Comparari</span>
+          <ComparariLogo wordmarkClassName="navbar-logo-text" />
         </Link>
       </div>
       <div className="navbar-actions">
@@ -72,6 +73,7 @@ export function Navbar({ onMenuToggle, drawerOpen }: NavbarProps) {
                   elements: {
                     rootBox: { width: '100%' },
                     card: { background: 'var(--mantine-color-body)', border: '1px solid var(--mantine-color-default-border)' },
+                    formButtonPrimary: { background: 'var(--brand-primary)', color: '#fff' },
                   },
                 }}
               />

@@ -10,6 +10,8 @@ export type TransactionStatus =
   | 'expired';
 
 export type ParticipantStatus = 'invited' | 'active' | 'removed';
+export type InvitationStatus = 'created' | 'sent' | 'opened' | 'accepted' | 'expired' | 'revoked' | 'failed';
+export type DotloopSyncStatus = 'never' | 'current' | 'stale' | 'error';
 
 export type ParticipantRole =
   | 'BUYER'
@@ -62,10 +64,33 @@ export interface Transaction {
   extraction_ids?: string[];
   agent_side?: 'buyer' | 'seller';
   dotloop_loop_id?: string;
+  dotloop_sync_status?: DotloopSyncStatus;
+  dotloop_last_synced_at?: string | null;
+  dotloop_last_remote_updated_at?: string | null;
+  dotloop_sync_error?: string | null;
   created_by: string;
   org_id?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface TransactionInvitation {
+  id: string;
+  transaction_id: string;
+  invitee_user_id?: string | null;
+  email: string;
+  name?: string | null;
+  role: ParticipantRole;
+  status: InvitationStatus;
+  expires_at?: string | null;
+  sent_at?: string | null;
+  opened_at?: string | null;
+  accepted_at?: string | null;
+  revoked_at?: string | null;
+  provider?: string | null;
+  provider_message_id?: string | null;
+  last_error?: string | null;
+  invite_url?: string | null;
 }
 
 export const STATUS_LABELS: Record<TransactionStatus, string> = {

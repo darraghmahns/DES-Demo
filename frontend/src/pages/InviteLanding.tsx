@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Button } from '@mantine/core';
+import { ComparariLogo } from '../components/branding/ComparariLogo';
 import {
   validateInvitation,
   acceptInvitation,
@@ -81,7 +82,7 @@ export function InviteLanding() {
   return (
     <div className="page-invite">
       <div className="invite-container">
-        <div className="invite-logo">Comparari</div>
+        <ComparariLogo className="invite-logo-lockup" wordmarkClassName="invite-logo" />
 
         {step === 'loading' && (
           <div className="invite-card">
@@ -113,7 +114,7 @@ export function InviteLanding() {
             <p>
               You're invited to join as a participant. Accept to continue and complete your profile.
             </p>
-            <Button variant="filled" color="cyan" onClick={handleAccept}>
+            <Button variant="filled" color="campari" onClick={handleAccept}>
               Accept Invitation
             </Button>
           </div>
@@ -143,7 +144,7 @@ export function InviteLanding() {
                   placeholder="(555) 123-4567"
                 />
               </div>
-              <Button type="submit" variant="filled" color="cyan" disabled={submitting}>
+              <Button type="submit" variant="filled" color="campari" disabled={submitting}>
                 {submitting ? 'Saving...' : 'Save & Continue'}
               </Button>
             </form>

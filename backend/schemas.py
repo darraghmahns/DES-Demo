@@ -666,6 +666,25 @@ class ParticipantStatus(str, Enum):
     REMOVED = "removed"
 
 
+class InvitationStatus(str, Enum):
+    """Delivery / lifecycle state for a transaction invitation."""
+    CREATED = "created"
+    SENT = "sent"
+    OPENED = "opened"
+    ACCEPTED = "accepted"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+    FAILED = "failed"
+
+
+class DotloopSyncStatus(str, Enum):
+    """Freshness state for a transaction's linked Dotloop loop."""
+    NEVER = "never"
+    CURRENT = "current"
+    STALE = "stale"
+    ERROR = "error"
+
+
 class PreApprovalStatus(str, Enum):
     """Buyer pre-approval stages."""
     NONE = "none"

@@ -2,6 +2,7 @@ import { SignIn } from '@clerk/clerk-react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { useDemoAuth, getDemoToken } from '../hooks/useDemoAuth';
+import { ComparariLogo } from '../components/branding/ComparariLogo';
 
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
@@ -38,7 +39,7 @@ export function Login() {
     <div className="page-login">
       <div className="login-container">
         <div className="login-brand">
-          <h1 className="login-title">Comparari</h1>
+          <ComparariLogo className="login-title-lockup" wordmarkClassName="login-title" />
           <p className="login-subtitle">Sign in to continue</p>
         </div>
         <div className="login-clerk">
@@ -72,8 +73,8 @@ export function Login() {
                 color: 'var(--mantine-color-text)',
               },
               formButtonPrimary: {
-                background: 'var(--mantine-primary-color-filled)',
-                color: 'var(--mantine-primary-color-filled-hover)',
+                background: 'var(--brand-primary)',
+                color: '#fff',
               },
               footerActionText: { color: 'var(--mantine-color-dimmed)' },
               footerActionLink: { color: 'var(--mantine-primary-color-filled)' },

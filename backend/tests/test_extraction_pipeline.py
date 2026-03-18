@@ -2,9 +2,9 @@
 
 Covers:
 - Happy path (real_estate mode): all SSE events emitted in order,
-  schema validation passes, compliance + enrichment steps run.
+  schema validation passes and enrichment runs when configured.
 - Error path: invalid PDF triggers an "error" SSE event.
-- Gov mode: PII scan step runs, compliance and enrichment are skipped.
+- Gov mode: PII scan step runs and enrichment is skipped.
 - Validation errors: malformed extraction data emits validation errors
   but pipeline still completes (lenient fallback).
 
@@ -18,12 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from schemas import (
-    ComplianceOverallStatus,
-    ComplianceReport,
-    PropertyEnrichment,
-    VerificationCitation,
-)
+from schemas import PropertyEnrichment, VerificationCitation
 
 
 # ---------------------------------------------------------------------------
@@ -68,27 +63,26 @@ def mock_engine():
             },
             "financials": {
                 "purchase_price": "350000",
-                "earnest_money": "5000",
-                "loan_amount": "280000",
-                "down_payment": "70000",
-                "commission_rate": "3%",
+                "earnest_money_amount": "5000",
+                "down_payment_amount": "70000",
+                "sale_commission_rate": "3%",
             },
             "contract_dates": {
-                "contract_date": "2026-01-15",
+                "contract_agreement_date": "2026-01-15",
                 "closing_date": "2026-02-28",
-                "inspection_deadline": "2026-01-25",
-                "financing_deadline": "2026-02-10",
+                "inspection_date": "2026-01-25",
+                "loan_application_deadline": "2026-02-10",
             },
             "participants": [
                 {
                     "role": "BUYER",
-                    "name": "Jane Doe",
+                    "full_name": "Jane Doe",
                     "email": "jane@example.com",
                     "phone": "555-0100",
                 },
                 {
                     "role": "SELLER",
-                    "name": "John Smith",
+                    "full_name": "John Smith",
                     "email": "john@example.com",
                     "phone": "555-0200",
                 },
@@ -125,16 +119,8 @@ def mock_engine():
 
 @pytest.fixture
 def mock_compliance_report():
-    """A minimal ComplianceReport for testing."""
-    return ComplianceReport(
-        jurisdiction_key="TX:Dallas:Dallas",
-        jurisdiction_display="Dallas, Dallas County, TX",
-        jurisdiction_type="city",
-        overall_status=ComplianceOverallStatus.PASS,
-        requirements=[],
-        transaction_type="PURCHASE_OFFER",
-        notes=None,
-    )
+    """Compatibility fixture for the deploy branch with compliance disabled."""
+    return None
 
 
 @pytest.fixture
@@ -172,7 +158,7 @@ _SERVER = "server"
 
 def _standard_patches(
     mock_engine,
-    mock_compliance_report,
+    _mock_compliance_report,
     mock_enrichment,
     *,
     regrid_configured: bool = True,
@@ -189,7 +175,6 @@ def _standard_patches(
         patch(f"{_SERVER}.get_engine", return_value=mock_engine),
         patch(f"{_SERVER}.property_prefill.is_configured", return_value=regrid_configured),
         patch(f"{_SERVER}.property_prefill.enrich_property", new_callable=AsyncMock, return_value=mock_enrichment),
-        patch(f"{_SERVER}.async_run_compliance_check", new_callable=AsyncMock, return_value=mock_compliance_report),
         patch(f"{_SERVER}.save_document", new_callable=AsyncMock, return_value="doc-id-123"),
         patch(f"{_SERVER}.save_extraction", new_callable=AsyncMock, return_value="ext-id-456"),
     ]
@@ -228,7 +213,6 @@ class TestRealEstateHappyPath:
         assert "validation" in event_types
         assert "citations" in event_types
         assert "property_enrichment" in event_types
-        assert "compliance" in event_types
         assert "complete" in event_types
 
     @pytest.mark.asyncio
@@ -252,7 +236,7 @@ class TestRealEstateHappyPath:
     async def test_step_count_matches(
         self, tmp_pdf, mock_engine, mock_compliance_report, mock_enrichment,
     ):
-        """Total steps should be 8 for real_estate with Regrid configured."""
+        """Total steps should be 7 for real_estate with Regrid configured."""
         from server import _extraction_pipeline
 
         emit, events = _collect_emitter()
@@ -266,7 +250,7 @@ class TestRealEstateHappyPath:
 
         # First step event tells us the total
         step_events = [e for e in events if e[0] == "step"]
-        assert step_events[0][1]["total"] == 8  # Load,Convert,Extract,Validate,Verify,Enrich,Compliance,Output
+        assert step_events[0][1]["total"] == 7  # Load,Convert,Extract,Validate,Verify,Enrich,Output
 
     @pytest.mark.asyncio
     async def test_validation_succeeds(
@@ -416,7 +400,7 @@ class TestNoRegridConfigured:
             await _extraction_pipeline("real_estate", tmp_pdf, emit)
 
         step_events = [e for e in events if e[0] == "step"]
-        assert step_events[0][1]["total"] == 7  # No enrichment step
+        assert step_events[0][1]["total"] == 6  # No enrichment step
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +523,7 @@ class TestValidationErrors:
 
 
 class TestGovMode:
-    """Gov mode runs PII scan and skips compliance + enrichment."""
+    """Gov mode runs PII scan and skips property enrichment."""
 
     @pytest.fixture
     def mock_gov_engine(self):
@@ -612,7 +596,6 @@ class TestGovMode:
 
         event_types = [e[0] for e in events]
         assert "pii" in event_types
-        assert "compliance" not in event_types
         assert "property_enrichment" not in event_types
         assert "complete" in event_types
 
@@ -674,7 +657,6 @@ class TestDBFailureNonFatal:
             patch(f"{_SERVER}.get_engine", return_value=mock_engine),
             patch(f"{_SERVER}.property_prefill.is_configured", return_value=True),
             patch(f"{_SERVER}.property_prefill.enrich_property", new_callable=AsyncMock, return_value=mock_enrichment),
-            patch(f"{_SERVER}.async_run_compliance_check", new_callable=AsyncMock, return_value=mock_compliance_report),
             patch(f"{_SERVER}.save_document", new_callable=AsyncMock, side_effect=Exception("DB connection refused")),
             patch(f"{_SERVER}.save_extraction", new_callable=AsyncMock),
         ]

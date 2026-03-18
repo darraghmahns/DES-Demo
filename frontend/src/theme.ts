@@ -1,22 +1,23 @@
 import { createTheme, type MantineColorsTuple } from '@mantine/core';
 
-const cyan: MantineColorsTuple = [
-  '#e8f4ff',
-  '#d0e8ff',
-  '#a3cfff',
-  '#72b5ff',
-  '#4d9fff',
-  '#3891ff',
-  '#2b89ff',
-  '#1a76e8',
-  '#0969da',
-  '#0058c7',
+const campari: MantineColorsTuple = [
+  '#fcedea',
+  '#f7d7d0',
+  '#efb0a2',
+  '#e78872',
+  '#df6549',
+  '#d95134',
+  '#d14429',
+  '#c63a2b',
+  '#af2f22',
+  '#98251a',
 ];
 
 export const desTheme = createTheme({
-  primaryColor: 'cyan',
+  primaryColor: 'campari',
   colors: {
-    cyan,
+    campari,
+    cyan: campari,
   },
   defaultRadius: 'sm',
 });

@@ -1,31 +1,45 @@
 """Transaction management API routes for D.E.S.
 
 Handles transaction CRUD, participant management, document linking,
-auto-fill from profiles, and transaction completion tracking.
+auto-fill from profiles, Dotloop intake, and setup-progress tracking.
 """
 
+from __future__ import annotations
+
+import asyncio
 import hashlib
 import logging
 import os
-import shutil
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ValidationError
 
-from auth import get_current_user, AUTH_ENABLED
-from db import Transaction, UserProfile, UserDocument, TransactionDocument, DocumentRecord
+from auth import AUTH_ENABLED, get_current_user
+from db import DocumentRecord, Transaction, TransactionDocument, UserDocument, UserProfile
+from db_writer import save_document, save_extraction
+from dotloop_client import DotloopAPIError
+from dotloop_connector import (
+    get_dotloop_client,
+    get_loop_with_details,
+    is_configured as dotloop_configured,
+)
+from ocr_engine import get_engine
+from pdf_converter import get_pdf_info, image_to_base64, pdf_to_images
 from schemas import (
-    DotloopPropertyAddress,
+    DEFAULT_PURCHASE_REQUIREMENTS,
     DocumentRequirement,
+    DotloopLoopDetails,
+    DotloopPropertyAddress,
+    DotloopSyncStatus,
+    ExtractionResult,
     ParticipantRole,
     ParticipantStatus,
     TransactionParticipant,
     TransactionStatus,
-    UserDocumentType,
-    DEFAULT_PURCHASE_REQUIREMENTS,
 )
+from verifier import compute_overall_confidence
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +59,11 @@ class CreateTransactionRequest(BaseModel):
     purchase_price: Optional[float] = None
     earnest_money: Optional[float] = None
     closing_date: Optional[str] = None
+    agent_role: Optional[str] = None  # "listing_agent" | "buying_agent"
+
+
+class CreateTransactionFromDotloopRequest(BaseModel):
+    name_override: Optional[str] = None
     agent_role: Optional[str] = None  # "listing_agent" | "buying_agent"
 
 
@@ -80,16 +99,40 @@ class LinkDocumentRequest(BaseModel):
     offer_extraction_id: Optional[str] = None
 
 
+class DotloopImportDocumentRequest(BaseModel):
+    folder_id: int
+    document_id: int
+    name: str
+
+
+class DotloopImportDocumentsBody(BaseModel):
+    documents: list[DotloopImportDocumentRequest]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_TXN_DOCS_DIR = os.path.join(os.path.dirname(__file__), "test_docs", "txn_docs")
+_DOTLOOP_IMPORTS_DIR = os.path.join(os.path.dirname(__file__), "test_docs", "dotloop_imports")
+_SETUP_BUCKET_WEIGHTS = {
+    "transaction_fields": 35,
+    "participant_acceptance": 20,
+    "participant_profiles": 20,
+    "required_documents": 25,
+}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 async def _get_user_or_dev(user) -> UserProfile:
     if user is not None:
         return user
     if not AUTH_ENABLED:
-        dev_user = await UserProfile.find_one(UserProfile.email == "dev@deslabs.local")
+        dev_user = await UserProfile.find_one({"email": "dev@deslabs.local"})
         if not dev_user:
             dev_user = UserProfile(
                 email="dev@deslabs.local",
@@ -123,6 +166,13 @@ async def _get_transaction_for_user(txn_id: str, user: UserProfile) -> Transacti
     return txn
 
 
+async def _get_owned_transaction(txn_id: str, user: UserProfile) -> Transaction:
+    txn = await _get_transaction_for_user(txn_id, user)
+    if txn.created_by != str(user.id):
+        raise HTTPException(status_code=403, detail="Only the creator can update this transaction")
+    return txn
+
+
 def _merge_property_address(
     existing: Optional[DotloopPropertyAddress],
     updates: Optional[dict],
@@ -150,6 +200,755 @@ def _merge_property_address(
     return DotloopPropertyAddress.model_validate(merged)
 
 
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _user_dotloop_tokens(user: UserProfile | None) -> dict | None:
+    if not user or not getattr(user, "dotloop_tokens", None):
+        return None
+    tokens = user.dotloop_tokens
+    return {
+        "access_token": tokens.access_token,
+        "refresh_token": tokens.refresh_token,
+    }
+
+
+def _parse_datetimeish(value: str | None) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for candidate in (text, text.replace("Z", "+00:00")):
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _get_dotloop_profile_id() -> int:
+    profile_id = os.getenv("DOTLOOP_PROFILE_ID")
+    if not profile_id:
+        raise HTTPException(status_code=500, detail="DOTLOOP_PROFILE_ID is not configured")
+    return int(profile_id)
+
+
+def _parse_floatish(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        cleaned = str(value).replace(",", "").replace("$", "").strip()
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_complete_property_address(address: dict[str, Any] | None) -> bool:
+    if not address:
+        return False
+    required = [
+        "street_number",
+        "street_name",
+        "city",
+        "state_or_province",
+        "postal_code",
+    ]
+    return all(bool(str(address.get(field, "")).strip()) for field in required)
+
+
+def _default_agent_role_for_loop(loop_detail: dict[str, Any]) -> str:
+    transaction_type = str(loop_detail.get("transaction_type") or "").lower()
+    return "listing_agent" if "listing" in transaction_type else "buying_agent"
+
+
+def _agent_role_to_participant_role(agent_role: str) -> ParticipantRole:
+    return ParticipantRole.LISTING_AGENT if agent_role == "listing_agent" else ParticipantRole.BUYING_AGENT
+
+
+def _agent_role_to_side(agent_role: str) -> str:
+    return "seller" if agent_role == "listing_agent" else "buyer"
+
+
+def _dotloop_role_to_participant_role(role: str | None) -> ParticipantRole:
+    normalized = (role or "").strip().upper().replace(" ", "_")
+    mapping = {
+        "BUYER": ParticipantRole.BUYER,
+        "SELLER": ParticipantRole.SELLER,
+        "LISTING_AGENT": ParticipantRole.LISTING_AGENT,
+        "BUYING_AGENT": ParticipantRole.BUYING_AGENT,
+        "LISTING_BROKER": ParticipantRole.LISTING_BROKER,
+        "BUYING_BROKER": ParticipantRole.BUYING_BROKER,
+        "ESCROW_TITLE_REP": ParticipantRole.ESCROW_TITLE_REP,
+        "LOAN_OFFICER": ParticipantRole.LOAN_OFFICER,
+        "INSPECTOR": ParticipantRole.INSPECTOR,
+        "APPRAISER": ParticipantRole.APPRAISER,
+        "TRANSACTION_COORDINATOR": ParticipantRole.TRANSACTION_COORDINATOR,
+    }
+    return mapping.get(normalized, ParticipantRole.OTHER)
+
+
+async def _mark_transaction_dotloop_state(
+    txn: Transaction,
+    *,
+    status: DotloopSyncStatus,
+    last_synced_at: Optional[datetime] = None,
+    last_remote_updated_at: Optional[datetime] = None,
+    error: Optional[str] = None,
+) -> None:
+    txn.dotloop_sync_status = status
+    if last_synced_at is not None:
+        txn.dotloop_last_synced_at = last_synced_at
+    if last_remote_updated_at is not None:
+        txn.dotloop_last_remote_updated_at = last_remote_updated_at
+    txn.dotloop_sync_error = error
+    txn.updated_at = _utcnow()
+    await txn.save()
+
+
+def _setup_bucket_status(score: float) -> str:
+    if score >= 100:
+        return "complete"
+    if score <= 0:
+        return "missing"
+    return "partial"
+
+
+async def _build_setup_progress(txn: Transaction) -> dict[str, Any]:
+    from profile_routes import _compute_completion
+
+    participant_status: list[dict[str, Any]] = []
+    total_profile_completion = 0.0
+    active_count = 0
+    non_removed_count = 0
+
+    for participant in txn.participants:
+        if participant.status == ParticipantStatus.REMOVED:
+            continue
+
+        p_user = await UserProfile.get(participant.user_id)
+        profile_completion = 0.0
+        if p_user:
+            profile_completion = _compute_completion(p_user).overall
+
+        if participant.status == ParticipantStatus.ACTIVE:
+            active_count += 1
+        non_removed_count += 1
+        total_profile_completion += profile_completion
+
+        participant_status.append({
+            "user_id": participant.user_id,
+            "role": participant.role.value,
+            "status": participant.status.value,
+            "name": p_user.name if p_user else "",
+            "email": p_user.email if p_user else "",
+            "profile_completion": round(profile_completion, 1),
+        })
+
+    total_required = sum(1 for req in txn.document_requirements if req.required)
+    satisfied = sum(1 for req in txn.document_requirements if req.required and req.satisfied)
+    doc_completion = round((satisfied / total_required * 100) if total_required else 100.0, 1)
+
+    transaction_field_reasons: list[str] = []
+    if not txn.name or not txn.name.strip():
+        transaction_field_reasons.append("Transaction name is missing.")
+    if not txn.transaction_type or not str(txn.transaction_type).strip():
+        transaction_field_reasons.append("Transaction type is missing.")
+    if not txn.agent_side:
+        transaction_field_reasons.append("Deal side is missing.")
+    address = txn.property_address.model_dump(mode="json") if txn.property_address else None
+    if not _is_complete_property_address(address):
+        transaction_field_reasons.append(
+            "Property address needs street number, street name, city, state, and ZIP."
+        )
+    transaction_fields_score = 100.0 if not transaction_field_reasons else round(
+        ((4 - len(transaction_field_reasons)) / 4) * 100,
+        1,
+    )
+
+    if non_removed_count <= 1:
+        participant_acceptance_score = 100.0
+        participant_acceptance_reasons: list[str] = []
+    else:
+        participant_acceptance_score = round((active_count / non_removed_count) * 100, 1)
+        pending = non_removed_count - active_count
+        participant_acceptance_reasons = [] if pending == 0 else [
+            f"{pending} participant{'s' if pending != 1 else ''} still need to accept the invitation."
+        ]
+
+    participant_profiles_score = round(
+        (total_profile_completion / len(participant_status)) if participant_status else 0.0,
+        1,
+    )
+    participant_profile_reasons = [
+        f"{participant['name'] or participant['email'] or 'Participant'} profile is only {round(participant['profile_completion'])}% complete."
+        for participant in participant_status
+        if participant["profile_completion"] < 100
+    ]
+
+    missing_requirements = [
+        f"{req.role.value.replace('_', ' ').title()}: {req.doc_type.value.replace('_', ' ')}"
+        for req in txn.document_requirements
+        if req.required and not req.satisfied
+    ]
+    document_reasons = [] if not missing_requirements else [
+        f"Missing required documents: {', '.join(missing_requirements[:4])}{'...' if len(missing_requirements) > 4 else ''}."
+    ]
+
+    buckets = [
+        {
+            "key": "transaction_fields",
+            "label": "Transaction Fields",
+            "weight": _SETUP_BUCKET_WEIGHTS["transaction_fields"],
+            "score": transaction_fields_score,
+            "status": _setup_bucket_status(transaction_fields_score),
+            "reasons": transaction_field_reasons,
+        },
+        {
+            "key": "participant_acceptance",
+            "label": "Participant Acceptance",
+            "weight": _SETUP_BUCKET_WEIGHTS["participant_acceptance"],
+            "score": participant_acceptance_score,
+            "status": _setup_bucket_status(participant_acceptance_score),
+            "reasons": participant_acceptance_reasons,
+        },
+        {
+            "key": "participant_profiles",
+            "label": "Participant Profiles",
+            "weight": _SETUP_BUCKET_WEIGHTS["participant_profiles"],
+            "score": participant_profiles_score,
+            "status": _setup_bucket_status(participant_profiles_score),
+            "reasons": participant_profile_reasons,
+        },
+        {
+            "key": "required_documents",
+            "label": "Required Documents",
+            "weight": _SETUP_BUCKET_WEIGHTS["required_documents"],
+            "score": doc_completion,
+            "status": _setup_bucket_status(doc_completion),
+            "reasons": document_reasons,
+        },
+    ]
+
+    overall = round(
+        sum(bucket["score"] * bucket["weight"] for bucket in buckets) / 100,
+        1,
+    )
+
+    blockers: list[str] = []
+    for bucket in buckets:
+        blockers.extend(bucket["reasons"])
+
+    return {
+        "kind": "setup_progress",
+        "overall": overall,
+        "blockers": blockers,
+        "buckets": buckets,
+        "participants": participant_status,
+        "documents": {
+            "total_required": total_required,
+            "satisfied": satisfied,
+            "completion": doc_completion,
+            "requirements": [
+                {
+                    "doc_type": req.doc_type.value,
+                    "role": req.role.value,
+                    "required": req.required,
+                    "satisfied": req.satisfied,
+                }
+                for req in txn.document_requirements
+            ],
+        },
+    }
+
+
+def _build_dotloop_preview(loop_detail: dict[str, Any], existing_transaction_id: Optional[str] = None) -> dict[str, Any]:
+    warnings: list[str] = []
+    property_address = dict(loop_detail.get("property_address") or {})
+    if not _is_complete_property_address(property_address):
+        warnings.append("Dotloop loop is missing a complete property address.")
+
+    closing_dt = _parse_datetimeish((loop_detail.get("contract_dates") or {}).get("closing_date"))
+    purchase_price = _parse_floatish((loop_detail.get("financials") or {}).get("purchase_price"))
+    earnest_money = _parse_floatish((loop_detail.get("financials") or {}).get("earnest_money"))
+
+    participant_suggestions = []
+    for participant in loop_detail.get("participants") or []:
+        role = _dotloop_role_to_participant_role(participant.get("role"))
+        email = (participant.get("email") or "").strip()
+        if not email:
+            warnings.append(
+                f"Skipped Dotloop participant '{participant.get('full_name') or participant.get('role') or 'Unknown'}' because no email was provided."
+            )
+        participant_suggestions.append({
+            "name": participant.get("full_name") or "",
+            "email": email or None,
+            "role": role.value,
+            "source_role": participant.get("role") or "",
+            "can_invite": bool(email),
+        })
+
+    documents = loop_detail.get("documents") or []
+    pdf_count = sum(1 for document in documents if str(document.get("name", "")).lower().endswith(".pdf"))
+
+    return {
+        "normalized_transaction": {
+            "name": loop_detail.get("name") or f"Dotloop Loop {loop_detail.get('id')}",
+            "transaction_type": loop_detail.get("transaction_type") or "purchase",
+            "property_address": property_address if property_address else None,
+            "purchase_price": purchase_price,
+            "earnest_money": earnest_money,
+            "closing_date": closing_dt.isoformat() if closing_dt else None,
+            "dotloop_loop_id": str(loop_detail.get("id")),
+        },
+        "participant_suggestions": participant_suggestions,
+        "available_documents": {
+            "total": len(documents),
+            "pdf_count": pdf_count,
+            "documents": documents,
+        },
+        "warnings": warnings,
+        "existing_transaction_id": existing_transaction_id,
+    }
+
+
+async def _ensure_transaction_document_link(
+    txn: Transaction,
+    *,
+    doc_record: DocumentRecord,
+    uploaded_by: str,
+    filename: str,
+    file_hash: str,
+    doc_type: str = "dotloop_document",
+) -> Optional[TransactionDocument]:
+    existing_link = await TransactionDocument.find_one(
+        {
+            "transaction_id": str(txn.id),
+            "document_record_id": str(doc_record.id),
+        }
+    )
+    if existing_link:
+        return None
+
+    link = TransactionDocument(
+        transaction_id=str(txn.id),
+        doc_type=doc_type,
+        source="dotloop",
+        filename=filename,
+        file_path=doc_record.file_path or "",
+        file_hash=file_hash,
+        document_record_id=str(doc_record.id),
+        uploaded_by=uploaded_by,
+    )
+    await link.insert()
+    return link
+
+
+async def _import_dotloop_document(
+    *,
+    txn: Transaction,
+    user: UserProfile,
+    profile_id: int,
+    loop_id: int,
+    folder_id: int,
+    document_id: int,
+    name: str,
+    user_tokens: dict | None,
+) -> dict[str, Any]:
+    composite_source_id = f"{loop_id}:{folder_id}:{document_id}"
+    existing_doc = await DocumentRecord.find_one({"source_id": composite_source_id})
+    if existing_doc:
+        linked = await _ensure_transaction_document_link(
+            txn,
+            doc_record=existing_doc,
+            uploaded_by=str(user.id),
+            filename=existing_doc.filename,
+            file_hash=existing_doc.file_hash or "",
+        )
+        latest_extraction_id = f"{existing_doc.id}:{len(existing_doc.extractions) - 1}" if existing_doc.extractions else None
+        if latest_extraction_id and str(existing_doc.id) not in txn.extraction_ids:
+            txn.extraction_ids.append(str(existing_doc.id))
+            txn.updated_at = _utcnow()
+            await txn.save()
+        return {
+            "local_document_id": str(existing_doc.id),
+            "extraction_id": latest_extraction_id,
+            "filename": existing_doc.filename,
+            "duplicate": True,
+            "linked_existing": bool(linked),
+        }
+
+    os.makedirs(_DOTLOOP_IMPORTS_DIR, exist_ok=True)
+
+    with get_dotloop_client(user_tokens=user_tokens) as client:
+        pdf_bytes = client.download_document(
+            profile_id=profile_id,
+            loop_id=loop_id,
+            folder_id=folder_id,
+            document_id=document_id,
+        )
+
+    file_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    safe_name = name or f"dotloop-{document_id}.pdf"
+    dest_filename = f"{file_hash[:12]}_{safe_name}"
+    dest_path = os.path.join(_DOTLOOP_IMPORTS_DIR, dest_filename)
+    with open(dest_path, "wb") as handle:
+        handle.write(pdf_bytes)
+
+    try:
+        engine = get_engine()
+        mode = "real_estate"
+        if engine.prefers_file_path:
+            raw_extraction, _ = engine.extract_from_file(dest_path, mode)
+        else:
+            images = pdf_to_images(dest_path)
+            images_b64 = [image_to_base64(img) for img in images]
+            raw_extraction, _ = engine.extract(images_b64, mode)
+
+        validated = DotloopLoopDetails.model_validate(raw_extraction)
+        validated_data = validated.model_dump(mode="json")
+        if engine.prefers_file_path:
+            citations, _ = engine.verify_from_file(dest_path, validated_data)
+        else:
+            citations, _ = engine.verify(images_b64, validated_data)  # type: ignore[name-defined]
+
+        overall_confidence = compute_overall_confidence(citations)
+        file_info = get_pdf_info(dest_path)
+        result = ExtractionResult(
+            mode=mode,
+            source_file=safe_name,
+            extraction_timestamp=_utcnow().isoformat(),
+            pages_processed=file_info["pages"],
+            dotloop_data=validated_data,
+            dotloop_api_payload=validated.to_dotloop_api_format(),
+            citations=citations,
+            overall_confidence=overall_confidence,
+        )
+
+        doc_id = await save_document(
+            filename=safe_name,
+            mode=mode,
+            page_count=file_info["pages"],
+            file_size_bytes=len(pdf_bytes),
+            source="dotloop",
+            source_id=composite_source_id,
+            file_hash=file_hash,
+            file_path=dest_path,
+            user_id=str(user.id),
+            org_id=user.org_id,
+        )
+        extraction_id = await save_extraction(document_id=doc_id, result=result, engine=engine.name)
+        doc_record = await DocumentRecord.get(doc_id)
+        if not doc_record:
+            raise RuntimeError("Imported Dotloop document was not persisted")
+        await _ensure_transaction_document_link(
+            txn,
+            doc_record=doc_record,
+            uploaded_by=str(user.id),
+            filename=safe_name,
+            file_hash=file_hash,
+        )
+        if str(doc_record.id) not in txn.extraction_ids:
+            txn.extraction_ids.append(str(doc_record.id))
+        txn.updated_at = _utcnow()
+        await txn.save()
+        return {
+            "local_document_id": str(doc_record.id),
+            "extraction_id": extraction_id,
+            "filename": safe_name,
+            "duplicate": False,
+            "linked_existing": False,
+        }
+    except Exception:
+        if os.path.exists(dest_path):
+            os.unlink(dest_path)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Dotloop create/import flows
+# ---------------------------------------------------------------------------
+
+
+@router.post("/from-dotloop/{loop_id}/preview")
+async def preview_transaction_from_dotloop(
+    loop_id: int,
+    body: CreateTransactionFromDotloopRequest = CreateTransactionFromDotloopRequest(),
+    user=Depends(get_current_user),
+):
+    """Preview a local transaction draft created from a Dotloop loop."""
+    u = await _get_user_or_dev(user)
+    user_tokens = _user_dotloop_tokens(u)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=400, detail="Dotloop is not connected")
+
+    try:
+        loop_detail = await asyncio.to_thread(get_loop_with_details, loop_id, None, user_tokens)
+    except DotloopAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+
+    existing = await Transaction.find_one({"dotloop_loop_id": str(loop_id)})
+    preview = _build_dotloop_preview(loop_detail, str(existing.id) if existing else None)
+    normalized = preview["normalized_transaction"]
+    if body.name_override:
+        normalized["name"] = body.name_override.strip()
+    agent_role = body.agent_role or _default_agent_role_for_loop(loop_detail)
+    normalized["agent_role"] = agent_role
+    normalized["agent_side"] = _agent_role_to_side(agent_role)
+    return preview
+
+
+@router.post("/from-dotloop/{loop_id}")
+async def create_transaction_from_dotloop(
+    loop_id: int,
+    body: CreateTransactionFromDotloopRequest = CreateTransactionFromDotloopRequest(),
+    user=Depends(get_current_user),
+):
+    """Create a local transaction from an existing Dotloop loop."""
+    u = await _get_user_or_dev(user)
+    existing = await Transaction.find_one({"dotloop_loop_id": str(loop_id)})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A transaction is already linked to this Dotloop loop",
+                "existing_transaction_id": str(existing.id),
+            },
+        )
+
+    user_tokens = _user_dotloop_tokens(u)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=400, detail="Dotloop is not connected")
+
+    try:
+        loop_detail = await asyncio.to_thread(get_loop_with_details, loop_id, None, user_tokens)
+    except DotloopAPIError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+
+    preview = _build_dotloop_preview(loop_detail)
+    draft = preview["normalized_transaction"]
+    agent_role = body.agent_role or _default_agent_role_for_loop(loop_detail)
+    creator_role = _agent_role_to_participant_role(agent_role)
+    creator_participant = TransactionParticipant(
+        user_id=str(u.id),
+        role=creator_role,
+        status=ParticipantStatus.ACTIVE,
+        added_at=_utcnow(),
+    )
+
+    property_address = None
+    if _is_complete_property_address(draft.get("property_address")):
+        property_address = DotloopPropertyAddress.model_validate(draft["property_address"])
+
+    txn = Transaction(
+        name=body.name_override.strip() if body.name_override else draft["name"],
+        transaction_type=str(draft.get("transaction_type") or "purchase"),
+        status=TransactionStatus.DRAFT,
+        property_address=property_address,
+        purchase_price=draft.get("purchase_price"),
+        earnest_money=draft.get("earnest_money"),
+        closing_date=_parse_datetimeish(draft.get("closing_date")),
+        participants=[creator_participant],
+        document_requirements=(
+            [r.model_copy() for r in DEFAULT_PURCHASE_REQUIREMENTS]
+            if str(draft.get("transaction_type") or "purchase") == "purchase"
+            else []
+        ),
+        created_by=str(u.id),
+        org_id=u.org_id,
+        agent_side=_agent_role_to_side(agent_role),
+        dotloop_loop_id=str(loop_id),
+        dotloop_sync_status=DotloopSyncStatus.CURRENT,
+        dotloop_last_synced_at=_utcnow(),
+        dotloop_last_remote_updated_at=_parse_datetimeish(loop_detail.get("updated")),
+        dotloop_sync_error=None,
+    )
+
+    participants_by_user_id = {str(u.id)}
+    for participant in preview["participant_suggestions"]:
+        email = participant.get("email")
+        if not email:
+            continue
+        email = _normalize_email(str(email))
+        existing_user = await UserProfile.find_one({"email": email})
+        if not existing_user:
+            existing_user = UserProfile(
+                email=email,
+                name=str(participant.get("name") or ""),
+                has_clerk_account=False,
+            )
+            await existing_user.insert()
+        if str(existing_user.id) in participants_by_user_id:
+            continue
+        participants_by_user_id.add(str(existing_user.id))
+        txn.participants.append(
+            TransactionParticipant(
+                user_id=str(existing_user.id),
+                role=ParticipantRole(participant["role"]),
+                status=ParticipantStatus.INVITED,
+                added_at=_utcnow(),
+                added_by=str(u.id),
+            )
+        )
+
+    await txn.insert()
+    log.info("Transaction %s created from Dotloop loop %s", txn.id, loop_id)
+    return _serialize_transaction(txn)
+
+
+@router.get("/{txn_id}/dotloop/documents")
+async def list_dotloop_documents_for_transaction(txn_id: str, user=Depends(get_current_user)):
+    """List importable Dotloop documents for the linked loop on a transaction."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+    if not txn.dotloop_loop_id:
+        raise HTTPException(status_code=400, detail="Transaction is not linked to a Dotloop loop")
+
+    user_tokens = _user_dotloop_tokens(u)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=400, detail="Dotloop is not connected")
+
+    try:
+        loop_detail = await asyncio.to_thread(get_loop_with_details, int(txn.dotloop_loop_id), None, user_tokens)
+    except DotloopAPIError as exc:
+        await _mark_transaction_dotloop_state(txn, status=DotloopSyncStatus.ERROR, error=exc.message)
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+
+    documents = loop_detail.get("documents") or []
+    composite_ids = [f"{txn.dotloop_loop_id}:{doc.get('folder_id')}:{doc.get('id')}" for doc in documents]
+    imported_docs = await DocumentRecord.find({"source_id": {"$in": composite_ids}}).to_list() if composite_ids else []
+    imported_ids = {doc.source_id for doc in imported_docs}
+
+    folders: dict[str, dict[str, Any]] = {}
+    for document in documents:
+        folder_key = str(document.get("folder_id"))
+        folder = folders.setdefault(
+            folder_key,
+            {
+                "folder_id": document.get("folder_id"),
+                "folder_name": document.get("folder_name") or "Unfiled",
+                "documents": [],
+            },
+        )
+        composite_id = f"{txn.dotloop_loop_id}:{document.get('folder_id')}:{document.get('id')}"
+        name = str(document.get("name") or "")
+        folder["documents"].append({
+            "folder_id": document.get("folder_id"),
+            "folder_name": document.get("folder_name") or "Unfiled",
+            "document_id": document.get("id"),
+            "name": name,
+            "is_pdf": name.lower().endswith(".pdf"),
+            "already_imported": composite_id in imported_ids,
+        })
+
+    return {
+        "loop_id": txn.dotloop_loop_id,
+        "folders": list(folders.values()),
+    }
+
+
+@router.post("/{txn_id}/dotloop/import-documents")
+async def import_dotloop_documents(
+    txn_id: str,
+    body: DotloopImportDocumentsBody,
+    user=Depends(get_current_user),
+):
+    """Import selected Dotloop PDFs into the local transaction."""
+    if len(body.documents) == 0:
+        raise HTTPException(status_code=400, detail="Select at least one document to import")
+    if len(body.documents) > 5:
+        raise HTTPException(status_code=400, detail="You can import at most 5 documents at a time")
+
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+    if not txn.dotloop_loop_id:
+        raise HTTPException(status_code=400, detail="Transaction is not linked to a Dotloop loop")
+
+    user_tokens = _user_dotloop_tokens(u)
+    if not dotloop_configured(user_tokens=user_tokens):
+        raise HTTPException(status_code=400, detail="Dotloop is not connected")
+
+    results = []
+    failures = 0
+    loop_id = int(txn.dotloop_loop_id)
+    for document in body.documents:
+        if not document.name.lower().endswith(".pdf"):
+            results.append({
+                "name": document.name,
+                "document_id": document.document_id,
+                "duplicate": False,
+                "failed": True,
+                "error": "Only PDF documents can be imported.",
+            })
+            failures += 1
+            continue
+
+        try:
+            imported = await _import_dotloop_document(
+                txn=txn,
+                user=u,
+                profile_id=_get_dotloop_profile_id(),
+                loop_id=loop_id,
+                folder_id=document.folder_id,
+                document_id=document.document_id,
+                name=document.name,
+                user_tokens=user_tokens,
+            )
+            results.append({
+                "name": document.name,
+                "document_id": document.document_id,
+                "failed": False,
+                **imported,
+            })
+        except DotloopAPIError as exc:
+            failures += 1
+            results.append({
+                "name": document.name,
+                "document_id": document.document_id,
+                "duplicate": False,
+                "failed": True,
+                "error": exc.message,
+            })
+        except Exception as exc:  # pragma: no cover - exercised via endpoint behavior
+            failures += 1
+            log.exception("Failed to import Dotloop document %s from loop %s", document.document_id, loop_id)
+            results.append({
+                "name": document.name,
+                "document_id": document.document_id,
+                "duplicate": False,
+                "failed": True,
+                "error": str(exc),
+            })
+
+    if failures == len(body.documents):
+        await _mark_transaction_dotloop_state(txn, status=DotloopSyncStatus.ERROR, error="All selected Dotloop imports failed")
+    else:
+        await _mark_transaction_dotloop_state(
+            txn,
+            status=DotloopSyncStatus.CURRENT,
+            last_synced_at=_utcnow(),
+            error=None,
+        )
+
+    return {
+        "results": results,
+        "imported": sum(1 for result in results if not result.get("failed") and not result.get("duplicate")),
+        "duplicates": sum(1 for result in results if result.get("duplicate")),
+        "failed": failures,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Transaction CRUD
 # ---------------------------------------------------------------------------
@@ -163,26 +962,17 @@ async def create_transaction(
     """Create a new transaction. Creator is auto-added as a participant."""
     u = await _get_user_or_dev(user)
 
-    # Parse property address if provided
     prop_addr = None
     if req.property_address:
         try:
             prop_addr = _merge_property_address(None, req.property_address)
         except Exception:
-            pass  # Allow partial address data
-
-    # Parse closing date
-    closing = None
-    if req.closing_date:
-        try:
-            closing = datetime.fromisoformat(req.closing_date)
-        except ValueError:
             pass
 
-    # Determine creator's participant role and agent_side
+    closing = _parse_datetimeish(req.closing_date)
+
     from schemas import UserType
 
-    # Prefer explicit agent_role from request if provided
     if req.agent_role == "listing_agent":
         creator_role = ParticipantRole.LISTING_AGENT
         agent_side = "seller"
@@ -206,13 +996,10 @@ async def create_transaction(
         user_id=str(u.id),
         role=creator_role,
         status=ParticipantStatus.ACTIVE,
-        added_at=datetime.now(timezone.utc),
+        added_at=_utcnow(),
     )
 
-    # Default document requirements for purchase transactions
-    doc_reqs = []
-    if req.transaction_type == "purchase":
-        doc_reqs = [r.model_copy() for r in DEFAULT_PURCHASE_REQUIREMENTS]
+    doc_reqs = [r.model_copy() for r in DEFAULT_PURCHASE_REQUIREMENTS] if req.transaction_type == "purchase" else []
 
     txn = Transaction(
         name=req.name,
@@ -231,7 +1018,6 @@ async def create_transaction(
     )
     await txn.insert()
     log.info("Transaction created: %s by user %s", txn.id, u.id)
-
     return _serialize_transaction(txn)
 
 
@@ -244,29 +1030,20 @@ async def list_transactions(
     u = await _get_user_or_dev(user)
     uid = str(u.id)
 
-    # Find transactions where user is creator or participant
-    query = {
-        "$or": [
-            {"created_by": uid},
-            {"participants.user_id": uid},
-        ]
-    }
+    query = {"$or": [{"created_by": uid}, {"participants.user_id": uid}]}
     if status:
         query["status"] = status.value
 
     txns = await Transaction.find(query).sort("-created_at").to_list()
-
-    # Filter out removed participants from the user's perspective
     results = []
     for txn in txns:
         is_creator = txn.created_by == uid
         is_active_participant = any(
-            p.user_id == uid and p.status != ParticipantStatus.REMOVED
-            for p in txn.participants
+            participant.user_id == uid and participant.status != ParticipantStatus.REMOVED
+            for participant in txn.participants
         )
         if is_creator or is_active_participant:
             results.append(_serialize_transaction(txn))
-
     return results
 
 
@@ -286,10 +1063,7 @@ async def update_transaction(
 ):
     """Update a transaction's details. Only creator can update."""
     u = await _get_user_or_dev(user)
-    txn = await _get_transaction_for_user(txn_id, u)
-
-    if txn.created_by != str(u.id):
-        raise HTTPException(status_code=403, detail="Only the creator can update this transaction")
+    txn = await _get_owned_transaction(txn_id, u)
 
     if req.name is not None:
         txn.name = req.name
@@ -304,10 +1078,9 @@ async def update_transaction(
     if req.earnest_money is not None:
         txn.earnest_money = req.earnest_money
     if req.closing_date is not None:
-        try:
-            txn.closing_date = datetime.fromisoformat(req.closing_date)
-        except ValueError:
-            pass
+        parsed = _parse_datetimeish(req.closing_date)
+        if parsed:
+            txn.closing_date = parsed
     if req.property_address is not None:
         try:
             txn.property_address = _merge_property_address(txn.property_address, req.property_address)
@@ -321,12 +1094,11 @@ async def update_transaction(
             ) from exc
     if req.document_requirements is not None:
         txn.document_requirements = [
-            DocumentRequirement.model_validate(r) for r in req.document_requirements
+            DocumentRequirement.model_validate(requirement) for requirement in req.document_requirements
         ]
 
-    txn.updated_at = datetime.now(timezone.utc)
+    txn.updated_at = _utcnow()
     await txn.save()
-
     return _serialize_transaction(txn)
 
 
@@ -334,10 +1106,7 @@ async def update_transaction(
 async def delete_transaction(txn_id: str, user=Depends(get_current_user)):
     """Delete a transaction. Only allowed for DRAFT status."""
     u = await _get_user_or_dev(user)
-    txn = await _get_transaction_for_user(txn_id, u)
-
-    if txn.created_by != str(u.id):
-        raise HTTPException(status_code=403, detail="Only the creator can delete this transaction")
+    txn = await _get_owned_transaction(txn_id, u)
 
     if txn.status != TransactionStatus.DRAFT:
         raise HTTPException(status_code=400, detail="Only draft transactions can be deleted")
@@ -359,15 +1128,23 @@ async def set_dotloop_loop(
 ):
     """Link a Dotloop loop ID to a transaction."""
     u = await _get_user_or_dev(user)
-    txn = await _get_transaction_for_user(txn_id, u)
+    txn = await _get_owned_transaction(txn_id, u)
 
-    if txn.created_by != str(u.id):
-        raise HTTPException(status_code=403, detail="Only the creator can link a loop")
+    existing = await Transaction.find_one({"dotloop_loop_id": body.loop_id, "_id": {"$ne": txn.id}})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "That Dotloop loop is already linked to another transaction",
+                "existing_transaction_id": str(existing.id),
+            },
+        )
 
     txn.dotloop_loop_id = body.loop_id
-    txn.updated_at = datetime.now(timezone.utc)
+    txn.dotloop_sync_status = DotloopSyncStatus.NEVER
+    txn.dotloop_sync_error = None
+    txn.updated_at = _utcnow()
     await txn.save()
-
     return _serialize_transaction(txn)
 
 
@@ -386,11 +1163,10 @@ async def add_participant(
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
 
-    # Find or create the participant user
-    participant_user = await UserProfile.find_one(UserProfile.email == req.email)
+    participant_user = await UserProfile.find_one({"email": _normalize_email(req.email)})
     if not participant_user:
         participant_user = UserProfile(
-            email=req.email,
+            email=_normalize_email(req.email),
             name=req.name or "",
             has_clerk_account=False,
         )
@@ -398,41 +1174,36 @@ async def add_participant(
         log.info("Created placeholder user for %s", req.email)
 
     pid = str(participant_user.id)
-
-    # Check for duplicates (allow re-adding removed participants)
-    existing = next(
-        (p for p in txn.participants if p.user_id == pid),
-        None,
-    )
+    existing = next((participant for participant in txn.participants if participant.user_id == pid), None)
     if existing:
         if existing.status == ParticipantStatus.REMOVED:
             existing.status = ParticipantStatus.INVITED
             existing.role = req.role
             existing.removed_at = None
-            existing.added_at = datetime.now(timezone.utc)
+            existing.added_at = _utcnow()
             existing.added_by = str(u.id)
         elif existing.status in (ParticipantStatus.INVITED, ParticipantStatus.ACTIVE):
             raise HTTPException(status_code=400, detail="Participant already in transaction")
     else:
-        participant = TransactionParticipant(
-            user_id=pid,
-            role=req.role,
-            status=ParticipantStatus.INVITED,
-            added_at=datetime.now(timezone.utc),
-            added_by=str(u.id),
+        txn.participants.append(
+            TransactionParticipant(
+                user_id=pid,
+                role=req.role,
+                status=ParticipantStatus.INVITED,
+                added_at=_utcnow(),
+                added_by=str(u.id),
+            )
         )
-        txn.participants.append(participant)
 
-    txn.updated_at = datetime.now(timezone.utc)
+    txn.updated_at = _utcnow()
     await txn.save()
-
     return {
         "participant": {
             "user_id": pid,
             "email": participant_user.email,
             "name": participant_user.name,
             "role": req.role.value,
-            "status": "invited",
+            "status": ParticipantStatus.INVITED.value,
         },
         "transaction_id": str(txn.id),
     }
@@ -449,19 +1220,15 @@ async def update_participant(
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
 
-    participant = next(
-        (p for p in txn.participants if p.user_id == participant_uid),
-        None,
-    )
+    participant = next((item for item in txn.participants if item.user_id == participant_uid), None)
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
 
     if req.role is not None:
         participant.role = req.role
 
-    txn.updated_at = datetime.now(timezone.utc)
+    txn.updated_at = _utcnow()
     await txn.save()
-
     return {"updated": True}
 
 
@@ -475,23 +1242,17 @@ async def remove_participant(
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
 
-    # Only creator can remove participants (or self-remove)
     if txn.created_by != str(u.id) and participant_uid != str(u.id):
         raise HTTPException(status_code=403, detail="Only the creator can remove participants")
 
-    participant = next(
-        (p for p in txn.participants if p.user_id == participant_uid),
-        None,
-    )
+    participant = next((item for item in txn.participants if item.user_id == participant_uid), None)
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
 
     participant.status = ParticipantStatus.REMOVED
-    participant.removed_at = datetime.now(timezone.utc)
-
-    txn.updated_at = datetime.now(timezone.utc)
+    participant.removed_at = _utcnow()
+    txn.updated_at = _utcnow()
     await txn.save()
-
     return {"removed": True}
 
 
@@ -509,17 +1270,8 @@ async def list_transaction_documents(
     u = await _get_user_or_dev(user)
     await _get_transaction_for_user(txn_id, u)
 
-    docs = await TransactionDocument.find(
-        TransactionDocument.transaction_id == txn_id
-    ).sort("-uploaded_at").to_list()
-
-    return [
-        {
-            "_id": str(d.id),
-            **d.model_dump(mode="json"),
-        }
-        for d in docs
-    ]
+    docs = await TransactionDocument.find({"transaction_id": txn_id}).sort("-uploaded_at").to_list()
+    return [{"_id": str(doc.id), **doc.model_dump(mode="json")} for doc in docs]
 
 
 @router.post("/{txn_id}/documents")
@@ -532,12 +1284,10 @@ async def link_document_to_transaction(
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
 
-    # Get the source user document
     user_doc = await UserDocument.get(req.user_document_id)
     if not user_doc:
         raise HTTPException(status_code=404, detail="User document not found")
 
-    # Create transaction document reference
     txn_doc = TransactionDocument(
         transaction_id=str(txn.id),
         doc_type=req.doc_type,
@@ -551,33 +1301,22 @@ async def link_document_to_transaction(
     )
     await txn_doc.insert()
 
-    # Check if this satisfies a document requirement
-    for dreq in txn.document_requirements:
-        if dreq.doc_type.value == req.doc_type and not dreq.satisfied:
-            # Check if the uploader has the right role
-            participant = next(
-                (p for p in txn.participants if p.user_id == user_doc.user_id),
-                None,
-            )
-            if participant and participant.role == dreq.role:
-                dreq.satisfied = True
-                dreq.satisfied_by = req.user_document_id
+    for requirement in txn.document_requirements:
+        if requirement.doc_type.value == req.doc_type and not requirement.satisfied:
+            participant = next((item for item in txn.participants if item.user_id == user_doc.user_id), None)
+            if participant and participant.role == requirement.role:
+                requirement.satisfied = True
+                requirement.satisfied_by = req.user_document_id
                 break
 
-    txn.updated_at = datetime.now(timezone.utc)
+    txn.updated_at = _utcnow()
     await txn.save()
-
-    return {
-        "_id": str(txn_doc.id),
-        **txn_doc.model_dump(mode="json"),
-    }
+    return {"_id": str(txn_doc.id), **txn_doc.model_dump(mode="json")}
 
 
 # ---------------------------------------------------------------------------
 # Offer-Scoped Document Upload
 # ---------------------------------------------------------------------------
-
-_TXN_DOCS_DIR = os.path.join(os.path.dirname(__file__), "test_docs", "txn_docs")
 
 
 @router.post("/{txn_id}/documents/upload-file")
@@ -600,8 +1339,8 @@ async def upload_offer_document(
     file_hash = hashlib.sha256(contents).hexdigest()
     dest_filename = f"{file_hash[:12]}_{file.filename}"
     dest_path = os.path.join(_TXN_DOCS_DIR, dest_filename)
-    with open(dest_path, "wb") as f:
-        f.write(contents)
+    with open(dest_path, "wb") as handle:
+        handle.write(contents)
 
     txn_doc = TransactionDocument(
         transaction_id=txn_id,
@@ -614,15 +1353,11 @@ async def upload_offer_document(
         offer_extraction_id=offer_extraction_id,
     )
     await txn_doc.insert()
-
-    return {
-        "_id": str(txn_doc.id),
-        **txn_doc.model_dump(mode="json"),
-    }
+    return {"_id": str(txn_doc.id), **txn_doc.model_dump(mode="json")}
 
 
 # ---------------------------------------------------------------------------
-# Auto-Fill & Completion
+# Auto-Fill & Setup Progress
 # ---------------------------------------------------------------------------
 
 
@@ -636,6 +1371,7 @@ async def auto_fill_transaction(
     txn = await _get_transaction_for_user(txn_id, u)
 
     filled_fields = []
+    from profile_routes import _compute_completion
 
     for participant in txn.participants:
         if participant.status == ParticipantStatus.REMOVED:
@@ -645,25 +1381,18 @@ async def auto_fill_transaction(
         if not p_user:
             continue
 
-        # Auto-fill from buyer's pre-approval
         if participant.role == ParticipantRole.BUYER and p_user.buyer_profile:
-            bp = p_user.buyer_profile
-            if bp.pre_approval_amount and not txn.purchase_price:
-                txn.purchase_price = bp.pre_approval_amount
+            buyer_profile = p_user.buyer_profile
+            if buyer_profile.pre_approval_amount and not txn.purchase_price:
+                txn.purchase_price = buyer_profile.pre_approval_amount
                 filled_fields.append("purchase_price (from buyer pre-approval)")
 
-        # Update participant completion
-        from profile_routes import _compute_completion
         completion = _compute_completion(p_user)
         participant.profile_completion = completion.overall
 
-    txn.updated_at = datetime.now(timezone.utc)
+    txn.updated_at = _utcnow()
     await txn.save()
-
-    return {
-        "filled_fields": filled_fields,
-        "transaction": _serialize_transaction(txn),
-    }
+    return {"filled_fields": filled_fields, "transaction": _serialize_transaction(txn)}
 
 
 @router.get("/{txn_id}/completion")
@@ -671,63 +1400,10 @@ async def get_transaction_completion(
     txn_id: str,
     user=Depends(get_current_user),
 ):
-    """Get transaction readiness: participant profiles + document requirements."""
+    """Get setup progress for the transaction."""
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
-
-    # Participant readiness
-    participant_status = []
-    for p in txn.participants:
-        if p.status == ParticipantStatus.REMOVED:
-            continue
-
-        p_user = await UserProfile.get(p.user_id)
-        p_info = {
-            "user_id": p.user_id,
-            "role": p.role.value,
-            "status": p.status.value,
-            "name": p_user.name if p_user else "",
-            "email": p_user.email if p_user else "",
-            "profile_completion": 0.0,
-        }
-
-        if p_user:
-            from profile_routes import _compute_completion
-            completion = _compute_completion(p_user)
-            p_info["profile_completion"] = completion.overall
-
-        participant_status.append(p_info)
-
-    # Document requirements
-    total_required = sum(1 for r in txn.document_requirements if r.required)
-    satisfied = sum(1 for r in txn.document_requirements if r.required and r.satisfied)
-    doc_completion = (satisfied / total_required * 100) if total_required else 100.0
-
-    # Overall readiness
-    avg_profile = (
-        sum(p["profile_completion"] for p in participant_status) / len(participant_status)
-        if participant_status else 0
-    )
-    overall = round((avg_profile * 0.5 + doc_completion * 0.5), 1)
-
-    return {
-        "overall": overall,
-        "participants": participant_status,
-        "documents": {
-            "total_required": total_required,
-            "satisfied": satisfied,
-            "completion": round(doc_completion, 1),
-            "requirements": [
-                {
-                    "doc_type": r.doc_type.value,
-                    "role": r.role.value,
-                    "required": r.required,
-                    "satisfied": r.satisfied,
-                }
-                for r in txn.document_requirements
-            ],
-        },
-    }
+    return await _build_setup_progress(txn)
 
 
 # ---------------------------------------------------------------------------
@@ -745,10 +1421,7 @@ async def link_extraction(
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
 
-    # extraction_id may be composite "doc_id:idx" from save_extraction — use only the doc_id part
-    doc_id = extraction_id.split(':')[0] if ':' in extraction_id else extraction_id
-
-    # Validate the extraction exists
+    doc_id = extraction_id.split(":")[0] if ":" in extraction_id else extraction_id
     try:
         doc_record = await DocumentRecord.get(doc_id)
     except Exception:
@@ -756,11 +1429,9 @@ async def link_extraction(
     if not doc_record:
         raise HTTPException(status_code=404, detail="Extraction not found")
 
-    # Store the canonical doc_id (strip composite ":idx" suffix if present)
     if doc_id not in txn.extraction_ids:
         txn.extraction_ids.append(doc_id)
         await txn.save()
-
     return _serialize_transaction(txn)
 
 
@@ -777,7 +1448,6 @@ async def unlink_extraction(
     if extraction_id in txn.extraction_ids:
         txn.extraction_ids.remove(extraction_id)
         await txn.save()
-
     return _serialize_transaction(txn)
 
 
@@ -791,24 +1461,24 @@ async def list_transaction_extractions(
     txn = await _get_transaction_for_user(txn_id, u)
 
     summaries = []
-    for ext_id in txn.extraction_ids:
-        doc_id = ext_id.split(':')[0] if ':' in ext_id else ext_id
+    for extraction_ref in txn.extraction_ids:
+        doc_id = extraction_ref.split(":")[0] if ":" in extraction_ref else extraction_ref
         try:
             doc_record = await DocumentRecord.get(doc_id)
         except Exception:
             continue
         if not doc_record:
             continue
-
-        # Use the latest extraction entry for confidence/pages/mode
         latest = doc_record.extractions[-1] if doc_record.extractions else None
-        summaries.append({
-            "id": str(doc_record.id),
-            "filename": doc_record.filename,
-            "mode": latest.mode if latest else doc_record.mode,
-            "overall_confidence": latest.overall_confidence if latest else 0.0,
-            "pages_processed": latest.pages_processed if latest else doc_record.page_count,
-            "created_at": latest.created_at.isoformat() if latest and latest.created_at else None,
-        })
+        summaries.append(
+            {
+                "id": str(doc_record.id),
+                "filename": doc_record.filename,
+                "mode": latest.mode if latest else doc_record.mode,
+                "overall_confidence": latest.overall_confidence if latest else 0.0,
+                "pages_processed": latest.pages_processed if latest else doc_record.page_count,
+                "created_at": latest.created_at.isoformat() if latest and latest.created_at else None,
+            }
+        )
 
     return {"extractions": summaries}

@@ -1,6 +1,6 @@
 /** Transaction detail (lobby) page — tabbed view with participant sidebar. */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { Button, Badge, Alert, TextInput, Select, NumberInput, SimpleGrid, Stack, Group, Tabs, Card } from '@mantine/core';
 import { useTransactionDetail } from '../hooks/useTransaction';
@@ -15,12 +15,31 @@ import { uploadFile, startExtraction, subscribeToTask, fetchDotloopLoops, search
 import type { SSEEvent, DotloopLoop, OffersComparisonResult, OfferData, OfferField } from '../api';
 import { useIntegrations } from '../hooks/useIntegrations';
 import { OfferRequirementsModal } from '../components/offers/OfferRequirementsModal';
+import {
+  IconAutoFill,
+  IconBan,
+  IconCopy,
+  IconDocuments,
+  IconImport,
+  IconOffers,
+  IconOverview,
+  IconRefresh,
+} from '../components/common/AppIcons';
+import { SetupProgressCard } from '../components/transactions/SetupProgressCard';
+import { DotloopImportModal } from '../components/transactions/DotloopImportModal';
 import { evaluateOfferRequirements } from '../types/offerRequirements';
 
 const PARTICIPANT_STATUS_COLORS: Record<string, string> = {
-  pending: 'yellow',
-  accepted: 'green',
+  invited: 'yellow',
+  active: 'green',
   removed: 'gray',
+  created: 'gray',
+  sent: 'blue',
+  opened: 'yellow',
+  accepted: 'green',
+  expired: 'red',
+  revoked: 'gray',
+  failed: 'red',
 };
 
 const STATUS_FLOW: TransactionStatus[] = [
@@ -41,6 +60,17 @@ function formatDate(iso?: string): string {
   });
 }
 
+function formatDateTime(iso?: string | null): string {
+  if (!iso) return '--';
+  return new Date(iso).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 interface InlineUploadState {
   status: 'idle' | 'uploading' | 'extracting' | 'linking' | 'done' | 'error';
   filename?: string;
@@ -53,8 +83,8 @@ export function TransactionDetail() {
   const navigate = useNavigate();
   const {
     transaction, completion, loading, error,
-    update, removeParticipantById,
-    sendInvitation, runAutoFill,
+    refresh, update, removeParticipantById,
+    sendInvitation, invitations, resendTransactionInvitation, revokeTransactionInvitation, runAutoFill,
     extractions, unlinkExtraction, linkExtraction,
   } = useTransactionDetail(id);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
@@ -67,6 +97,7 @@ export function TransactionDetail() {
   const [inviteRole, setInviteRole] = useState<ParticipantRole>('BUYER');
   const [inviting, setInviting] = useState(false);
   const [inviteResult, setInviteResult] = useState<string | null>(null);
+  const [inviteActionId, setInviteActionId] = useState<string | null>(null);
   const [autoFillMsg, setAutoFillMsg] = useState<string | null>(null);
 
   // Upload state lives here so it persists across tab switches
@@ -177,14 +208,62 @@ export function TransactionDetail() {
     setInviting(true);
     setInviteResult(null);
     try {
-      await sendInvitation(inviteEmail.trim(), inviteRole, inviteName.trim() || undefined);
-      setInviteResult(`Invitation sent to ${inviteEmail}`);
+      const invitation = await sendInvitation(inviteEmail.trim(), inviteRole, inviteName.trim() || undefined);
+      setInviteResult(
+        invitation.status === 'sent'
+          ? `Invitation sent to ${inviteEmail}.`
+          : invitation.invite_url
+            ? `Invite created. Copy the link below if email delivery is not configured.`
+            : 'Invite created.',
+      );
       setInviteEmail('');
       setInviteName('');
     } catch (err) {
       setInviteResult(err instanceof Error ? err.message : 'Failed to send invitation');
     }
     setInviting(false);
+  };
+
+  const handleCopyInviteLink = async (inviteUrl?: string | null) => {
+    if (!inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setInviteResult('Invite link copied.');
+    } catch {
+      setInviteResult(inviteUrl);
+    }
+  };
+
+  const handleResendInvitation = async (invitationId: string) => {
+    setInviteActionId(invitationId);
+    setInviteResult(null);
+    try {
+      const invitation = await resendTransactionInvitation(invitationId);
+      setInviteResult(
+        invitation.status === 'sent'
+          ? `Invitation resent to ${invitation.email}.`
+          : invitation.invite_url
+            ? 'Invitation refreshed. Copy the link below if needed.'
+            : 'Invitation refreshed.',
+      );
+    } catch (err) {
+      setInviteResult(err instanceof Error ? err.message : 'Failed to resend invitation');
+    } finally {
+      setInviteActionId(null);
+    }
+  };
+
+  const handleRevokeInvitation = async (invitationId: string) => {
+    setInviteActionId(invitationId);
+    setInviteResult(null);
+    try {
+      await revokeTransactionInvitation(invitationId);
+      setInviteResult('Invitation revoked.');
+    } catch (err) {
+      setInviteResult(err instanceof Error ? err.message : 'Failed to revoke invitation');
+    } finally {
+      setInviteActionId(null);
+    }
   };
 
   const handleAutoFill = async () => {
@@ -210,6 +289,11 @@ export function TransactionDetail() {
     overview: 'Overview',
     documents: 'Documents',
     offers: 'Offers',
+  };
+  const TAB_ICONS: Record<TabKey, ReactNode> = {
+    overview: <IconOverview size={16} />,
+    documents: <IconDocuments size={16} />,
+    offers: <IconOffers size={16} />,
   };
 
   return (
@@ -244,7 +328,7 @@ export function TransactionDetail() {
 
       {completion && (
         <div className="txn-completion-bar">
-          <CompletionIndicator percentage={completion.overall} label="Transaction Readiness" size="md" />
+          <SetupProgressCard completion={completion} />
         </div>
       )}
 
@@ -284,6 +368,7 @@ export function TransactionDetail() {
                 <Tabs.Tab
                   key={tab}
                   value={tab}
+                  leftSection={TAB_ICONS[tab]}
                   rightSection={
                     tab === 'offers' && extractions.length > 0 ? <Badge size="xs">{extractions.length}</Badge> : undefined
                   }
@@ -295,8 +380,11 @@ export function TransactionDetail() {
 
             <Tabs.Panel value="overview">
               <OverviewTab
+                txnId={id!}
                 transaction={transaction}
                 onUpdate={update}
+                onRefreshTransaction={refresh}
+                onRefreshDocuments={refreshDocs}
                 offersData={offersData}
                 selectedOfferId={selectedOfferId}
                 onSelectOffer={setSelectedOfferId}
@@ -345,7 +433,7 @@ export function TransactionDetail() {
                   <span>{p.email}</span>
                 </Stack>
                 <CompletionIndicator percentage={p.profile_completion} label="Profile" size="sm" />
-                {p.status !== 'removed' && (
+                {p.status !== 'removed' && p.user_id !== transaction.created_by && (
                   <Button
                     variant="subtle"
                     size="sm"
@@ -398,10 +486,69 @@ export function TransactionDetail() {
               </Stack>
             </form>
             {inviteResult && <p className="invite-result">{inviteResult}</p>}
+            {invitations.length > 0 && (
+              <div className="transaction-invitation-list">
+                {invitations.map((invitation) => (
+                  <Card key={invitation.id} padding="sm" withBorder mb="xs">
+                    <Group justify="space-between" align="flex-start" mb={4}>
+                      <div>
+                        <div className="transaction-invitation-name">{invitation.name || invitation.email}</div>
+                        <div className="transaction-invitation-email">{invitation.email}</div>
+                      </div>
+                      <Badge color={PARTICIPANT_STATUS_COLORS[invitation.status] ?? 'gray'} variant="light">
+                        {invitation.status}
+                      </Badge>
+                    </Group>
+                    <div className="transaction-invitation-meta">
+                      <span>{(ROLE_LABELS as Record<string, string>)[invitation.role] || invitation.role}</span>
+                      <span>Expires {formatDateTime(invitation.expires_at)}</span>
+                    </div>
+                    {invitation.last_error && (
+                      <div className="transaction-invitation-error">{invitation.last_error}</div>
+                    )}
+                    <Group gap="xs" mt="xs">
+                      {invitation.invite_url && invitation.status !== 'revoked' && (
+                        <Button
+                          variant="light"
+                          size="xs"
+                          leftSection={<IconCopy size={14} />}
+                          onClick={() => void handleCopyInviteLink(invitation.invite_url)}
+                        >
+                          Copy Link
+                        </Button>
+                      )}
+                      {!['accepted', 'revoked'].includes(invitation.status) && (
+                        <>
+                          <Button
+                            variant="subtle"
+                            size="xs"
+                            leftSection={<IconRefresh size={14} />}
+                            onClick={() => void handleResendInvitation(invitation.id)}
+                            disabled={inviteActionId === invitation.id}
+                          >
+                            {inviteActionId === invitation.id ? 'Working...' : 'Resend'}
+                          </Button>
+                          <Button
+                            variant="subtle"
+                            color="red"
+                            size="xs"
+                            leftSection={<IconBan size={14} />}
+                            onClick={() => void handleRevokeInvitation(invitation.id)}
+                            disabled={inviteActionId === invitation.id}
+                          >
+                            Revoke
+                          </Button>
+                        </>
+                      )}
+                    </Group>
+                  </Card>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="sidebar-section">
-            <Button variant="outline" color="cyan" onClick={handleAutoFill}>
+            <Button variant="outline" color="cyan" leftSection={<IconAutoFill size={16} />} onClick={handleAutoFill}>
               Auto-Fill from Profiles
             </Button>
           </div>
@@ -480,10 +627,13 @@ function exportDatesICS(offer: OfferData, dateFields: OfferField[], txnName: str
 }
 
 function OverviewTab({
-  transaction, onUpdate, offersData, selectedOfferId, onSelectOffer,
+  txnId, transaction, onUpdate, onRefreshTransaction, onRefreshDocuments, offersData, selectedOfferId, onSelectOffer,
 }: {
+  txnId: string;
   transaction: NonNullable<ReturnType<typeof useTransactionDetail>['transaction']>;
   onUpdate: ReturnType<typeof useTransactionDetail>['update'];
+  onRefreshTransaction: ReturnType<typeof useTransactionDetail>['refresh'];
+  onRefreshDocuments: () => void;
   offersData: OffersComparisonResult | null;
   selectedOfferId: string | null;
   onSelectOffer: (id: string) => void;
@@ -510,6 +660,7 @@ function OverviewTab({
   const [loopLinking, setLoopLinking] = useState(false);
   const [loopMsg, setLoopMsg] = useState<string | null>(null);
   const [loopSearching, setLoopSearching] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const loopSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -621,6 +772,7 @@ function OverviewTab({
     try {
       await linkDotloopLoop(transaction._id, selectedLoop);
       setLoopMsg('Loop linked successfully');
+      await onRefreshTransaction();
       setTimeout(() => setLoopMsg(null), 3000);
     } catch {
       setLoopMsg('Failed to link loop');
@@ -638,6 +790,14 @@ function OverviewTab({
   function offerVal(key: string): string | number | boolean | null | undefined {
     return selectedOffer?.fields[key];
   }
+
+  const syncColor = transaction.dotloop_sync_status === 'error'
+    ? 'red'
+    : transaction.dotloop_sync_status === 'stale'
+      ? 'yellow'
+      : transaction.dotloop_sync_status === 'current'
+        ? 'green'
+        : 'gray';
 
   return (
     <div className="overview-tab">
@@ -950,11 +1110,41 @@ function OverviewTab({
         <h3>Dotloop Loop</h3>
         {transaction.dotloop_loop_id ? (
           <div className="dotloop-linked">
-            <span className="dotloop-loop-id">Loop ID: {transaction.dotloop_loop_id}</span>
-            {loops.find(l => String(l.id) === transaction.dotloop_loop_id) && (
-              <span className="dotloop-loop-name">
-                {loops.find(l => String(l.id) === transaction.dotloop_loop_id)?.name}
-              </span>
+            <Group justify="space-between" align="flex-start">
+              <div>
+                <div className="dotloop-loop-id">Loop ID: {transaction.dotloop_loop_id}</div>
+                {loops.find(l => String(l.id) === transaction.dotloop_loop_id) && (
+                  <div className="dotloop-loop-name">
+                    {loops.find(l => String(l.id) === transaction.dotloop_loop_id)?.name}
+                  </div>
+                )}
+                <div className="dotloop-sync-meta">
+                  <Badge color={syncColor} variant="light">
+                    {transaction.dotloop_sync_status || 'never'}
+                  </Badge>
+                  <span>Last synced {formatDateTime(transaction.dotloop_last_synced_at)}</span>
+                  {transaction.dotloop_last_remote_updated_at && (
+                    <span>Remote updated {formatDateTime(transaction.dotloop_last_remote_updated_at)}</span>
+                  )}
+                </div>
+                {transaction.dotloop_sync_error && (
+                  <Alert color="red" mt="sm">{transaction.dotloop_sync_error}</Alert>
+                )}
+              </div>
+              <Group gap="xs">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  color="campari"
+                  leftSection={<IconImport size={14} />}
+                  onClick={() => setShowImportModal(true)}
+                >
+                  Import Documents
+                </Button>
+              </Group>
+            </Group>
+            {transaction.dotloop_sync_status === 'stale' && (
+              <p className="dotloop-review-copy">Dotloop changed. Review updates and import any new documents manually.</p>
             )}
           </div>
         ) : dotloopConnected ? (
@@ -988,6 +1178,17 @@ function OverviewTab({
         )}
         {loopMsg && <p className="invite-result">{loopMsg}</p>}
       </div>
+
+      <DotloopImportModal
+        transactionId={txnId}
+        opened={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onImported={() => {
+          void onRefreshTransaction();
+          onRefreshDocuments();
+          setLoopMsg('Dotloop documents imported.');
+        }}
+      />
     </div>
   );
 }

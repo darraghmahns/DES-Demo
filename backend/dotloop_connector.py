@@ -19,10 +19,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from dotloop_client import DotloopClient, DotloopAPIError
-from db import DocumentRecord
+from db import DocumentRecord, Transaction
 from db_writer import get_extraction, save_document, save_extraction
 from ocr_engine import get_engine
-from schemas import DotloopLoopDetails, ExtractionResult
+from schemas import DotloopLoopDetails, DotloopSyncStatus, ExtractionResult
 from verifier import compute_overall_confidence
 
 log = logging.getLogger(__name__)
@@ -696,7 +696,7 @@ def search_loops(
 async def handle_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     """Handle a Dotloop webhook event.
 
-    Currently supports LOOP_UPDATED events, which trigger a fresh extraction.
+    LOOP_UPDATED now marks linked transactions stale for manual review.
 
     Args:
         payload: Webhook JSON body with event_type, loop_id, profile_id.
@@ -717,12 +717,24 @@ async def handle_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     log.info("Processing webhook: %s for loop %s", event_type, loop_id)
 
     try:
-        result = await process_from_dotloop(
-            profile_id=int(profile_id) if profile_id else None,
-            loop_id=int(loop_id),
-            sync_back=False,
-        )
-        return {"status": "processed", **result}
+        linked_transactions = await Transaction.find(
+            {"dotloop_loop_id": str(loop_id)}
+        ).to_list()
+
+        updated_at = datetime.now(timezone.utc)
+        for txn in linked_transactions:
+            txn.dotloop_sync_status = DotloopSyncStatus.STALE
+            txn.dotloop_last_remote_updated_at = updated_at
+            txn.dotloop_sync_error = None
+            txn.updated_at = updated_at
+            await txn.save()
+
+        return {
+            "status": "processed",
+            "loop_id": str(loop_id),
+            "marked_stale": len(linked_transactions),
+            "profile_id": str(profile_id) if profile_id else None,
+        }
     except Exception as exc:
         log.error("Webhook processing failed: %s", exc)
         return {"status": "error", "reason": str(exc)}

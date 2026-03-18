@@ -92,6 +92,11 @@
   text-align: center;
 }
 
+.ob-step-brand {
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
 .ob-step-icon {
   font-size: 40px;
   margin-bottom: 12px;

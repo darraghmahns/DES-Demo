@@ -36,7 +36,13 @@ export async function apiFetch<T = unknown>(
     let detail = body;
     try {
       const parsed = JSON.parse(body);
-      detail = parsed.detail || body;
+      if (typeof parsed.detail === 'string') {
+        detail = parsed.detail;
+      } else if (parsed.detail !== undefined) {
+        detail = JSON.stringify(parsed.detail);
+      } else {
+        detail = body;
+      }
     } catch { /* ignore */ }
     throw new Error(detail);
   }

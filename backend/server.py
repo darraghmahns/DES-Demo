@@ -33,7 +33,6 @@ from schemas import (
     FOIARequest,
 )
 from ocr_engine import get_engine
-from compliance_engine import run_compliance_check, async_run_compliance_check
 import property_prefill
 from auth import get_optional_user, get_current_user, AUTH_ENABLED
 from db import init_db, close_db
@@ -792,7 +791,6 @@ async def _extraction_pipeline(
     total_steps = 5  # Load, Convert, Extract, Validate, Output
     total_steps += 1  # Verify citations
     if mode == "real_estate":
-        total_steps += 1  # Compliance check
         if property_prefill.is_configured():
             total_steps += 1  # Property enrichment
     if mode == "gov":
@@ -986,42 +984,6 @@ async def _extraction_pipeline(
                 },
             })
 
-        # --- Compliance Check (real_estate) ---
-        compliance_report = None
-        if mode == "real_estate":
-            current_step += 1
-            emit("step", {
-                "step": current_step, "total": total_steps,
-                "title": "Compliance Check", "status": "running",
-            })
-
-            compliance_report = await async_run_compliance_check(
-                validated_data or {},
-                transaction_type=(validated.transaction_type if validated else None),
-                org_id=org_id,
-            )
-
-            emit("compliance", {
-                "jurisdiction_key": compliance_report.jurisdiction_key,
-                "jurisdiction_display": compliance_report.jurisdiction_display,
-                "jurisdiction_type": compliance_report.jurisdiction_type,
-                "overall_status": compliance_report.overall_status.value,
-                "requirements": [r.model_dump(mode="json") for r in compliance_report.requirements],
-                "requirement_count": compliance_report.requirement_count,
-                "action_items": compliance_report.action_items,
-                "transaction_type": compliance_report.transaction_type,
-                "notes": compliance_report.notes,
-            })
-            emit("step_complete", {
-                "step": current_step, "title": "Compliance Check", "status": "complete",
-                "data": {
-                    "jurisdiction": compliance_report.jurisdiction_display,
-                    "requirement_count": compliance_report.requirement_count,
-                    "action_items": compliance_report.action_items,
-                    "status": compliance_report.overall_status.value,
-                },
-            })
-
         # --- PII Scan (gov mode only) ---
         pii_report = None
         if mode == "gov":
@@ -1094,7 +1056,7 @@ async def _extraction_pipeline(
             citations=citations,
             overall_confidence=overall_confidence,
             pii_report=pii_report,
-            compliance_report=compliance_report,
+            compliance_report=None,
             property_enrichment=property_enrichment_data,
             prompt_tokens=total_usage["prompt_tokens"],
             completion_tokens=total_usage["completion_tokens"],
@@ -1508,51 +1470,6 @@ async def update_offer_fields(
 
 
 # ---------------------------------------------------------------------------
-# Compliance Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/api/compliance/{extraction_ref:path}")
-async def get_compliance_report(extraction_ref: str):
-    """Retrieve the compliance report for a saved extraction."""
-    from db_writer import get_extraction
-    ext = await get_extraction(extraction_ref)
-    if not ext:
-        raise HTTPException(status_code=404, detail="Extraction not found")
-    report = ext.get("compliance_report")
-    if not report:
-        return {"status": "none", "message": "No compliance report for this extraction"}
-    return report
-
-
-@app.get("/api/compliance-check")
-async def standalone_compliance_check(
-    state: str = Query(...),
-    county: str = Query(""),
-    city: str = Query(""),
-    transaction_type: str = Query(None),
-    org_id: str = Query(None),
-    user=Depends(get_optional_user),
-):
-    """Standalone compliance check without an extraction — for public API.
-
-    Uses async DB-first lookup so AI Scout results are automatically included.
-    When *org_id* is provided (or inferred from the authenticated user),
-    brokerage-specific requirements are layered on top.
-    """
-    effective_org_id = org_id or (getattr(user, "org_id", None) if user else None)
-    report = await async_run_compliance_check(
-        {"property_address": {
-            "state_or_province": state,
-            "county": county,
-            "city": city,
-        }},
-        transaction_type=transaction_type,
-        org_id=effective_org_id,
-    )
-    return report.model_dump(mode="json")
-
-
-# ---------------------------------------------------------------------------
 # Property Enrichment Endpoints
 # ---------------------------------------------------------------------------
 
@@ -1601,18 +1518,6 @@ class BrokerageProfilePayload(BaseModel):
     address: Optional[str] = None
     phone: Optional[str] = None
     active_markets: List[str] = []
-
-
-class BrokerageRequirementPayload(BaseModel):
-    name: str
-    code: Optional[str] = None
-    category: str = "FORM"
-    description: str = ""
-    authority: Optional[str] = None
-    fee: Optional[str] = None
-    url: Optional[str] = None
-    status: str = "REQUIRED"
-    notes: Optional[str] = None
 
 
 class BrokerageDefaultsPayload(BaseModel):
@@ -1679,40 +1584,6 @@ async def upsert_brokerage_profile(payload: BrokerageProfilePayload, user=Depend
     return profile.model_dump(mode="json")
 
 
-@app.post("/api/brokerage/requirements")
-async def add_brokerage_requirement(payload: BrokerageRequirementPayload, user=Depends(get_current_user)):
-    """Add a custom compliance requirement to the brokerage profile (admin only)."""
-    from db import BrokerageProfile
-
-    _require_admin(user)
-    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
-    if not profile:
-        raise HTTPException(status_code=404, detail="Create a brokerage profile first")
-    req = payload.model_dump()
-    req["source"] = "BROKERAGE"
-    profile.custom_requirements.append(req)
-    profile.updated_at = datetime.now(timezone.utc)
-    await profile.save()
-    return {"index": len(profile.custom_requirements) - 1, "requirement": req}
-
-
-@app.delete("/api/brokerage/requirements/{index}")
-async def remove_brokerage_requirement(index: int, user=Depends(get_current_user)):
-    """Remove a custom compliance requirement by index (admin only)."""
-    from db import BrokerageProfile
-
-    _require_admin(user)
-    profile = await BrokerageProfile.find_one({"org_id": user.org_id})
-    if not profile:
-        raise HTTPException(status_code=404, detail="Brokerage profile not found")
-    if index < 0 or index >= len(profile.custom_requirements):
-        raise HTTPException(status_code=400, detail=f"Invalid index {index} — {len(profile.custom_requirements)} requirements exist")
-    removed = profile.custom_requirements.pop(index)
-    profile.updated_at = datetime.now(timezone.utc)
-    await profile.save()
-    return {"removed": removed, "remaining": len(profile.custom_requirements)}
-
-
 @app.put("/api/brokerage/defaults")
 async def update_brokerage_defaults(payload: BrokerageDefaultsPayload, user=Depends(get_current_user)):
     """Update brokerage default settings (admin only)."""
@@ -1728,161 +1599,6 @@ async def update_brokerage_defaults(payload: BrokerageDefaultsPayload, user=Depe
     return profile.defaults.model_dump(mode="json")
 
 
-# ---------------------------------------------------------------------------
-# AI Scout Endpoints
-# ---------------------------------------------------------------------------
-
-
-class ScoutRequest(BaseModel):
-    state: str
-    county: str = ""
-    city: str = ""
-
-
-@app.post("/api/scout/research")
-async def scout_research(request: ScoutRequest, user=Depends(get_optional_user)):
-    """Trigger AI Scout research for a jurisdiction.
-
-    Runs the two-pass GPT-4o pipeline (research → verify) and saves results
-    to MongoDB with is_verified=False, is_active=False.
-    """
-    from scout import run_scout
-
-    if not request.state:
-        raise HTTPException(status_code=400, detail="state is required")
-
-    try:
-        result = await run_scout(
-            state=request.state.strip(),
-            county=request.county.strip() or None,
-            city=request.city.strip() or None,
-            save_to_db=True,
-        )
-        return {
-            "id": str(result.id),
-            "jurisdiction_key": result.jurisdiction_key,
-            "jurisdiction_type": result.jurisdiction_type,
-            "requirement_count": len(result.requirements),
-            "is_verified": result.is_verified,
-            "is_active": result.is_active,
-            "research_timestamp": result.research_timestamp.isoformat(),
-            "notes": result.notes,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/scout/results")
-async def scout_list_results(
-    state: str = Query(None),
-    verified: bool = Query(None),
-):
-    """List AI Scout results, optionally filtered by state or verification status."""
-    from scout_models import ScoutResult
-
-    filters = {}
-    if state:
-        filters["state"] = state.strip().upper()
-    if verified is not None:
-        filters["is_verified"] = verified
-
-    results = await ScoutResult.find(filters).sort("-research_timestamp").to_list(100)
-
-    return [
-        {
-            "id": str(r.id),
-            "jurisdiction_key": r.jurisdiction_key,
-            "jurisdiction_type": r.jurisdiction_type,
-            "state": r.state,
-            "county": r.county,
-            "city": r.city,
-            "requirement_count": len(r.requirements),
-            "is_verified": r.is_verified,
-            "is_active": r.is_active,
-            "source": r.source,
-            "research_timestamp": r.research_timestamp.isoformat(),
-            "notes": r.notes,
-        }
-        for r in results
-    ]
-
-
-@app.get("/api/scout/results/{result_id}")
-async def scout_get_result(result_id: str):
-    """Get a specific AI Scout result with full requirements."""
-    from scout_models import ScoutResult
-    from bson import ObjectId
-
-    try:
-        result = await ScoutResult.get(ObjectId(result_id))
-    except (ValueError, TypeError, Exception):
-        raise HTTPException(status_code=404, detail="Scout result not found")
-
-    if not result:
-        raise HTTPException(status_code=404, detail="Scout result not found")
-
-    return result.model_dump(mode="json")
-
-
-@app.put("/api/scout/results/{result_id}/verify")
-async def scout_verify_result(result_id: str, verified_by: str = Query("admin"), user=Depends(get_optional_user)):
-    """Mark a scout result as verified and activate it for compliance checks."""
-    from scout_models import ScoutResult
-    from bson import ObjectId
-
-    try:
-        result = await ScoutResult.get(ObjectId(result_id))
-    except (ValueError, TypeError, Exception):
-        raise HTTPException(status_code=404, detail="Scout result not found")
-
-    if not result:
-        raise HTTPException(status_code=404, detail="Scout result not found")
-
-    result.is_verified = True
-    result.is_active = True
-    result.verified_by = verified_by
-    result.verification_timestamp = datetime.now(timezone.utc)
-    await result.save()
-
-    return {
-        "id": str(result.id),
-        "jurisdiction_key": result.jurisdiction_key,
-        "is_verified": True,
-        "is_active": True,
-        "verified_by": verified_by,
-        "verification_timestamp": result.verification_timestamp.isoformat(),
-    }
-
-
-@app.put("/api/scout/results/{result_id}/reject")
-async def scout_reject_result(result_id: str):
-    """Mark a scout result as rejected (is_active=False, is_verified stays False)."""
-    from scout_models import ScoutResult
-    from bson import ObjectId
-
-    try:
-        result = await ScoutResult.get(ObjectId(result_id))
-    except (ValueError, TypeError, Exception):
-        raise HTTPException(status_code=404, detail="Scout result not found")
-
-    if not result:
-        raise HTTPException(status_code=404, detail="Scout result not found")
-
-    result.is_active = False
-    result.is_verified = False
-    result.notes = (result.notes or "") + " [REJECTED]"
-    await result.save()
-
-    return {
-        "id": str(result.id),
-        "jurisdiction_key": result.jurisdiction_key,
-        "is_verified": False,
-        "is_active": False,
-        "status": "rejected",
-    }
-
-
-# ---------------------------------------------------------------------------
 # API Usage & Cost Tracking
 # ---------------------------------------------------------------------------
 

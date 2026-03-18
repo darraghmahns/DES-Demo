@@ -1,7 +1,12 @@
 /** Transaction API functions for D.E.S. */
 
 import { apiFetch } from './client';
-import type { Transaction, TransactionStatus, ParticipantRole } from '../types/transaction';
+import type {
+  ParticipantRole,
+  Transaction,
+  TransactionInvitation,
+  TransactionStatus,
+} from '../types/transaction';
 
 // ---------------------------------------------------------------------------
 // Transaction CRUD
@@ -162,7 +167,17 @@ export async function autoFillTransaction(txnId: string): Promise<AutoFillResult
 }
 
 export interface TransactionCompletionResult {
+  kind?: 'setup_progress';
   overall: number;
+  blockers: string[];
+  buckets: Array<{
+    key: 'transaction_fields' | 'participant_acceptance' | 'participant_profiles' | 'required_documents';
+    label: string;
+    weight: number;
+    score: number;
+    status: 'complete' | 'partial' | 'missing';
+    reasons: string[];
+  }>;
   participants: Array<{
     user_id: string;
     role: string;
@@ -200,11 +215,21 @@ export interface CreateInvitationPayload {
 }
 
 export interface InvitationResult {
-  signed_token: string;
+  id: string;
   email: string;
   transaction_id: string;
-  role: string;
-  expires_at: string;
+  invitee_user_id?: string | null;
+  role: ParticipantRole;
+  status: TransactionInvitation['status'];
+  expires_at?: string | null;
+  sent_at?: string | null;
+  opened_at?: string | null;
+  accepted_at?: string | null;
+  revoked_at?: string | null;
+  provider?: string | null;
+  provider_message_id?: string | null;
+  last_error?: string | null;
+  invite_url?: string | null;
 }
 
 export async function createInvitation(data: CreateInvitationPayload): Promise<InvitationResult> {
@@ -214,17 +239,100 @@ export async function createInvitation(data: CreateInvitationPayload): Promise<I
   });
 }
 
+export async function listTransactionInvitations(txnId: string): Promise<TransactionInvitation[]> {
+  const data = await apiFetch<{ invitations: TransactionInvitation[] }>(`/api/transactions/${txnId}/invitations`);
+  return data.invitations;
+}
+
+export async function resendInvitation(invitationId: string): Promise<InvitationResult> {
+  return apiFetch<InvitationResult>(`/api/invitations/${invitationId}/resend`, {
+    method: 'POST',
+  });
+}
+
+export async function revokeInvitation(invitationId: string): Promise<InvitationResult> {
+  return apiFetch<InvitationResult>(`/api/invitations/${invitationId}/revoke`, {
+    method: 'POST',
+  });
+}
+
 export interface InvitationValidation {
   valid: boolean;
   email: string;
   name: string;
   has_clerk_account: boolean;
   user_id: string;
+  invitation_status?: TransactionInvitation['status'];
   transaction?: {
     id: string;
     name: string;
     role: string;
   };
+}
+
+export interface DotloopTransactionPreview {
+  normalized_transaction: {
+    name: string;
+    transaction_type: string;
+    property_address?: Record<string, string> | null;
+    purchase_price?: number | null;
+    earnest_money?: number | null;
+    closing_date?: string | null;
+    dotloop_loop_id: string;
+    agent_role?: 'listing_agent' | 'buying_agent';
+    agent_side?: 'buyer' | 'seller';
+  };
+  participant_suggestions: Array<{
+    name: string;
+    email?: string | null;
+    role: ParticipantRole;
+    source_role: string;
+    can_invite: boolean;
+  }>;
+  available_documents: {
+    total: number;
+    pdf_count: number;
+    documents: Array<{
+      id: number;
+      name: string;
+      folder_id: number;
+      folder_name: string;
+    }>;
+  };
+  warnings: string[];
+  existing_transaction_id?: string | null;
+}
+
+export interface DotloopFolderDocument {
+  folder_id: number;
+  folder_name: string;
+  document_id: number;
+  name: string;
+  is_pdf: boolean;
+  already_imported: boolean;
+}
+
+export interface DotloopFolderGroup {
+  folder_id: number;
+  folder_name: string;
+  documents: DotloopFolderDocument[];
+}
+
+export interface DotloopImportDocumentsResponse {
+  results: Array<{
+    name: string;
+    document_id: number;
+    failed: boolean;
+    duplicate?: boolean;
+    linked_existing?: boolean;
+    local_document_id?: string;
+    extraction_id?: string | null;
+    filename?: string;
+    error?: string;
+  }>;
+  imported: number;
+  duplicates: number;
+  failed: number;
 }
 
 export async function validateInvitation(token: string): Promise<InvitationValidation> {
@@ -243,6 +351,43 @@ export async function linkDotloopLoop(txnId: string, loopId: string): Promise<Tr
   return apiFetch<Transaction>(`/api/transactions/${txnId}/dotloop-loop`, {
     method: 'PATCH',
     body: JSON.stringify({ loop_id: loopId }),
+  });
+}
+
+export async function previewTransactionFromDotloop(
+  loopId: number,
+  data?: { name_override?: string; agent_role?: 'listing_agent' | 'buying_agent' },
+): Promise<DotloopTransactionPreview> {
+  return apiFetch<DotloopTransactionPreview>(`/api/transactions/from-dotloop/${loopId}/preview`, {
+    method: 'POST',
+    body: JSON.stringify(data ?? {}),
+  });
+}
+
+export async function createTransactionFromDotloop(
+  loopId: number,
+  data?: { name_override?: string; agent_role?: 'listing_agent' | 'buying_agent' },
+): Promise<Transaction> {
+  return apiFetch<Transaction>(`/api/transactions/from-dotloop/${loopId}`, {
+    method: 'POST',
+    body: JSON.stringify(data ?? {}),
+  });
+}
+
+export async function listDotloopDocumentsForTransaction(txnId: string): Promise<{
+  loop_id: string;
+  folders: DotloopFolderGroup[];
+}> {
+  return apiFetch(`/api/transactions/${txnId}/dotloop/documents`);
+}
+
+export async function importDotloopDocuments(
+  txnId: string,
+  documents: Array<{ folder_id: number; document_id: number; name: string }>,
+): Promise<DotloopImportDocumentsResponse> {
+  return apiFetch<DotloopImportDocumentsResponse>(`/api/transactions/${txnId}/dotloop/import-documents`, {
+    method: 'POST',
+    body: JSON.stringify({ documents }),
   });
 }
 

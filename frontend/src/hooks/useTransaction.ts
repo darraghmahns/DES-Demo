@@ -1,8 +1,8 @@
 /** Hook for transaction CRUD and participant management. */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Transaction, ParticipantRole } from '../types/transaction';
-import type { TransactionCompletionResult } from '../api/transactions';
+import type { Transaction, ParticipantRole, TransactionInvitation } from '../types/transaction';
+import type { InvitationResult, TransactionCompletionResult } from '../api/transactions';
 import {
   listTransactions,
   getTransaction,
@@ -14,6 +14,9 @@ import {
   autoFillTransaction,
   getTransactionCompletion,
   createInvitation,
+  listTransactionInvitations,
+  resendInvitation,
+  revokeInvitation,
   linkExtractionToTransaction,
   unlinkExtractionFromTransaction,
   fetchTransactionExtractions,
@@ -73,7 +76,10 @@ interface UseTransactionDetailReturn {
   update: (data: Parameters<typeof updateTransaction>[1]) => Promise<void>;
   addParticipantByEmail: (email: string, role: ParticipantRole, name?: string) => Promise<void>;
   removeParticipantById: (userId: string) => Promise<void>;
-  sendInvitation: (email: string, role: ParticipantRole, name?: string) => Promise<string>;
+  sendInvitation: (email: string, role: ParticipantRole, name?: string) => Promise<InvitationResult>;
+  invitations: TransactionInvitation[];
+  resendTransactionInvitation: (invitationId: string) => Promise<InvitationResult>;
+  revokeTransactionInvitation: (invitationId: string) => Promise<InvitationResult>;
   runAutoFill: () => Promise<string[]>;
   extractions: Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>;
   linkExtraction: (extractionId: string) => Promise<void>;
@@ -83,6 +89,7 @@ interface UseTransactionDetailReturn {
 export function useTransactionDetail(id: string | undefined): UseTransactionDetailReturn {
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [completion, setCompletion] = useState<TransactionCompletionResult | null>(null);
+  const [invitations, setInvitations] = useState<TransactionInvitation[]>([]);
   const [extractions, setExtractions] = useState<Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -95,14 +102,16 @@ export function useTransactionDetail(id: string | undefined): UseTransactionDeta
       // (after mutations) update state silently to avoid unmounting tab children.
       if (!initialLoadDone.current) setLoading(true);
       setError(null);
-      const [txn, comp, exts] = await Promise.all([
+      const [txn, comp, exts, invitationList] = await Promise.all([
         getTransaction(id),
         getTransactionCompletion(id),
         fetchTransactionExtractions(id),
+        listTransactionInvitations(id).catch(() => []),
       ]);
       setTransaction(txn);
       setCompletion(comp);
       setExtractions(exts);
+      setInvitations(invitationList);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load transaction');
     } finally {
@@ -140,8 +149,20 @@ export function useTransactionDetail(id: string | undefined): UseTransactionDeta
       name,
     });
     await refresh();
-    return result.signed_token;
+    return result;
   }, [id, refresh]);
+
+  const resendTransactionInvitation = useCallback(async (invitationId: string) => {
+    const result = await resendInvitation(invitationId);
+    await refresh();
+    return result;
+  }, [refresh]);
+
+  const revokeTransactionInvitation = useCallback(async (invitationId: string) => {
+    const result = await revokeInvitation(invitationId);
+    await refresh();
+    return result;
+  }, [refresh]);
 
   const runAutoFill = useCallback(async () => {
     if (!id) return [];
@@ -173,6 +194,9 @@ export function useTransactionDetail(id: string | undefined): UseTransactionDeta
     addParticipantByEmail,
     removeParticipantById,
     sendInvitation,
+    invitations,
+    resendTransactionInvitation,
+    revokeTransactionInvitation,
     runAutoFill,
     linkExtraction,
     unlinkExtraction,
