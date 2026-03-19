@@ -25,7 +25,6 @@ import {
   IconOverview,
   IconRefresh,
 } from '../components/common/AppIcons';
-import { SetupProgressCard } from '../components/transactions/SetupProgressCard';
 import { DotloopImportModal } from '../components/transactions/DotloopImportModal';
 import { evaluateOfferRequirements } from '../types/offerRequirements';
 
@@ -325,12 +324,6 @@ export function TransactionDetail() {
           )}
         </div>
       </div>
-
-      {completion && (
-        <div className="txn-completion-bar">
-          <SetupProgressCard completion={completion} />
-        </div>
-      )}
 
       {autoFillMsg && <Alert color="blue" mb="sm">{autoFillMsg}</Alert>}
 
