@@ -126,6 +126,158 @@ class TestTransactionRouteUpdates:
         finally:
             app.dependency_overrides.clear()
 
+    async def test_set_dotloop_loop_conflict_reports_same_owner_transfer_allowed(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        existing = DummyTransaction(None)
+        existing.id = "txn-existing"
+        existing.dotloop_loop_id = "321"
+        existing.created_by = "user-1"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_owned_transaction", AsyncMock(return_value=txn)),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=existing)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.patch(
+                    "/api/transactions/txn-123/dotloop-loop",
+                    json={"loop_id": "321"},
+                )
+
+        try:
+            assert response.status_code == 409
+            detail = response.json()["detail"]
+            assert detail["existing_transaction_id"] == "txn-existing"
+            assert detail["transfer_allowed"] is True
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_set_dotloop_loop_conflict_reports_cross_owner_transfer_blocked(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        existing = DummyTransaction(None)
+        existing.id = "txn-other"
+        existing.dotloop_loop_id = "321"
+        existing.created_by = "user-2"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_owned_transaction", AsyncMock(return_value=txn)),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=existing)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.patch(
+                    "/api/transactions/txn-123/dotloop-loop",
+                    json={"loop_id": "321"},
+                )
+
+        try:
+            assert response.status_code == 409
+            detail = response.json()["detail"]
+            assert detail["existing_transaction_id"] == "txn-other"
+            assert detail["transfer_allowed"] is False
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_set_dotloop_loop_force_transfer_moves_link_and_resets_sync_state(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.dotloop_loop_id = "123"
+        txn.dotloop_sync_status = "error"
+        txn.dotloop_last_synced_at = datetime.now(timezone.utc)
+        txn.dotloop_last_remote_updated_at = datetime.now(timezone.utc)
+        txn.dotloop_sync_error = "Old failure"
+
+        existing = DummyTransaction(None)
+        existing.id = "txn-existing"
+        existing.dotloop_loop_id = "321"
+        existing.dotloop_sync_status = "current"
+        existing.dotloop_last_synced_at = datetime.now(timezone.utc)
+        existing.dotloop_last_remote_updated_at = datetime.now(timezone.utc)
+        existing.dotloop_sync_error = "Needs review"
+        existing.created_by = "user-1"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_owned_transaction", AsyncMock(return_value=txn)),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=existing)),
+            patch(
+                "transaction_routes._serialize_transaction",
+                side_effect=lambda value: {
+                    "_id": value.id,
+                    "dotloop_loop_id": value.dotloop_loop_id,
+                    "dotloop_sync_status": value.dotloop_sync_status,
+                    "dotloop_sync_error": value.dotloop_sync_error,
+                },
+            ),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.patch(
+                    "/api/transactions/txn-123/dotloop-loop",
+                    json={"loop_id": "321", "force_transfer": True},
+                )
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["dotloop_loop_id"] == "321"
+            assert payload["dotloop_sync_status"] == "never"
+            assert payload["dotloop_sync_error"] is None
+
+            assert existing.dotloop_loop_id is None
+            assert existing.dotloop_sync_status == "never"
+            assert existing.dotloop_last_synced_at is None
+            assert existing.dotloop_last_remote_updated_at is None
+            assert existing.dotloop_sync_error is None
+            existing.save.assert_awaited_once()
+
+            assert txn.dotloop_loop_id == "321"
+            assert txn.dotloop_sync_status == "never"
+            assert txn.dotloop_last_synced_at is None
+            assert txn.dotloop_last_remote_updated_at is None
+            assert txn.dotloop_sync_error is None
+            txn.save.assert_awaited_once()
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_set_dotloop_loop_force_transfer_rejected_for_cross_owner(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        existing = DummyTransaction(None)
+        existing.id = "txn-other"
+        existing.dotloop_loop_id = "321"
+        existing.created_by = "user-2"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_owned_transaction", AsyncMock(return_value=txn)),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=existing)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.patch(
+                    "/api/transactions/txn-123/dotloop-loop",
+                    json={"loop_id": "321", "force_transfer": True},
+                )
+
+        try:
+            assert response.status_code == 409
+            detail = response.json()["detail"]
+            assert detail["existing_transaction_id"] == "txn-other"
+            assert detail["transfer_allowed"] is False
+            existing.save.assert_not_awaited()
+            txn.save.assert_not_awaited()
+        finally:
+            app.dependency_overrides.clear()
+
     async def test_completion_returns_setup_progress_with_blockers(self):
         from auth import get_current_user
         from server import app

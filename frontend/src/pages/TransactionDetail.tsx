@@ -7,6 +7,9 @@ import { useTransactionDetail } from '../hooks/useTransaction';
 import { CompletionIndicator } from '../components/common/CompletionIndicator';
 import { DOTLOOP_SYNC_LABELS, STATUS_LABELS, STATUS_COLORS, ROLE_LABELS, type ParticipantRole, type TransactionStatus } from '../types/transaction';
 import {
+  DotloopLoopConflictError,
+  type DotloopLoopConflictDetail,
+  isDotloopLoopConflictError,
   listTransactionDocuments,
   linkDotloopLoop,
   type TransactionDocRecord,
@@ -776,6 +779,8 @@ function OverviewTab({
   const [selectedLoop, setSelectedLoop] = useState('');
   const [loopLinking, setLoopLinking] = useState(false);
   const [loopMsg, setLoopMsg] = useState<string | null>(null);
+  const [loopConflict, setLoopConflict] = useState<DotloopLoopConflictDetail | null>(null);
+  const [confirmTransfer, setConfirmTransfer] = useState(false);
   const [loopSearching, setLoopSearching] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const loopSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -805,6 +810,11 @@ function OverviewTab({
     setParcelTaxId(transaction.property_address?.parcel_tax_id || '');
     setSaveError(null);
   }, [transaction, editing]);
+
+  useEffect(() => {
+    setLoopConflict(null);
+    setConfirmTransfer(false);
+  }, [selectedLoop]);
 
   const handleLoopSearch = (query: string) => {
     if (loopSearchTimer.current) clearTimeout(loopSearchTimer.current);
@@ -886,15 +896,46 @@ function OverviewTab({
   const handleLinkLoop = async () => {
     if (!selectedLoop) return;
     setLoopLinking(true);
+    setLoopMsg(null);
     try {
       await linkDotloopLoop(transaction._id, selectedLoop);
+      setLoopConflict(null);
+      setConfirmTransfer(false);
       setLoopMsg('Loop linked successfully');
       await onRefreshTransaction();
       setTimeout(() => setLoopMsg(null), 3000);
-    } catch {
-      setLoopMsg('Failed to link loop');
+    } catch (error) {
+      if (isDotloopLoopConflictError(error)) {
+        setLoopConflict(error.detail);
+        setConfirmTransfer(false);
+      } else {
+        setLoopConflict(null);
+        setLoopMsg(error instanceof Error ? error.message : 'Failed to link loop');
+      }
     }
     setLoopLinking(false);
+  };
+
+  const handleTransferLoop = async () => {
+    if (!selectedLoop || !loopConflict?.transfer_allowed) return;
+    setLoopLinking(true);
+    setLoopMsg(null);
+    try {
+      await linkDotloopLoop(transaction._id, selectedLoop, { forceTransfer: true });
+      setLoopConflict(null);
+      setConfirmTransfer(false);
+      setLoopMsg(`Loop moved from transaction ${loopConflict.existing_transaction_id}.`);
+      await onRefreshTransaction();
+      setTimeout(() => setLoopMsg(null), 4000);
+    } catch (error) {
+      if (error instanceof DotloopLoopConflictError) {
+        setLoopConflict(error.detail);
+      } else {
+        setLoopMsg(error instanceof Error ? error.message : 'Failed to transfer loop');
+      }
+    } finally {
+      setLoopLinking(false);
+    }
   };
 
   const selectedOffer: OfferData | null =
@@ -1292,6 +1333,62 @@ function OverviewTab({
           <p className="text-muted">
             <Link to="/profile">Connect Dotloop</Link> to link a loop to this transaction.
           </p>
+        )}
+        {loopConflict && (
+          <Alert color={loopConflict.transfer_allowed ? 'yellow' : 'red'} mt="sm">
+            <Stack gap="xs">
+              <span>
+                {loopConflict.message}. Linked transaction: {loopConflict.existing_transaction_id}.
+              </span>
+              <Group gap="xs">
+                <Button
+                  component={Link}
+                  to={`/transactions/${loopConflict.existing_transaction_id}`}
+                  variant="light"
+                  size="xs"
+                  color="gray"
+                >
+                  Open existing transaction
+                </Button>
+                {loopConflict.transfer_allowed && !confirmTransfer && (
+                  <Button
+                    variant="light"
+                    size="xs"
+                    color="campari"
+                    onClick={() => setConfirmTransfer(true)}
+                    disabled={loopLinking}
+                  >
+                    Move loop here
+                  </Button>
+                )}
+              </Group>
+              {loopConflict.transfer_allowed && confirmTransfer && (
+                <Group gap="xs">
+                  <span className="text-muted">
+                    This moves the Dotloop link from transaction {loopConflict.existing_transaction_id} to this transaction.
+                  </span>
+                  <Button
+                    variant="filled"
+                    size="xs"
+                    color="campari"
+                    onClick={() => void handleTransferLoop()}
+                    disabled={loopLinking}
+                  >
+                    {loopLinking ? 'Moving...' : 'Confirm move'}
+                  </Button>
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    color="gray"
+                    onClick={() => setConfirmTransfer(false)}
+                    disabled={loopLinking}
+                  >
+                    Cancel
+                  </Button>
+                </Group>
+              )}
+            </Stack>
+          </Alert>
         )}
         {loopMsg && <p className="invite-result">{loopMsg}</p>}
       </div>

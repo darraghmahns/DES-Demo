@@ -1,6 +1,6 @@
 /** Transaction API functions for D.E.S. */
 
-import { apiFetch } from './client';
+import { API_BASE, _getAuthToken, apiFetch } from './client';
 import type {
   ParticipantRole,
   Transaction,
@@ -347,11 +347,74 @@ export async function acceptInvitation(token: string): Promise<{ accepted: boole
 // Dotloop Loop Linking
 // ---------------------------------------------------------------------------
 
-export async function linkDotloopLoop(txnId: string, loopId: string): Promise<Transaction> {
-  return apiFetch<Transaction>(`/api/transactions/${txnId}/dotloop-loop`, {
+export interface DotloopLoopConflictDetail {
+  message: string;
+  existing_transaction_id: string;
+  transfer_allowed: boolean;
+}
+
+export class DotloopLoopConflictError extends Error {
+  detail: DotloopLoopConflictDetail;
+
+  constructor(detail: DotloopLoopConflictDetail) {
+    super(detail.message);
+    this.name = 'DotloopLoopConflictError';
+    this.detail = detail;
+  }
+}
+
+export function isDotloopLoopConflictError(error: unknown): error is DotloopLoopConflictError {
+  return error instanceof DotloopLoopConflictError;
+}
+
+export async function linkDotloopLoop(
+  txnId: string,
+  loopId: string,
+  options?: { forceTransfer?: boolean },
+): Promise<Transaction> {
+  const token = _getAuthToken ? await _getAuthToken() : null;
+  const resp = await fetch(`${API_BASE}/api/transactions/${txnId}/dotloop-loop`, {
     method: 'PATCH',
-    body: JSON.stringify({ loop_id: loopId }),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      loop_id: loopId,
+      ...(options?.forceTransfer ? { force_transfer: true } : {}),
+    }),
   });
+
+  if (resp.status === 409) {
+    const payload = await resp.json().catch(() => null);
+    const detail = payload?.detail;
+    if (
+      detail
+      && typeof detail.message === 'string'
+      && typeof detail.existing_transaction_id === 'string'
+      && typeof detail.transfer_allowed === 'boolean'
+    ) {
+      throw new DotloopLoopConflictError(detail);
+    }
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text();
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed.detail === 'string') {
+        detail = parsed.detail;
+      } else if (parsed.detail !== undefined) {
+        detail = JSON.stringify(parsed.detail);
+      }
+    } catch {
+      // fall through with raw body
+    }
+    throw new Error(detail || `HTTP ${resp.status}`);
+  }
+
+  return resp.json();
 }
 
 export async function previewTransactionFromDotloop(

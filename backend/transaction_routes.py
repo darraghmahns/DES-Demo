@@ -71,6 +71,7 @@ class CreateTransactionFromDotloopRequest(BaseModel):
 
 class SetDotloopLoopBody(BaseModel):
     loop_id: str
+    force_transfer: bool = False
 
 
 class UpdateTransactionRequest(BaseModel):
@@ -173,6 +174,15 @@ async def _get_owned_transaction(txn_id: str, user: UserProfile) -> Transaction:
     if txn.created_by != str(user.id):
         raise HTTPException(status_code=403, detail="Only the creator can update this transaction")
     return txn
+
+
+def _apply_dotloop_link_state(txn: Transaction, loop_id: str | None) -> None:
+    txn.dotloop_loop_id = loop_id
+    txn.dotloop_sync_status = DotloopSyncStatus.NEVER
+    txn.dotloop_last_synced_at = None
+    txn.dotloop_last_remote_updated_at = None
+    txn.dotloop_sync_error = None
+    txn.updated_at = _utcnow()
 
 
 def _merge_property_address(
@@ -1144,20 +1154,24 @@ async def set_dotloop_loop(
     u = await _get_user_or_dev(user)
     txn = await _get_owned_transaction(txn_id, u)
 
+    if txn.dotloop_loop_id == body.loop_id:
+        return _serialize_transaction(txn)
+
     existing = await Transaction.find_one({"dotloop_loop_id": body.loop_id, "_id": {"$ne": txn.id}})
     if existing:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "That Dotloop loop is already linked to another transaction",
-                "existing_transaction_id": str(existing.id),
-            },
-        )
+        transfer_allowed = existing.created_by == str(u.id)
+        conflict_detail = {
+            "message": "That Dotloop loop is already linked to another transaction",
+            "existing_transaction_id": str(existing.id),
+            "transfer_allowed": transfer_allowed,
+        }
+        if not body.force_transfer or not transfer_allowed:
+            raise HTTPException(status_code=409, detail=conflict_detail)
 
-    txn.dotloop_loop_id = body.loop_id
-    txn.dotloop_sync_status = DotloopSyncStatus.NEVER
-    txn.dotloop_sync_error = None
-    txn.updated_at = _utcnow()
+        _apply_dotloop_link_state(existing, None)
+        await existing.save()
+
+    _apply_dotloop_link_state(txn, body.loop_id)
     await txn.save()
     return _serialize_transaction(txn)
 
