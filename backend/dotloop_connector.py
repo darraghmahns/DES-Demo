@@ -483,9 +483,8 @@ async def process_from_dotloop(
         if engine.prefers_file_path:
             raw_extraction, _extract_usage = engine.extract_from_file(tmp_path, mode)
         else:
-            from pdf_converter import pdf_to_images, image_to_base64
-            images = pdf_to_images(tmp_path)
-            images_b64 = [image_to_base64(img) for img in images]
+            from pdf_converter import pdf_to_base64_images
+            images_b64 = pdf_to_base64_images(tmp_path)
             raw_extraction, _extract_usage = engine.extract(images_b64, mode)
 
         # Validate

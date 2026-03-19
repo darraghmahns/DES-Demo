@@ -27,7 +27,7 @@ from dotloop_connector import (
     resolve_profile_id as resolve_dotloop_profile_id,
 )
 from ocr_engine import get_engine
-from pdf_converter import get_pdf_info, image_to_base64, pdf_to_images
+from pdf_converter import get_pdf_info, pdf_to_base64_images
 from schemas import (
     DEFAULT_PURCHASE_REQUIREMENTS,
     DocumentRequirement,
@@ -611,8 +611,7 @@ async def _import_dotloop_document(
         if engine.prefers_file_path:
             raw_extraction, _ = engine.extract_from_file(dest_path, mode)
         else:
-            images = pdf_to_images(dest_path)
-            images_b64 = [image_to_base64(img) for img in images]
+            images_b64 = pdf_to_base64_images(dest_path)
             raw_extraction, _ = engine.extract(images_b64, mode)
 
         validated = DotloopLoopDetails.model_validate(raw_extraction)

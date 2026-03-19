@@ -4,6 +4,7 @@ import base64
 import io
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from PIL import Image
@@ -33,12 +34,41 @@ def check_poppler_installed() -> bool:
 MAX_PAGES = 20  # Safety limit for memory — most purchase agreements are <20 pages
 
 
-def pdf_to_images(pdf_path: str, dpi: int = 200, max_pages: int = MAX_PAGES) -> list[Image.Image]:
+def _validate_pdf(path: Path) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"PDF not found: {path}")
+    if path.suffix.lower() != ".pdf":
+        raise ValueError(f"Expected a PDF file, got: {path.suffix}")
+
+
+def _get_pdf_page_count(path: Path) -> int:
+    if convert_from_path is None:
+        return 1
+    try:
+        from pdf2image.pdf2image import pdfinfo_from_path
+        info = pdfinfo_from_path(str(path))
+        return info.get("Pages", 1)
+    except (OSError, ValueError, KeyError):
+        return 1
+
+
+def _enforce_page_limit(path: Path, max_pages: int) -> int:
+    page_count = _get_pdf_page_count(path)
+    if max_pages and page_count > max_pages:
+        raise ValueError(
+            f"PDF has {page_count} pages, exceeding the {max_pages}-page limit. "
+            f"Please use a shorter document."
+        )
+    return page_count
+
+
+def pdf_to_images(pdf_path: str, dpi: int = 150, max_pages: int = MAX_PAGES) -> list[Image.Image]:
     """Convert a PDF file to a list of PIL Images, one per page.
 
     Args:
         pdf_path: Path to the PDF file.
-        dpi: Resolution for rendering. 200 is a good balance of quality and token cost.
+        dpi: Resolution for rendering. 150 reduces peak memory on small
+            deployment instances without materially changing extraction quality.
         max_pages: Maximum pages to convert (0 = unlimited). Protects against
             large PDFs consuming excessive memory.
 
@@ -53,27 +83,52 @@ def pdf_to_images(pdf_path: str, dpi: int = 200, max_pages: int = MAX_PAGES) -> 
         sys.exit(1)
 
     path = Path(pdf_path)
-    if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
-    if not path.suffix.lower() == ".pdf":
-        raise ValueError(f"Expected a PDF file, got: {path.suffix}")
-
-    # Check page count before converting at full DPI
-    if max_pages and convert_from_path is not None:
-        try:
-            from pdf2image.pdf2image import pdfinfo_from_path
-            info = pdfinfo_from_path(str(path))
-            page_count = info.get("Pages", 0)
-            if page_count > max_pages:
-                raise ValueError(
-                    f"PDF has {page_count} pages, exceeding the {max_pages}-page limit. "
-                    f"Please use a shorter document."
-                )
-        except (OSError, KeyError):
-            pass  # If pdfinfo fails, proceed and let convert_from_path handle it
+    _validate_pdf(path)
+    _enforce_page_limit(path, max_pages)
 
     images = convert_from_path(str(path), dpi=dpi)
     return images
+
+
+def pdf_to_base64_images(
+    pdf_path: str,
+    dpi: int = 150,
+    max_pages: int = MAX_PAGES,
+    max_size: tuple[int, int] = (2048, 2048),
+) -> list[str]:
+    """Convert a PDF to base64 PNG pages without holding all PIL pages in memory."""
+    if convert_from_path is None:
+        print("ERROR: pdf2image is not installed. Run: pip install pdf2image", file=sys.stderr)
+        sys.exit(1)
+
+    path = Path(pdf_path)
+    _validate_pdf(path)
+    _enforce_page_limit(path, max_pages)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="des_pdf_pages_") as temp_dir:
+            image_paths = convert_from_path(
+                str(path),
+                dpi=dpi,
+                output_folder=temp_dir,
+                fmt="png",
+                paths_only=True,
+            )
+            encoded_images: list[str] = []
+            for image_path in image_paths:
+                with Image.open(image_path) as image:
+                    encoded_images.append(image_to_base64(image, max_size=max_size))
+            return encoded_images
+    except TypeError:
+        images = pdf_to_images(pdf_path, dpi=dpi, max_pages=max_pages)
+        try:
+            return [image_to_base64(image, max_size=max_size) for image in images]
+        finally:
+            for image in images:
+                try:
+                    image.close()
+                except Exception:
+                    pass
 
 
 def image_to_base64(image: Image.Image, max_size: tuple[int, int] = (2048, 2048)) -> str:
@@ -112,18 +167,7 @@ def get_pdf_info(pdf_path: str) -> dict:
     else:
         size_human = f"{size / (1024 * 1024):.1f} MB"
 
-    # Count pages by converting (lightweight — only counts, doesn't render at high DPI)
-    if convert_from_path is not None:
-        try:
-            pages = len(convert_from_path(str(path), dpi=72, first_page=1, last_page=1))
-            # To get actual page count we need pdfinfo or a full convert
-            from pdf2image.pdf2image import pdfinfo_from_path
-            info = pdfinfo_from_path(str(path))
-            page_count = info.get("Pages", 1)
-        except (OSError, ValueError, KeyError):
-            page_count = 1
-    else:
-        page_count = 1
+    page_count = _get_pdf_page_count(path)
 
     return {
         "name": path.name,

@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from pdf_converter import get_pdf_info, pdf_to_images, image_to_base64
+from pdf_converter import get_pdf_info, pdf_to_base64_images
 
 log = logging.getLogger(__name__)
 from verifier import compute_overall_confidence
@@ -830,12 +830,12 @@ async def _extraction_pipeline(
             "title": "Convert to Images", "status": "running",
         })
 
-        images = await asyncio.to_thread(pdf_to_images, pdf_path)
-        images_b64 = [image_to_base64(img) for img in images]
+        images_b64 = await asyncio.to_thread(pdf_to_base64_images, pdf_path)
+        pages_converted = len(images_b64)
 
         emit("step_complete", {
             "step": current_step, "title": "Convert to Images", "status": "complete",
-            "data": {"pages_converted": len(images)},
+            "data": {"pages_converted": pages_converted},
         })
 
         # --- Step 3: Neural OCR Extraction ---
@@ -1048,7 +1048,7 @@ async def _extraction_pipeline(
             mode=mode,
             source_file=Path(pdf_path).name,
             extraction_timestamp=datetime.now(timezone.utc).isoformat(),
-            pages_processed=len(images),
+            pages_processed=pages_converted,
             dotloop_data=validated_data if mode == "real_estate" else None,
             foia_data=validated_data if mode == "gov" else None,
             dotloop_api_payload=dotloop_api_payload,
@@ -1077,7 +1077,7 @@ async def _extraction_pipeline(
             doc_id = await save_document(
                 Path(pdf_path).name,
                 mode,
-                len(images),
+                pages_converted,
                 Path(pdf_path).stat().st_size,
                 file_hash=file_hash,
                 file_path=str(Path(pdf_path).resolve()),
