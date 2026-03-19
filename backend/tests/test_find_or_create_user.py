@@ -198,3 +198,59 @@ class TestFindOrCreateUser:
 
             assert user.has_clerk_account is True
             _patch_beanie_user["save"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_creates_user_from_primary_email_address_claim(self, _patch_beanie_user):
+        """Clerk session tokens may expose email via email_addresses instead of email."""
+        from auth import _find_or_create_user
+
+        claims = {
+            "sub": "user_nested",
+            "email_addresses": [
+                {"id": "email_secondary", "email_address": "secondary@example.com"},
+                {"id": "email_primary", "email_address": "primary@example.com"},
+            ],
+            "primary_email_address_id": "email_primary",
+            "first_name": "Casey",
+            "last_name": "Jones",
+        }
+
+        with patch.object(UserProfile, "find_one", new_callable=AsyncMock, return_value=None):
+            user = await _find_or_create_user("user_nested", claims)
+
+            assert user.email == "primary@example.com"
+            assert user.name == "Casey Jones"
+            _patch_beanie_user["insert"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_creates_user_with_unique_placeholder_when_email_missing(self, _patch_beanie_user):
+        """Missing email claims should not create duplicate blank emails."""
+        from auth import _find_or_create_user
+
+        claims = {"sub": "user_no_email", "name": "No Email"}
+
+        with patch.object(UserProfile, "find_one", new_callable=AsyncMock, return_value=None):
+            user = await _find_or_create_user("user_no_email", claims)
+
+            assert user.email == "user_no_email@users.clerk.local"
+            assert user.name == "No Email"
+            _patch_beanie_user["insert"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_existing_placeholder_email_is_replaced_when_claim_email_appears(self, _patch_beanie_user):
+        """A placeholder email should be upgraded once Clerk exposes the real email."""
+        from auth import _find_or_create_user
+
+        existing = UserProfile(
+            clerk_user_id="user_fixup",
+            email="user_fixup@users.clerk.local",
+            name="Taylor",
+            has_clerk_account=True,
+        )
+        claims = {"sub": "user_fixup", "email_address": "taylor@example.com"}
+
+        with patch.object(UserProfile, "find_one", new_callable=AsyncMock, return_value=existing):
+            user = await _find_or_create_user("user_fixup", claims)
+
+            assert user.email == "taylor@example.com"
+            _patch_beanie_user["save"].assert_awaited_once()

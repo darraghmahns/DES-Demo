@@ -8,7 +8,7 @@ import { useIntegrations } from '../hooks/useIntegrations';
 import { fetchDotloopLoops } from '../api';
 import type { DotloopLoop } from '../api';
 import { IconImport, IconTransactions } from '../components/common/AppIcons';
-import { STATUS_LABELS, STATUS_COLORS, type Transaction } from '../types/transaction';
+import { DOTLOOP_SYNC_LABELS, STATUS_LABELS, STATUS_COLORS, type Transaction } from '../types/transaction';
 import {
   createTransactionFromDotloop,
   previewTransactionFromDotloop,
@@ -75,7 +75,8 @@ function TransactionCard({ txn, highlight = false }: { txn: Transaction; highlig
 
       {txn.dotloop_loop_id && (
         <div className="txn-card-loop-badge">
-          <span className="source-dotloop">Dotloop</span> {txn.dotloop_sync_status || 'linked'}
+          <span className="source-dotloop">Dotloop</span>{' '}
+          {DOTLOOP_SYNC_LABELS[txn.dotloop_sync_status ?? 'never']}
         </div>
       )}
     </Card>

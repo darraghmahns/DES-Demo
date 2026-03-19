@@ -5,7 +5,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { Button, Badge, Alert, TextInput, Select, NumberInput, SimpleGrid, Stack, Group, Tabs, Card } from '@mantine/core';
 import { useTransactionDetail } from '../hooks/useTransaction';
 import { CompletionIndicator } from '../components/common/CompletionIndicator';
-import { STATUS_LABELS, STATUS_COLORS, ROLE_LABELS, type ParticipantRole, type TransactionStatus } from '../types/transaction';
+import { DOTLOOP_SYNC_LABELS, STATUS_LABELS, STATUS_COLORS, ROLE_LABELS, type ParticipantRole, type TransactionStatus } from '../types/transaction';
 import {
   listTransactionDocuments,
   linkDotloopLoop,
@@ -1113,7 +1113,7 @@ function OverviewTab({
                 )}
                 <div className="dotloop-sync-meta">
                   <Badge color={syncColor} variant="light">
-                    {transaction.dotloop_sync_status || 'never'}
+                    {DOTLOOP_SYNC_LABELS[transaction.dotloop_sync_status ?? 'never']}
                   </Badge>
                   <span>Last synced {formatDateTime(transaction.dotloop_last_synced_at)}</span>
                   {transaction.dotloop_last_remote_updated_at && (

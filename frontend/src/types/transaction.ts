@@ -127,3 +127,10 @@ export const STATUS_COLORS: Record<TransactionStatus, string> = {
   cancelled: 'red',
   expired: 'red',
 };
+
+export const DOTLOOP_SYNC_LABELS: Record<DotloopSyncStatus, string> = {
+  never: 'Linked',
+  current: 'Up to Date',
+  stale: 'Needs Review',
+  error: 'Sync Failed',
+};

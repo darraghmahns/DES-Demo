@@ -94,15 +94,78 @@ def _extract_bearer(request: Request) -> Optional[str]:
     return None
 
 
+def _extract_claim_email(claims: dict) -> str:
+    """Best-effort Clerk email extraction across token shapes."""
+    direct_candidates = [
+        claims.get("email"),
+        claims.get("email_address"),
+    ]
+    for candidate in direct_candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    email_addresses = claims.get("email_addresses")
+    primary_email_id = claims.get("primary_email_address_id")
+    if isinstance(email_addresses, list):
+        preferred = None
+        fallback = None
+        for entry in email_addresses:
+            if isinstance(entry, str) and entry.strip():
+                fallback = fallback or entry.strip()
+                continue
+            if not isinstance(entry, dict):
+                continue
+            email = entry.get("email_address")
+            if not isinstance(email, str) or not email.strip():
+                continue
+            email = email.strip()
+            fallback = fallback or email
+            if preferred is None and entry.get("id") == primary_email_id:
+                preferred = email
+        if preferred:
+            return preferred
+        if fallback:
+            return fallback
+
+    return ""
+
+
+def _extract_claim_name(claims: dict) -> str:
+    """Best-effort Clerk display name extraction across token shapes."""
+    direct_name = claims.get("name")
+    if isinstance(direct_name, str) and direct_name.strip():
+        return direct_name.strip()
+
+    first_name = claims.get("first_name")
+    last_name = claims.get("last_name")
+    parts = [part.strip() for part in [first_name, last_name] if isinstance(part, str) and part.strip()]
+    if parts:
+        return " ".join(parts)
+
+    username = claims.get("username")
+    if isinstance(username, str) and username.strip():
+        return username.strip()
+
+    return ""
+
+
+def _fallback_clerk_email(clerk_user_id: str) -> str:
+    """Unique placeholder email for Clerk users whose JWT omits email claims."""
+    return f"{clerk_user_id}@users.clerk.local"
+
+
 async def _find_or_create_user(clerk_user_id: str, claims: dict) -> "UserProfile":
     """Find existing user or create new one from JWT claims. Sync email/org on every call."""
     from db import UserProfile
 
+    claim_email = _extract_claim_email(claims)
+    claim_name = _extract_claim_name(claims)
+
     user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
     if user:
         changed = False
-        if claims.get("email") and user.email != claims.get("email"):
-            user.email = claims["email"]
+        if claim_email and user.email != claim_email:
+            user.email = claim_email
             changed = True
         if claims.get("org_id") and user.org_id != claims.get("org_id"):
             user.org_id = claims["org_id"]
@@ -118,8 +181,8 @@ async def _find_or_create_user(clerk_user_id: str, claims: dict) -> "UserProfile
     # Create new user — seed name from Clerk (one-time only)
     user = UserProfile(
         clerk_user_id=clerk_user_id,
-        email=claims.get("email", ""),
-        name=claims.get("name", ""),
+        email=claim_email or _fallback_clerk_email(clerk_user_id),
+        name=claim_name,
         org_id=claims.get("org_id"),
         org_name=claims.get("org_name"),
         has_clerk_account=True,
