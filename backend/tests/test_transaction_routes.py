@@ -11,6 +11,7 @@ from schemas import (
     DotloopPropertyAddress,
     ParticipantRole,
     ParticipantStatus,
+    TransactionParticipant,
     TransactionStatus,
     UserDocumentType,
 )
@@ -123,6 +124,101 @@ class TestTransactionRouteUpdates:
         try:
             assert response.status_code == 400
             assert "Property address is incomplete" in response.json()["detail"]
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_update_transaction_sets_agent_side_and_creator_agent_role(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.agent_side = "buyer"
+        txn.participants = [
+            TransactionParticipant(
+                user_id="user-1",
+                role=ParticipantRole.BUYING_AGENT,
+                status=ParticipantStatus.ACTIVE,
+                added_at=datetime.now(timezone.utc),
+            ),
+            TransactionParticipant(
+                user_id="user-2",
+                role=ParticipantRole.BUYER,
+                status=ParticipantStatus.INVITED,
+                added_at=datetime.now(timezone.utc),
+            ),
+        ]
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_owned_transaction", AsyncMock(return_value=txn)),
+            patch(
+                "transaction_routes._serialize_transaction",
+                side_effect=lambda value: {
+                    "_id": value.id,
+                    "agent_side": value.agent_side,
+                    "participants": [
+                        {"user_id": participant.user_id, "role": participant.role.value}
+                        for participant in value.participants
+                    ],
+                },
+            ),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.put(
+                    "/api/transactions/txn-123",
+                    json={"agent_role": "listing_agent"},
+                )
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["agent_side"] == "seller"
+            assert payload["participants"][0]["role"] == "LISTING_AGENT"
+            assert payload["participants"][1]["role"] == "BUYER"
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_update_transaction_only_changes_side_when_creator_is_not_agent_participant(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.agent_side = "seller"
+        txn.participants = [
+            TransactionParticipant(
+                user_id="user-1",
+                role=ParticipantRole.SELLER,
+                status=ParticipantStatus.ACTIVE,
+                added_at=datetime.now(timezone.utc),
+            ),
+        ]
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_owned_transaction", AsyncMock(return_value=txn)),
+            patch(
+                "transaction_routes._serialize_transaction",
+                side_effect=lambda value: {
+                    "_id": value.id,
+                    "agent_side": value.agent_side,
+                    "participants": [
+                        {"user_id": participant.user_id, "role": participant.role.value}
+                        for participant in value.participants
+                    ],
+                },
+            ),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.put(
+                    "/api/transactions/txn-123",
+                    json={"agent_role": "buying_agent"},
+                )
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["agent_side"] == "buyer"
+            assert payload["participants"][0]["role"] == "SELLER"
         finally:
             app.dependency_overrides.clear()
 
@@ -369,6 +465,115 @@ class TestTransactionRouteUpdates:
             assert payload["normalized_transaction"]["name"] == "123 Main Street"
             assert payload["normalized_transaction"]["agent_role"] == "listing_agent"
             assert payload["available_documents"]["pdf_count"] == 1
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_preview_transaction_from_dotloop_defaults_ambiguous_loop_to_listing_agent(self):
+        from auth import get_current_user
+        from server import app
+
+        loop_detail = {
+            "id": 555,
+            "name": "Unknown Loop",
+            "transaction_type": "",
+            "participants": [],
+            "documents": [],
+        }
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1", dotloop_tokens=None)
+        with (
+            patch("transaction_routes.dotloop_configured", return_value=True),
+            patch("transaction_routes.get_loop_with_details", return_value=loop_detail),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=None)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post("/api/transactions/from-dotloop/555/preview")
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["normalized_transaction"]["agent_role"] == "listing_agent"
+            assert payload["normalized_transaction"]["agent_side"] == "seller"
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_preview_transaction_from_dotloop_infers_buying_agent_for_purchase_offer(self):
+        from auth import get_current_user
+        from server import app
+
+        loop_detail = {
+            "id": 556,
+            "name": "Purchase Offer",
+            "transaction_type": "purchase offer",
+            "participants": [],
+            "documents": [],
+        }
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1", dotloop_tokens=None)
+        with (
+            patch("transaction_routes.dotloop_configured", return_value=True),
+            patch("transaction_routes.get_loop_with_details", return_value=loop_detail),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=None)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post("/api/transactions/from-dotloop/556/preview")
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["normalized_transaction"]["agent_role"] == "buying_agent"
+            assert payload["normalized_transaction"]["agent_side"] == "buyer"
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_create_transaction_from_dotloop_uses_selected_agent_role(self):
+        from auth import get_current_user
+        from server import app
+
+        loop_detail = {
+            "id": 777,
+            "name": "Offer Loop",
+            "transaction_type": "purchase offer",
+            "participants": [],
+            "documents": [],
+        }
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(
+            id="user-1",
+            dotloop_tokens=None,
+            org_id=None,
+        )
+        mock_settings = MagicMock()
+        mock_settings.motor_collection = MagicMock()
+        with (
+            patch("transaction_routes.dotloop_configured", return_value=True),
+            patch("transaction_routes.get_loop_with_details", return_value=loop_detail),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=None)),
+            patch("transaction_routes.Transaction.get_settings", return_value=mock_settings),
+            patch("transaction_routes.Transaction.insert", AsyncMock()),
+            patch(
+                "transaction_routes._serialize_transaction",
+                side_effect=lambda value: {
+                    "_id": str(value.id),
+                    "agent_side": value.agent_side,
+                    "participants": [
+                        {"user_id": participant.user_id, "role": participant.role.value}
+                        for participant in value.participants
+                    ],
+                },
+            ),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/api/transactions/from-dotloop/777",
+                    json={"agent_role": "listing_agent"},
+                )
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["agent_side"] == "seller"
+            assert payload["participants"][0]["role"] == "LISTING_AGENT"
         finally:
             app.dependency_overrides.clear()
 

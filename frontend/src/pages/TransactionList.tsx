@@ -8,7 +8,15 @@ import { useIntegrations } from '../hooks/useIntegrations';
 import { fetchDotloopLoops } from '../api';
 import type { DotloopLoop } from '../api';
 import { IconImport, IconTransactions } from '../components/common/AppIcons';
-import { DOTLOOP_SYNC_LABELS, STATUS_LABELS, STATUS_COLORS, type Transaction } from '../types/transaction';
+import {
+  AGENT_ROLE_OPTIONS,
+  DOTLOOP_SYNC_LABELS,
+  STATUS_LABELS,
+  STATUS_COLORS,
+  agentRoleToSide,
+  type AgentRole,
+  type Transaction,
+} from '../types/transaction';
 import {
   createTransactionFromDotloop,
   previewTransactionFromDotloop,
@@ -135,7 +143,7 @@ export function TransactionList() {
   const { dotloopConnected, loading: integrationsLoading } = useIntegrations();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
-  const [agentRole, setAgentRole] = useState<'listing_agent' | 'buying_agent'>('listing_agent');
+  const [agentRole, setAgentRole] = useState<AgentRole>('listing_agent');
   const [creating, setCreating] = useState(false);
 
   const [loops, setLoops] = useState<DotloopLoop[]>([]);
@@ -144,6 +152,7 @@ export function TransactionList() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [preview, setPreview] = useState<DotloopTransactionPreview | null>(null);
+  const [previewAgentRole, setPreviewAgentRole] = useState<AgentRole>('listing_agent');
   const [creatingFromLoop, setCreatingFromLoop] = useState(false);
 
   useEffect(() => {
@@ -184,7 +193,9 @@ export function TransactionList() {
     setPreviewError(null);
     setPreviewLoading(true);
     try {
-      setPreview(await previewTransactionFromDotloop(loop.id));
+      const nextPreview = await previewTransactionFromDotloop(loop.id);
+      setPreview(nextPreview);
+      setPreviewAgentRole(nextPreview.normalized_transaction.agent_role ?? 'listing_agent');
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : 'Failed to preview Dotloop loop.');
     } finally {
@@ -196,6 +207,7 @@ export function TransactionList() {
     setPreviewLoopId(null);
     setPreview(null);
     setPreviewError(null);
+    setPreviewAgentRole('listing_agent');
     setCreatingFromLoop(false);
   };
 
@@ -205,7 +217,7 @@ export function TransactionList() {
     setPreviewError(null);
     try {
       const txn = await createTransactionFromDotloop(previewLoopId, {
-        agent_role: preview?.normalized_transaction.agent_role,
+        agent_role: previewAgentRole,
       });
       closePreview();
       navigate(`/transactions/${txn._id}`);
@@ -244,11 +256,8 @@ export function TransactionList() {
             />
             <Select
               value={agentRole}
-              onChange={(val) => { if (val) setAgentRole(val as 'listing_agent' | 'buying_agent'); }}
-              data={[
-                { value: 'listing_agent', label: 'Listing Agent (representing seller)' },
-                { value: 'buying_agent', label: "Buyer's Agent (representing buyer)" },
-              ]}
+              onChange={(val) => { if (val) setAgentRole(val as AgentRole); }}
+              data={AGENT_ROLE_OPTIONS}
               size="sm"
             />
             <Button type="submit" variant="filled" color="cyan" disabled={creating || !newName.trim()}>
@@ -384,6 +393,19 @@ export function TransactionList() {
                 <div>
                   <strong>PDF Documents</strong>
                   <div>{preview.available_documents.pdf_count}</div>
+                </div>
+                <div>
+                  <strong>Your Role</strong>
+                  <Select
+                    value={previewAgentRole}
+                    onChange={(val) => { if (val) setPreviewAgentRole(val as AgentRole); }}
+                    data={AGENT_ROLE_OPTIONS}
+                    size="sm"
+                  />
+                </div>
+                <div>
+                  <strong>Deal Side</strong>
+                  <div>{agentRoleToSide(previewAgentRole) === 'seller' ? 'Listing (Seller)' : 'Buyer'}</div>
                 </div>
               </div>
               {preview.warnings.length > 0 && (

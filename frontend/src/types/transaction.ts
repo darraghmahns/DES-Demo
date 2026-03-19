@@ -12,6 +12,7 @@ export type TransactionStatus =
 export type ParticipantStatus = 'invited' | 'active' | 'removed';
 export type InvitationStatus = 'created' | 'sent' | 'opened' | 'accepted' | 'expired' | 'revoked' | 'failed';
 export type DotloopSyncStatus = 'never' | 'current' | 'stale' | 'error';
+export type AgentRole = 'listing_agent' | 'buying_agent';
 
 export type ParticipantRole =
   | 'BUYER'
@@ -74,6 +75,11 @@ export interface Transaction {
   updated_at: string;
 }
 
+export const AGENT_ROLE_OPTIONS: Array<{ value: AgentRole; label: string }> = [
+  { value: 'listing_agent', label: 'Listing Agent (representing seller)' },
+  { value: 'buying_agent', label: "Buyer's Agent (representing buyer)" },
+];
+
 export interface TransactionInvitation {
   id: string;
   transaction_id: string;
@@ -134,3 +140,18 @@ export const DOTLOOP_SYNC_LABELS: Record<DotloopSyncStatus, string> = {
   stale: 'Needs Review',
   error: 'Sync Failed',
 };
+
+export function agentRoleToSide(agentRole: AgentRole): 'buyer' | 'seller' {
+  return agentRole === 'listing_agent' ? 'seller' : 'buyer';
+}
+
+export function transactionToAgentRole(
+  transaction: Pick<Transaction, 'agent_side' | 'created_by' | 'participants'>,
+): AgentRole {
+  const creatorParticipant = transaction.participants.find(
+    (participant) => participant.user_id === transaction.created_by,
+  );
+  if (creatorParticipant?.role === 'LISTING_AGENT') return 'listing_agent';
+  if (creatorParticipant?.role === 'BUYING_AGENT') return 'buying_agent';
+  return transaction.agent_side === 'buyer' ? 'buying_agent' : 'listing_agent';
+}

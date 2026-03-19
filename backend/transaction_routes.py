@@ -83,6 +83,7 @@ class UpdateTransactionRequest(BaseModel):
     purchase_price: Optional[float] = None
     earnest_money: Optional[float] = None
     closing_date: Optional[str] = None
+    agent_role: Optional[str] = None  # "listing_agent" | "buying_agent"
     document_requirements: Optional[list[dict]] = None
 
 
@@ -280,7 +281,14 @@ def _is_complete_property_address(address: dict[str, Any] | None) -> bool:
 
 def _default_agent_role_for_loop(loop_detail: dict[str, Any]) -> str:
     transaction_type = str(loop_detail.get("transaction_type") or "").lower()
-    return "listing_agent" if "listing" in transaction_type else "buying_agent"
+    listing_keywords = ("listing", "seller", "sell", "for_sale")
+    buying_keywords = ("buyer", "buying", "purchase", "offer", "contract")
+
+    if any(keyword in transaction_type for keyword in listing_keywords):
+        return "listing_agent"
+    if any(keyword in transaction_type for keyword in buying_keywords):
+        return "buying_agent"
+    return "listing_agent"
 
 
 def _agent_role_to_participant_role(agent_role: str) -> ParticipantRole:
@@ -289,6 +297,17 @@ def _agent_role_to_participant_role(agent_role: str) -> ParticipantRole:
 
 def _agent_role_to_side(agent_role: str) -> str:
     return "seller" if agent_role == "listing_agent" else "buyer"
+
+
+def _sync_creator_agent_role(txn: Transaction, creator_user_id: str, agent_role: str) -> None:
+    target_role = _agent_role_to_participant_role(agent_role)
+    for participant in txn.participants:
+        if str(participant.user_id) != creator_user_id:
+            continue
+        if participant.role not in (ParticipantRole.LISTING_AGENT, ParticipantRole.BUYING_AGENT):
+            return
+        participant.role = target_role
+        return
 
 
 def _dotloop_role_to_participant_role(role: str | None) -> ParticipantRole:
@@ -1105,6 +1124,9 @@ async def update_transaction(
         parsed = _parse_datetimeish(req.closing_date)
         if parsed:
             txn.closing_date = parsed
+    if req.agent_role is not None:
+        txn.agent_side = _agent_role_to_side(req.agent_role)
+        _sync_creator_agent_role(txn, str(u.id), req.agent_role)
     if req.property_address is not None:
         try:
             txn.property_address = _merge_property_address(txn.property_address, req.property_address)

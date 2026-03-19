@@ -5,7 +5,17 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { Button, Badge, Alert, TextInput, Select, NumberInput, SimpleGrid, Stack, Group, Tabs, Card, Progress } from '@mantine/core';
 import { useTransactionDetail } from '../hooks/useTransaction';
 import { CompletionIndicator } from '../components/common/CompletionIndicator';
-import { DOTLOOP_SYNC_LABELS, STATUS_LABELS, STATUS_COLORS, ROLE_LABELS, type ParticipantRole, type TransactionStatus } from '../types/transaction';
+import {
+  AGENT_ROLE_OPTIONS,
+  DOTLOOP_SYNC_LABELS,
+  STATUS_LABELS,
+  STATUS_COLORS,
+  ROLE_LABELS,
+  transactionToAgentRole,
+  type AgentRole,
+  type ParticipantRole,
+  type TransactionStatus,
+} from '../types/transaction';
 import {
   DotloopLoopConflictError,
   type DotloopLoopConflictDetail,
@@ -765,6 +775,7 @@ function OverviewTab({
   const [mls, setMls] = useState(transaction.mls_number || '');
   const [closingDate, setClosingDate] = useState(transaction.closing_date || '');
   const [txnType, setTxnType] = useState(transaction.transaction_type || '');
+  const [agentRole, setAgentRole] = useState<AgentRole>(transactionToAgentRole(transaction));
   const [streetNumber, setStreetNumber] = useState(transaction.property_address?.street_number || '');
   const [streetName, setStreetName] = useState(transaction.property_address?.street_name || '');
   const [unitNumber, setUnitNumber] = useState(transaction.property_address?.unit_number || '');
@@ -800,6 +811,7 @@ function OverviewTab({
     setMls(transaction.mls_number || '');
     setClosingDate(transaction.closing_date || '');
     setTxnType(transaction.transaction_type || '');
+    setAgentRole(transactionToAgentRole(transaction));
     setStreetNumber(transaction.property_address?.street_number || '');
     setStreetName(transaction.property_address?.street_name || '');
     setUnitNumber(transaction.property_address?.unit_number || '');
@@ -881,6 +893,7 @@ function OverviewTab({
       await onUpdate({
         name: name || undefined,
         transaction_type: txnType || undefined,
+        agent_role: agentRole,
         purchase_price: price ? parseFloat(price) : undefined,
         earnest_money: earnest ? parseFloat(earnest) : undefined,
         mls_number: mls || undefined,
@@ -1045,6 +1058,13 @@ function OverviewTab({
                 value={closingDate}
                 onChange={e => setClosingDate(e.target.value)}
                 placeholder="YYYY-MM-DD"
+                size="sm"
+              />
+              <Select
+                label="Your Role"
+                value={agentRole}
+                onChange={(val) => { if (val) setAgentRole(val as AgentRole); }}
+                data={AGENT_ROLE_OPTIONS}
                 size="sm"
               />
             </SimpleGrid>

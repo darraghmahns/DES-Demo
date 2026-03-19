@@ -2,6 +2,7 @@
 
 import { API_BASE, _getAuthToken, apiFetch } from './client';
 import type {
+  AgentRole,
   ParticipantRole,
   Transaction,
   TransactionInvitation,
@@ -20,7 +21,7 @@ export interface CreateTransactionPayload {
   purchase_price?: number;
   earnest_money?: number;
   closing_date?: string;
-  agent_role?: 'listing_agent' | 'buying_agent';
+  agent_role?: AgentRole;
 }
 
 export async function createTransaction(data: CreateTransactionPayload): Promise<Transaction> {
@@ -279,7 +280,7 @@ export interface DotloopTransactionPreview {
     earnest_money?: number | null;
     closing_date?: string | null;
     dotloop_loop_id: string;
-    agent_role?: 'listing_agent' | 'buying_agent';
+    agent_role?: AgentRole;
     agent_side?: 'buyer' | 'seller';
   };
   participant_suggestions: Array<{
@@ -419,7 +420,7 @@ export async function linkDotloopLoop(
 
 export async function previewTransactionFromDotloop(
   loopId: number,
-  data?: { name_override?: string; agent_role?: 'listing_agent' | 'buying_agent' },
+  data?: { name_override?: string; agent_role?: AgentRole },
 ): Promise<DotloopTransactionPreview> {
   return apiFetch<DotloopTransactionPreview>(`/api/transactions/from-dotloop/${loopId}/preview`, {
     method: 'POST',
@@ -429,7 +430,7 @@ export async function previewTransactionFromDotloop(
 
 export async function createTransactionFromDotloop(
   loopId: number,
-  data?: { name_override?: string; agent_role?: 'listing_agent' | 'buying_agent' },
+  data?: { name_override?: string; agent_role?: AgentRole },
 ): Promise<Transaction> {
   return apiFetch<Transaction>(`/api/transactions/from-dotloop/${loopId}`, {
     method: 'POST',
