@@ -755,6 +755,9 @@ export interface OfferData {
   fields: Record<string, string | number | boolean | null>;
   /** All extracted values not covered by the field registry — nothing silently dropped. */
   raw_extras: Record<string, unknown>;
+  field_citations: Record<string, VerificationCitation[]>;
+  field_citation_meta: Record<string, { state: 'supported' | 'not_found' | 'not_captured'; stale: boolean }>;
+  overridden_fields: string[];
 }
 
 export interface OffersComparisonResult {

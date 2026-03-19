@@ -141,11 +141,6 @@ export function ProfileDocuments() {
               <div className="document-card-meta">
                 <span>{formatBytes(doc.file_size_bytes)}</span>
                 <span>{new Date(doc.uploaded_at).toLocaleDateString()}</span>
-                {doc.overall_confidence !== null && (
-                  <span className="confidence-badge">
-                    {Math.round(doc.overall_confidence * 100)}% confidence
-                  </span>
-                )}
               </div>
             </div>
 

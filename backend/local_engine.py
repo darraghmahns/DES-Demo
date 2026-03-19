@@ -23,6 +23,7 @@ import base64
 import tempfile
 from collections import defaultdict
 from io import BytesIO
+from typing import Any
 
 from PIL import Image
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -36,7 +37,14 @@ from schemas import (
     FOIARequest,
     VerificationCitation,
 )
-from extractor import REAL_ESTATE_SYSTEM_PROMPT, GOV_SYSTEM_PROMPT, OCR_SYSTEM_PROMPT, EMPTY_USAGE
+from extractor import (
+    REAL_ESTATE_SYSTEM_PROMPT,
+    GOV_SYSTEM_PROMPT,
+    OCR_SYSTEM_PROMPT,
+    EMPTY_USAGE,
+    MISSING_FIELD_RECOVERY_SYSTEM_PROMPT,
+)
+from offer_fields import ensure_required_citations, stringify_field_value
 from verifier import VERIFICATION_SYSTEM_PROMPT
 
 log = logging.getLogger(__name__)
@@ -55,6 +63,12 @@ _EXTRACT_PREAMBLE = (
 _VERIFY_PREAMBLE = (
     "You will receive the full Markdown text of a document, followed by "
     "previously extracted data. Verify each field by citing its source location.\n\n"
+)
+
+_RECOVERY_PREAMBLE = (
+    "You will receive the full Markdown text of a document, followed by "
+    "the current extraction result and a list of missing comparison fields. "
+    "Recover only the listed fields.\n\n"
 )
 
 
@@ -208,7 +222,10 @@ class LocalEngine(OCREngine):
         return json.loads(raw_json), dict(EMPTY_USAGE)
 
     def verify_from_file(
-        self, file_path: str, extracted_data: dict
+        self,
+        file_path: str,
+        extracted_data: dict,
+        required_field_targets: list[dict[str, Any]] | None = None,
     ) -> tuple[list[VerificationCitation], dict]:
         """Verify extraction using the original PDF via Docling + Ollama."""
         markdown = self._convert_pdf(file_path)
@@ -222,6 +239,15 @@ class LocalEngine(OCREngine):
             + "Verify each field by citing its exact source location.\n\n"
             + f"Extracted data:\n{json.dumps(extracted_data, indent=2)}"
         )
+        if required_field_targets:
+            target_lines = "\n".join(
+                f'- field_name: "{entry["path"]}" | current_value: "{stringify_field_value(entry.get("value"))}"'
+                for entry in required_field_targets
+            )
+            user_msg += (
+                "\n\nRequired comparison fields to explicitly verify even if null or false:\n"
+                f"{target_lines}"
+            )
 
         citation_schema = {
             "type": "object",
@@ -267,7 +293,55 @@ class LocalEngine(OCREngine):
             except Exception:
                 continue
 
+        if required_field_targets:
+            citations = ensure_required_citations(citations, required_field_targets)
+
         return citations, dict(EMPTY_USAGE)
+
+    def recover_missing_fields_from_file(
+        self,
+        file_path: str,
+        extracted_data: dict,
+        field_targets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict]:
+        if not field_targets:
+            return {}, dict(EMPTY_USAGE)
+
+        markdown = self._convert_pdf(file_path)
+        field_lines = "\n".join(
+            f'- field_path: "{entry["path"]}" | label: "{entry["label"]}" | type: "{entry["type"]}"'
+            f' | current_value: "{stringify_field_value(entry.get("value"))}"'
+            for entry in field_targets
+        )
+        user_msg = (
+            _RECOVERY_PREAMBLE
+            + "--- DOCUMENT TEXT ---\n\n"
+            + markdown
+            + "\n\n--- END DOCUMENT ---\n\n"
+            + "Current extraction result:\n"
+            + json.dumps(extracted_data, indent=2)
+            + "\n\nRecover only these missing comparison fields:\n"
+            + field_lines
+            + "\n\nReturn only JSON like {\"recoveries\": {\"field.path\": value_or_null}}."
+        )
+
+        raw_json = self._chat(
+            system_prompt=MISSING_FIELD_RECOVERY_SYSTEM_PROMPT,
+            user_content=user_msg,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "recoveries": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    }
+                },
+                "required": ["recoveries"],
+            },
+        )
+        raw = json.loads(raw_json)
+        recoveries = raw.get("recoveries")
+        return recoveries if isinstance(recoveries, dict) else {}, dict(EMPTY_USAGE)
 
     def ocr_raw_text_from_file(self, file_path: str) -> tuple[list[str], dict]:
         """Extract raw text per page directly from a PDF file using Docling."""
@@ -284,12 +358,27 @@ class LocalEngine(OCREngine):
             os.unlink(tmp_pdf)
 
     def verify(
-        self, images_b64: list[str], extracted_data: dict
+        self,
+        images_b64: list[str],
+        extracted_data: dict,
+        required_field_targets: list[dict[str, Any]] | None = None,
     ) -> tuple[list[VerificationCitation], dict]:
         """Fallback: reconstruct PDF from images, then verify via Docling."""
         tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
         try:
-            return self.verify_from_file(tmp_pdf, extracted_data)
+            return self.verify_from_file(tmp_pdf, extracted_data, required_field_targets)
+        finally:
+            os.unlink(tmp_pdf)
+
+    def recover_missing_fields(
+        self,
+        images_b64: list[str],
+        extracted_data: dict,
+        field_targets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict]:
+        tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
+        try:
+            return self.recover_missing_fields_from_file(tmp_pdf, extracted_data, field_targets)
         finally:
             os.unlink(tmp_pdf)
 

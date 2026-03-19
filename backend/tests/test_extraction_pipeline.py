@@ -113,6 +113,13 @@ def mock_engine():
         ],
         {"prompt_tokens": 500, "completion_tokens": 100, "total_tokens": 600},
     )
+    engine.recover_missing_fields.return_value = (
+        {
+            "property_address.parcel_tax_id": "TAX-999",
+            "terms.inspection_contingency": False,
+        },
+        {"prompt_tokens": 150, "completion_tokens": 40, "total_tokens": 190},
+    )
 
     return engine
 
@@ -235,7 +242,7 @@ class TestRealEstateHappyPath:
     async def test_step_count_matches(
         self, tmp_pdf, mock_engine, mock_compliance_report, mock_enrichment,
     ):
-        """Total steps should be 7 for real_estate with Regrid configured."""
+        """Total steps should be 8 for real_estate with recovery + Regrid configured."""
         from server import _extraction_pipeline
 
         emit, events = _collect_emitter()
@@ -249,7 +256,7 @@ class TestRealEstateHappyPath:
 
         # First step event tells us the total
         step_events = [e for e in events if e[0] == "step"]
-        assert step_events[0][1]["total"] == 7  # Load,Convert,Extract,Validate,Verify,Enrich,Output
+        assert step_events[0][1]["total"] == 8  # Load,Convert,Extract,Validate,Recover,Verify,Enrich,Output
 
     @pytest.mark.asyncio
     async def test_validation_succeeds(
@@ -344,10 +351,29 @@ class TestRealEstateHappyPath:
             await _extraction_pipeline("real_estate", tmp_pdf, emit)
 
         complete_data = [e[1] for e in events if e[0] == "complete"][0]
-        # extract: 1000+200=1200, verify: 500+100=600 → total: 1800
-        assert complete_data["total_tokens"] == 1800
-        assert complete_data["prompt_tokens"] == 1500
-        assert complete_data["completion_tokens"] == 300
+        # extract: 1200, recover: 190, verify: 600 → total: 1990
+        assert complete_data["total_tokens"] == 1990
+        assert complete_data["prompt_tokens"] == 1650
+        assert complete_data["completion_tokens"] == 340
+
+    @pytest.mark.asyncio
+    async def test_recovery_step_runs(
+        self, tmp_pdf, mock_engine, mock_compliance_report, mock_enrichment,
+    ):
+        from server import _extraction_pipeline
+
+        emit, events = _collect_emitter()
+        patches = _standard_patches(mock_engine, mock_compliance_report, mock_enrichment)
+
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            await _extraction_pipeline("real_estate", tmp_pdf, emit)
+
+        step_titles = [e[1]["title"] for e in events if e[0] == "step"]
+        assert "Recover Missing Comparison Fields" in step_titles
+        mock_engine.recover_missing_fields.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +425,7 @@ class TestNoRegridConfigured:
             await _extraction_pipeline("real_estate", tmp_pdf, emit)
 
         step_events = [e for e in events if e[0] == "step"]
-        assert step_events[0][1]["total"] == 6  # No enrichment step
+        assert step_events[0][1]["total"] == 7  # Recovery still runs; no enrichment step
 
 
 # ---------------------------------------------------------------------------

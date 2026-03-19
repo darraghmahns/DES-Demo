@@ -26,6 +26,7 @@ from dotloop_connector import (
     is_configured as dotloop_configured,
     resolve_profile_id as resolve_dotloop_profile_id,
 )
+from offer_fields import get_offer_field_targets, get_missing_offer_field_targets, merge_recovered_offer_fields
 from ocr_engine import get_engine
 from pdf_converter import get_pdf_info, pdf_to_base64_images
 from schemas import (
@@ -616,20 +617,30 @@ async def _import_dotloop_document(
 
         validated = DotloopLoopDetails.model_validate(raw_extraction)
         validated_data = validated.model_dump(mode="json")
+        recovery_targets = get_missing_offer_field_targets(validated_data)
+        if recovery_targets:
+            if engine.prefers_file_path:
+                recovered_values, _ = engine.recover_missing_fields_from_file(dest_path, validated_data, recovery_targets)
+            else:
+                recovered_values, _ = engine.recover_missing_fields(images_b64, validated_data, recovery_targets)  # type: ignore[name-defined]
+            validated_data, _ = merge_recovered_offer_fields(validated_data, recovered_values)
+
+        required_field_targets = get_offer_field_targets(validated_data)
         if engine.prefers_file_path:
-            citations, _ = engine.verify_from_file(dest_path, validated_data)
+            citations, _ = engine.verify_from_file(dest_path, validated_data, required_field_targets)
         else:
-            citations, _ = engine.verify(images_b64, validated_data)  # type: ignore[name-defined]
+            citations, _ = engine.verify(images_b64, validated_data, required_field_targets)  # type: ignore[name-defined]
 
         overall_confidence = compute_overall_confidence(citations)
         file_info = get_pdf_info(dest_path)
+        api_model = DotloopLoopDetails.model_validate(validated_data)
         result = ExtractionResult(
             mode=mode,
             source_file=safe_name,
             extraction_timestamp=_utcnow().isoformat(),
             pages_processed=file_info["pages"],
             dotloop_data=validated_data,
-            dotloop_api_payload=validated.to_dotloop_api_format(),
+            dotloop_api_payload=api_model.to_dotloop_api_format(),
             citations=citations,
             overall_confidence=overall_confidence,
         )

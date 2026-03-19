@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from extractor import extract_from_images, _parse_json_payload
+from extractor import extract_from_images, recover_missing_fields_from_images, _parse_json_payload
 from verifier import verify_extraction
 
 
@@ -72,3 +72,67 @@ def test_verify_extraction_repairs_malformed_json():
     assert len(citations) == 1
     assert citations[0].field_name == "loop_name"
     assert usage["total_tokens"] == 345
+
+
+def test_recover_missing_fields_from_images_returns_recoveries():
+    client = DummyClient([
+        _response('{"recoveries":{"financials.earnest_money_amount":15000,"terms.inspection_contingency":false}}'),
+    ])
+
+    recoveries, usage = recover_missing_fields_from_images(
+        ["base64data"],
+        {"financials": {"purchase_price": 612500.0}},
+        [
+            {"path": "financials.earnest_money_amount", "label": "Earnest Money", "type": "currency", "value": None},
+            {"path": "terms.inspection_contingency", "label": "Inspection Contingency", "type": "boolean", "value": None},
+        ],
+        client,
+    )
+
+    assert recoveries["financials.earnest_money_amount"] == 15000
+    assert recoveries["terms.inspection_contingency"] is False
+    assert usage["total_tokens"] == 30
+
+
+def test_recover_missing_fields_from_images_repairs_malformed_json():
+    malformed = '{"recoveries":{"financials.earnest_money_amount":15000,"terms.inspection_contingency":false'
+    repaired = '{"recoveries":{"financials.earnest_money_amount":15000,"terms.inspection_contingency":false}}'
+    client = DummyClient([
+        _response(malformed, finish_reason="length", prompt_tokens=40, completion_tokens=50),
+        _response(repaired, prompt_tokens=10, completion_tokens=12),
+    ])
+
+    recoveries, usage = recover_missing_fields_from_images(
+        ["base64data"],
+        {"financials": {"purchase_price": 612500.0}},
+        [
+            {"path": "financials.earnest_money_amount", "label": "Earnest Money", "type": "currency", "value": None},
+            {"path": "terms.inspection_contingency", "label": "Inspection Contingency", "type": "boolean", "value": None},
+        ],
+        client,
+    )
+
+    assert recoveries["financials.earnest_money_amount"] == 15000
+    assert recoveries["terms.inspection_contingency"] is False
+    assert usage["prompt_tokens"] == 50
+    assert usage["completion_tokens"] == 62
+
+
+def test_verify_extraction_ensures_required_not_found_citations():
+    repaired = '{"citations":[{"field_name":"financials.purchase_price","extracted_value":"612500.0","page_number":1,"line_or_region":"Section 2","surrounding_text":"Purchase price","confidence":0.95}]}'
+    client = DummyClient([_response(repaired, prompt_tokens=20, completion_tokens=25)])
+
+    citations, _ = verify_extraction(
+        ["base64data"],
+        {"financials": {"purchase_price": 612500.0}, "terms": {"inspection_contingency": None}},
+        client,
+        [
+            {"path": "financials.purchase_price", "value": 612500.0},
+            {"path": "terms.inspection_contingency", "value": None},
+        ],
+    )
+
+    by_field = {citation.field_name: citation for citation in citations}
+    assert by_field["financials.purchase_price"].confidence == 0.95
+    assert by_field["terms.inspection_contingency"].surrounding_text == "NOT FOUND"
+    assert by_field["terms.inspection_contingency"].confidence == 0.0

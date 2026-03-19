@@ -4,9 +4,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Group } from '@mantine/core';
 import { fetchExtractions, fetchOffersComparison, deleteExtraction, updateOfferFields } from '../api';
-import type { ExtractionSummary, OffersComparisonResult, OfferField } from '../api';
+import type { ExtractionSummary, OffersComparisonResult, OfferField, VerificationCitation } from '../api';
 import { listTransactions } from '../api/transactions';
 import type { Transaction } from '../types/transaction';
+import { ComparisonCellCitation } from '../components/offers/ComparisonCellCitation';
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -77,16 +78,29 @@ interface EditableCellProps {
   field: OfferField;
   extractionId: string;
   allValues: FieldValue[];
+  citations: VerificationCitation[];
+  citationState: 'supported' | 'not_found' | 'not_captured';
+  isStale: boolean;
   onSave: (extractionId: string, key: string, value: FieldValue) => void;
 }
 
 // Boolean fields that indicate a negative/risk when true (from seller's perspective)
 const WARN_WHEN_TRUE = new Set(['opd_delivered']);
 
-function EditableCell({ value, field, extractionId, allValues, onSave }: EditableCellProps) {
+function EditableCell({
+  value,
+  field,
+  extractionId,
+  allValues,
+  citations,
+  citationState,
+  isStale,
+  onSave,
+}: EditableCellProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [saved, setSaved] = useState(false);
+  const [textFocused, setTextFocused] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   let cellClass = '';
@@ -118,30 +132,56 @@ function EditableCell({ value, field, extractionId, allValues, onSave }: Editabl
   if (field.type === 'boolean') {
     const next = value === null ? true : value === true ? false : null;
     return (
-      <td
-        className={`comparison-cell comparison-cell-bool ${cellClass}`}
-        onClick={() => { onSave(extractionId, field.key, next); setSaved(true); setTimeout(() => setSaved(false), 1500); }}
-        title="Click to toggle"
+      <ComparisonCellCitation
+        fieldLabel={field.label}
+        value={value}
+        citations={citations}
+        state={citationState}
+        stale={isStale}
       >
-        <span className="comparison-cell-value">{formatValue(value, field.type)}</span>
-        {saved && <span className="comparison-cell-saved">Saved</span>}
-      </td>
+        <td
+          className={`comparison-cell comparison-cell-bool ${cellClass}`}
+          onClick={() => { onSave(extractionId, field.key, next); setSaved(true); setTimeout(() => setSaved(false), 1500); }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onSave(extractionId, field.key, next);
+              setSaved(true);
+              setTimeout(() => setSaved(false), 1500);
+            }
+          }}
+        >
+          <span className="comparison-cell-value">{formatValue(value, field.type)}</span>
+          {saved && <span className="comparison-cell-saved">Saved</span>}
+        </td>
+      </ComparisonCellCitation>
     );
   }
 
   // Text (notes, inclusions etc.): always-on textarea
   if (field.type === 'text') {
     return (
-      <td className={`comparison-cell comparison-cell-text ${cellClass}`}>
-        <textarea
-          className="comparison-cell-textarea"
-          defaultValue={value != null ? String(value) : ''}
-          onChange={e => triggerSave(e.target.value)}
-          rows={3}
-          placeholder="--"
-        />
-        {saved && <span className="comparison-cell-saved">Saved</span>}
-      </td>
+      <ComparisonCellCitation
+        fieldLabel={field.label}
+        value={value}
+        citations={citations}
+        state={citationState}
+        stale={isStale}
+        disabled={textFocused}
+      >
+        <td className={`comparison-cell comparison-cell-text ${cellClass}`}>
+          <textarea
+            className="comparison-cell-textarea"
+            defaultValue={value != null ? String(value) : ''}
+            onChange={e => triggerSave(e.target.value)}
+            onFocus={() => setTextFocused(true)}
+            onBlur={() => setTextFocused(false)}
+            rows={3}
+            placeholder="--"
+          />
+          {saved && <span className="comparison-cell-saved">Saved</span>}
+        </td>
+      </ComparisonCellCitation>
     );
   }
 
@@ -180,14 +220,28 @@ function EditableCell({ value, field, extractionId, allValues, onSave }: Editabl
   }
 
   return (
-    <td
-      className={`comparison-cell comparison-cell-clickable ${cellClass}`}
-      onClick={() => { setDraft(value != null ? String(value) : ''); setEditing(true); }}
-      title="Click to edit"
+    <ComparisonCellCitation
+      fieldLabel={field.label}
+      value={value}
+      citations={citations}
+      state={citationState}
+      stale={isStale}
     >
-      <span className="comparison-cell-value">{formatValue(value, field.type)}</span>
-      {saved && <span className="comparison-cell-saved">Saved</span>}
-    </td>
+      <td
+        className={`comparison-cell comparison-cell-clickable ${cellClass}`}
+        onClick={() => { setDraft(value != null ? String(value) : ''); setEditing(true); }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setDraft(value != null ? String(value) : '');
+            setEditing(true);
+          }
+        }}
+      >
+        <span className="comparison-cell-value">{formatValue(value, field.type)}</span>
+        {saved && <span className="comparison-cell-saved">Saved</span>}
+      </td>
+    </ComparisonCellCitation>
   );
 }
 
@@ -273,6 +327,8 @@ function ComparisonTable({ result, localEdits, highlightedRow, onRowHover, onRem
                     const rawValue: FieldValue = localVal !== undefined
                       ? parseFieldValue(localVal, field.type)
                       : (offer.fields[field.key] ?? null);
+                    const hasLocalEdit = localVal !== undefined;
+                    const citationMeta = offer.field_citation_meta?.[field.key] ?? { state: 'not_captured' as const, stale: false };
                     const allValues = offers.map(o => {
                       const lv = localEdits.get(o.extraction_id)?.[field.key];
                       return lv !== undefined ? parseFieldValue(lv, field.type) : (o.fields[field.key] ?? null);
@@ -284,6 +340,9 @@ function ComparisonTable({ result, localEdits, highlightedRow, onRowHover, onRem
                         field={field}
                         extractionId={offer.extraction_id}
                         allValues={allValues}
+                        citations={offer.field_citations?.[field.key] ?? []}
+                        citationState={citationMeta.state}
+                        isStale={citationMeta.stale || hasLocalEdit}
                         onSave={onFieldSave}
                       />
                     );

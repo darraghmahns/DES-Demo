@@ -3,8 +3,11 @@
 import json
 import logging
 import re
+from typing import Any
 
 from openai import OpenAI
+
+from offer_fields import stringify_field_value
 
 log = logging.getLogger(__name__)
 
@@ -247,6 +250,27 @@ Rules:
 # Used to get raw text from images for PII scanning
 OCR_SYSTEM_PROMPT = """You are an OCR engine. Extract ALL text from this document image exactly as it appears, preserving line breaks and formatting. Return ONLY the raw text, nothing else. Include every character, number, and symbol visible on the page."""
 
+MISSING_FIELD_RECOVERY_SYSTEM_PROMPT = """You are a real estate extraction specialist doing a second pass over a purchase agreement.
+
+You are given:
+- the document pages
+- the current extraction result
+- a list of comparison-visible fields that are still empty or missing
+
+Your job is to search ONLY for those missing fields.
+
+Rules:
+- Return a JSON object with a single top-level key: "recoveries"
+- recoveries must map each exact field_path string to either the recovered value or null
+- Use the exact field_path strings provided; do not invent new keys
+- Use exact document values only
+- If a field is still not present, return null
+- Do not change fields that are not listed
+- For booleans, return true or false only when the document explicitly supports that reading
+- For currency, return a number
+- For dates, return the exact date string found in the document
+"""
+
 
 EMPTY_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -361,6 +385,69 @@ def _repair_json_payload(
 
     repaired_content = response.choices[0].message.content or ""
     return _parse_json_payload(repaired_content), _usage_dict(response.usage)
+
+
+def _build_recovery_request_text(extracted_data: dict, field_targets: list[dict[str, Any]]) -> str:
+    lines = []
+    for entry in field_targets:
+        lines.append(
+            f'- field_path: "{entry["path"]}" | label: "{entry["label"]}" | type: "{entry["type"]}"'
+            f' | current_value: "{stringify_field_value(entry.get("value"))}"'
+        )
+    return (
+        "Current extraction result:\n"
+        f"{json.dumps(extracted_data, indent=2)}\n\n"
+        "Recover only these missing comparison fields:\n"
+        f"{chr(10).join(lines)}\n\n"
+        "Return only JSON like {\"recoveries\": {\"field.path\": value_or_null}}."
+    )
+
+
+def recover_missing_fields_from_images(
+    images_b64: list[str],
+    extracted_data: dict,
+    field_targets: list[dict[str, Any]],
+    client: OpenAI,
+) -> tuple[dict[str, Any], dict]:
+    """Run a targeted second-pass extraction for missing comparison fields."""
+    if not field_targets:
+        return {}, dict(EMPTY_USAGE)
+
+    content: list[dict] = []
+    for i, img_b64 in enumerate(images_b64):
+        content.append({"type": "text", "text": f"--- Page {i + 1} of {len(images_b64)} ---"})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{img_b64}", "detail": "high"},
+        })
+
+    content.append({"type": "text", "text": _build_recovery_request_text(extracted_data, field_targets)})
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": MISSING_FIELD_RECOVERY_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+        max_tokens=4096,
+        timeout=120.0,
+    )
+
+    usage = _usage_dict(response.usage)
+    content = response.choices[0].message.content or ""
+    try:
+        payload = _parse_json_payload(content)
+    except json.JSONDecodeError as exc:
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        log.warning("Malformed recovery JSON from model (finish_reason=%s): %s", finish_reason, exc)
+        payload, repair_usage = _repair_json_payload(content, client)
+        usage = _combine_usage(usage, repair_usage)
+    recoveries = payload.get("recoveries")
+    if not isinstance(recoveries, dict):
+        return {}, usage
+    return recoveries, usage
 
 
 def extract_from_images(

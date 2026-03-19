@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { Button, Badge, Alert, TextInput, Select, NumberInput, SimpleGrid, Stack, Group, Tabs, Card } from '@mantine/core';
+import { Button, Badge, Alert, TextInput, Select, NumberInput, SimpleGrid, Stack, Group, Tabs, Card, Progress } from '@mantine/core';
 import { useTransactionDetail } from '../hooks/useTransaction';
 import { CompletionIndicator } from '../components/common/CompletionIndicator';
 import { DOTLOOP_SYNC_LABELS, STATUS_LABELS, STATUS_COLORS, ROLE_LABELS, type ParticipantRole, type TransactionStatus } from '../types/transaction';
@@ -74,7 +74,60 @@ interface InlineUploadState {
   status: 'idle' | 'uploading' | 'extracting' | 'linking' | 'done' | 'error';
   filename?: string;
   progress?: string;
+  percent?: number;
   error?: string;
+  steps?: UploadProgressStep[];
+  totalSteps?: number;
+}
+
+type UploadProgressStepStatus = 'pending' | 'running' | 'complete' | 'error';
+
+interface UploadProgressStep {
+  key: string;
+  title: string;
+  status: UploadProgressStepStatus;
+}
+
+function upsertUploadStep(
+  steps: UploadProgressStep[] | undefined,
+  nextStep: UploadProgressStep,
+): UploadProgressStep[] {
+  const current = [...(steps ?? [])];
+  const existingIndex = current.findIndex(step => step.key === nextStep.key);
+  if (existingIndex >= 0) {
+    current[existingIndex] = nextStep;
+    return current;
+  }
+  return [...current, nextStep];
+}
+
+function markRunningUploadStepError(steps: UploadProgressStep[] | undefined): UploadProgressStep[] {
+  let updated = false;
+  const next = (steps ?? []).map((step) => {
+    if (!updated && step.status === 'running') {
+      updated = true;
+      return { ...step, status: 'error' as const };
+    }
+    return step;
+  });
+  return updated ? next : [...next, { key: 'error', title: 'Processing failed', status: 'error' }];
+}
+
+function extractionPercent(step: number, total: number, completed: boolean): number {
+  if (!total || total <= 0) return 15;
+  const ratio = completed ? step / total : (step - 0.5) / total;
+  return Math.max(15, Math.min(90, 15 + (ratio * 75)));
+}
+
+function uploadStepIcon(status: UploadProgressStepStatus): string {
+  switch (status) {
+    case 'complete':
+      return 'OK';
+    case 'error':
+      return 'X';
+    default:
+      return '--';
+  }
 }
 
 export function TransactionDetail() {
@@ -100,7 +153,7 @@ export function TransactionDetail() {
   const [autoFillMsg, setAutoFillMsg] = useState<string | null>(null);
 
   // Upload state lives here so it persists across tab switches
-  const [uploadState, setUploadState] = useState<InlineUploadState>({ status: 'idle' });
+  const [uploadState, setUploadState] = useState<InlineUploadState>({ status: 'idle', percent: 0, steps: [] });
   const unsubRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -142,48 +195,118 @@ export function TransactionDetail() {
     if (!file) return;
     e.target.value = '';
 
-    setUploadState({ status: 'uploading', filename: file.name, progress: 'Uploading...' });
+    setUploadState({
+      status: 'uploading',
+      filename: file.name,
+      progress: 'Uploading document',
+      percent: 8,
+      steps: [{ key: 'upload', title: 'Upload document', status: 'running' }],
+    });
 
     let docInfo: { name: string };
     try {
       docInfo = await uploadFile(file);
     } catch (err) {
-      setUploadState({ status: 'error', error: err instanceof Error ? err.message : 'Upload failed' });
+      setUploadState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err instanceof Error ? err.message : 'Upload failed',
+        steps: markRunningUploadStepError(prev.steps),
+      }));
       return;
     }
 
-    setUploadState({ status: 'extracting', filename: file.name, progress: 'Extracting...' });
+    setUploadState((prev) => ({
+      ...prev,
+      status: 'extracting',
+      progress: 'Waiting for extraction',
+      percent: 15,
+      steps: upsertUploadStep(prev.steps, { key: 'upload', title: 'Upload document', status: 'complete' }),
+    }));
 
     let taskId: string;
     try {
       const result = await startExtraction('real_estate', docInfo.name);
       taskId = result.task_id;
     } catch (err) {
-      setUploadState({ status: 'error', error: err instanceof Error ? err.message : 'Extraction failed' });
+      setUploadState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err instanceof Error ? err.message : 'Extraction failed',
+        steps: markRunningUploadStepError(prev.steps),
+      }));
       return;
     }
 
     unsubRef.current = subscribeToTask(taskId, async (event: SSEEvent) => {
       if (event.type === 'step') {
-        setUploadState(s => ({ ...s, progress: `${event.data.title}...` }));
+        setUploadState((prev) => ({
+          ...prev,
+          status: 'extracting',
+          progress: event.data.title,
+          percent: extractionPercent(event.data.step, event.data.total, false),
+          totalSteps: event.data.total,
+          steps: upsertUploadStep(prev.steps, {
+            key: `extract-${event.data.step}`,
+            title: event.data.title,
+            status: 'running',
+          }),
+        }));
+      } else if (event.type === 'step_complete') {
+        setUploadState((prev) => ({
+          ...prev,
+          percent: Math.max(prev.percent ?? 15, extractionPercent(event.data.step, prev.totalSteps ?? event.data.step, true)),
+          steps: upsertUploadStep(prev.steps, {
+            key: `extract-${event.data.step}`,
+            title: event.data.title,
+            status: 'complete',
+          }),
+        }));
       } else if (event.type === 'complete') {
         const extractionId = event.data.extraction_id;
         if (extractionId) {
-          setUploadState({ status: 'linking', filename: file.name, progress: 'Linking to transaction...' });
+          setUploadState((prev) => ({
+            ...prev,
+            status: 'linking',
+            progress: 'Linking to transaction',
+            percent: 95,
+            steps: upsertUploadStep(prev.steps, { key: 'link', title: 'Link to transaction', status: 'running' }),
+          }));
           try {
             await linkExtraction(String(extractionId));
-            setUploadState({ status: 'done', filename: file.name });
+            setUploadState((prev) => ({
+              ...prev,
+              status: 'done',
+              progress: 'Done',
+              percent: 100,
+              steps: upsertUploadStep(prev.steps, { key: 'link', title: 'Link to transaction', status: 'complete' }),
+            }));
             setTimeout(() => setUploadState({ status: 'idle' }), 3000);
           } catch {
-            setUploadState({ status: 'error', error: 'Failed to link extraction to transaction' });
+            setUploadState((prev) => ({
+              ...prev,
+              status: 'error',
+              error: 'Failed to link extraction to transaction',
+              steps: markRunningUploadStepError(prev.steps),
+            }));
           }
         } else {
-          setUploadState({ status: 'done', filename: file.name });
+          setUploadState((prev) => ({
+            ...prev,
+            status: 'done',
+            progress: 'Done',
+            percent: 100,
+          }));
           setTimeout(() => setUploadState({ status: 'idle' }), 3000);
         }
         unsubRef.current?.();
       } else if (event.type === 'error') {
-        setUploadState({ status: 'error', error: event.data.message });
+        setUploadState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: event.data.message,
+          steps: markRunningUploadStepError(prev.steps),
+        }));
         unsubRef.current?.();
       }
     });
@@ -389,6 +512,7 @@ export function TransactionDetail() {
                 extractions={extractions}
                 docs={docs}
                 docsLoading={docsLoading}
+                uploadState={uploadState}
                 uploadBusy={uploadState.status !== 'idle'}
                 onFileSelect={handleFileSelect}
               />
@@ -1228,6 +1352,7 @@ function DocumentsTab({
   extractions,
   docs,
   docsLoading,
+  uploadState,
   uploadBusy,
   onFileSelect,
 }: {
@@ -1235,6 +1360,7 @@ function DocumentsTab({
   extractions: ReturnType<typeof useTransactionDetail>['extractions'];
   docs: TransactionDocRecord[];
   docsLoading: boolean;
+  uploadState: InlineUploadState;
   uploadBusy: boolean;
   onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }) {
@@ -1262,6 +1388,61 @@ function DocumentsTab({
         </Button>
       </div>
 
+      {uploadState.status !== 'idle' && (
+        <div className={`upload-progress-card ${uploadState.status === 'error' ? 'upload-progress-card-error' : ''}`}>
+          <div className="upload-progress-header">
+            <div>
+              <div className="upload-progress-title">
+                {uploadState.status === 'error'
+                  ? 'Upload failed'
+                  : uploadState.status === 'done'
+                    ? 'Upload complete'
+                    : 'Processing document'}
+              </div>
+              {uploadState.filename && (
+                <div className="upload-progress-file">{uploadState.filename}</div>
+              )}
+            </div>
+            <div className="upload-progress-percent">
+              {Math.round(uploadState.percent ?? 0)}%
+            </div>
+          </div>
+          <Progress
+            value={uploadState.percent ?? 0}
+            size="sm"
+            radius="xl"
+            color={uploadState.status === 'error' ? 'red' : uploadState.status === 'done' ? 'green' : 'cyan'}
+          />
+          <div className="upload-progress-message">
+            {uploadState.status === 'error'
+              ? uploadState.error
+              : uploadState.status === 'done'
+                ? `${uploadState.filename} extracted and linked.`
+                : uploadState.progress}
+          </div>
+          {uploadState.steps && uploadState.steps.length > 0 && (
+            <div className="upload-progress-steps">
+              {uploadState.steps.map((step) => (
+                <div key={step.key} className={`upload-progress-step upload-progress-step-${step.status}`}>
+                  <span className="upload-progress-step-icon">
+                    {step.status === 'running' ? (
+                      <span className="upload-progress-dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    ) : (
+                      uploadStepIcon(step.status)
+                    )}
+                  </span>
+                  <span>{step.title}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Extracted documents linked to this transaction */}
       {extractions.length > 0 && (
         <div className="doc-requirements-section">
@@ -1272,9 +1453,6 @@ function DocumentsTab({
                 <span className="doc-req-icon">OK</span>
                 <span className="doc-req-type">{ext.filename}</span>
                 <span className="doc-req-role">{ext.mode}</span>
-                <span className="doc-req-status status-ok">
-                  {Math.round(ext.overall_confidence * 100)}% confidence
-                </span>
               </div>
             ))}
           </div>

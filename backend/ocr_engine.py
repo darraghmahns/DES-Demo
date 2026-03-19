@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from typing import Any
 
 from schemas import VerificationCitation
 
@@ -59,7 +60,10 @@ class OCREngine(ABC):
 
     @abstractmethod
     def verify(
-        self, images_b64: list[str], extracted_data: dict
+        self,
+        images_b64: list[str],
+        extracted_data: dict,
+        required_field_targets: list[dict[str, Any]] | None = None,
     ) -> tuple[list[VerificationCitation], dict]:
         """Verify extraction by citing source locations for each value.
 
@@ -73,7 +77,10 @@ class OCREngine(ABC):
         ...
 
     def verify_from_file(
-        self, file_path: str, extracted_data: dict
+        self,
+        file_path: str,
+        extracted_data: dict,
+        required_field_targets: list[dict[str, Any]] | None = None,
     ) -> tuple[list[VerificationCitation], dict]:
         """Verify extraction using the original PDF file.
 
@@ -81,6 +88,28 @@ class OCREngine(ABC):
         Default implementation raises NotImplementedError.
         """
         raise NotImplementedError(f"{self.name} engine does not support file-based verification")
+
+    def recover_missing_fields(
+        self,
+        images_b64: list[str],
+        extracted_data: dict,
+        field_targets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict]:
+        """Recover missing comparison-visible fields from page images.
+
+        Engines may override this to perform a targeted follow-up extraction pass.
+        Default behavior is a no-op.
+        """
+        return {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def recover_missing_fields_from_file(
+        self,
+        file_path: str,
+        extracted_data: dict,
+        field_targets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict]:
+        """Recover missing comparison-visible fields using the original PDF file."""
+        return {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     @abstractmethod
     def ocr_raw_text(self, images_b64: list[str]) -> tuple[list[str], dict]:

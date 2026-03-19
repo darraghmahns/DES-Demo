@@ -2,10 +2,12 @@
 
 import json
 import logging
+from typing import Any
 
 from openai import OpenAI
 from pydantic import ValidationError
 
+from offer_fields import ensure_required_citations, stringify_field_value
 from schemas import VerificationCitation
 
 log = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ You MUST return a JSON object with this structure:
 
 Rules:
 - Include a citation for EVERY non-null field in the extraction.
+- For any required comparison fields provided separately, include a citation even when the value is null or false.
+- For a required field that is not found, set surrounding_text to "NOT FOUND", confidence to 0.0, and extracted_value to the current field value string (for example "null" or "false").
 - If you cannot find a value in the document, set confidence to 0.0 and note "NOT FOUND" in surrounding_text.
 - Be precise about page numbers — do not guess.
 - surrounding_text should be the actual text from the document, not paraphrased.
@@ -46,6 +50,7 @@ def verify_extraction(
     images_b64: list[str],
     extracted_data: dict,
     client: OpenAI,
+    required_field_targets: list[dict[str, Any]] | None = None,
 ) -> tuple[list[VerificationCitation], dict]:
     """Second-pass verification: ask GPT-4o to cite source locations.
 
@@ -70,14 +75,22 @@ def verify_extraction(
         })
 
     # Add the extraction to verify
-    content.append({
-        "type": "text",
-        "text": (
-            "Here is the data that was extracted from the above document. "
-            "Verify each field by citing its exact source location.\n\n"
-            f"Extracted data:\n{json.dumps(extracted_data, indent=2)}"
-        ),
-    })
+    verification_instructions = (
+        "Here is the data that was extracted from the above document. "
+        "Verify each field by citing its exact source location.\n\n"
+        f"Extracted data:\n{json.dumps(extracted_data, indent=2)}"
+    )
+    if required_field_targets:
+        target_lines = "\n".join(
+            f'- field_name: "{entry["path"]}" | current_value: "{stringify_field_value(entry.get("value"))}"'
+            for entry in required_field_targets
+        )
+        verification_instructions += (
+            "\n\nRequired comparison fields to explicitly verify even if null or false:\n"
+            f"{target_lines}"
+        )
+
+    content.append({"type": "text", "text": verification_instructions})
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -110,6 +123,9 @@ def verify_extraction(
         except (ValidationError, TypeError, KeyError):
             # Skip malformed citations rather than failing
             continue
+
+    if required_field_targets:
+        citations = ensure_required_citations(citations, required_field_targets)
 
     return citations, usage
 

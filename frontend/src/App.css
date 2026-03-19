@@ -2424,6 +2424,11 @@ body {
   position: relative;
 }
 
+.comparison-citation-trigger:focus-visible {
+  outline: 2px solid var(--brand-primary, #C63A2B);
+  outline-offset: -2px;
+}
+
 .comparison-cell-clickable {
   cursor: pointer;
 }
@@ -2808,6 +2813,24 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   opacity: 0.7;
+}
+
+.comparison-citation-tooltip-shell {
+  max-width: 340px;
+}
+
+.comparison-citation-tooltip {
+  max-width: 320px;
+}
+
+.comparison-citation-entry {
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.comparison-citation-entry:first-child {
+  padding-top: 0;
+  border-top: 0;
 }
 
 /* Remove offer button in column header */
@@ -4619,6 +4642,121 @@ body {
   display: flex;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.upload-progress-card {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-primary);
+}
+
+.upload-progress-card-error {
+  border-color: var(--brand-primary);
+  background: rgba(198, 58, 43, 0.05);
+}
+
+.upload-progress-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.upload-progress-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.upload-progress-file {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.upload-progress-percent {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.upload-progress-message {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.upload-progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.upload-progress-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.upload-progress-step-icon {
+  width: 18px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.upload-progress-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 18px;
+  justify-content: center;
+}
+
+.upload-progress-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: upload-progress-dot-bounce 0.9s infinite ease-in-out;
+}
+
+.upload-progress-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.upload-progress-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes upload-progress-dot-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.upload-progress-step-complete {
+  color: #22c55e;
+}
+
+.upload-progress-step-running {
+  color: var(--brand-accent);
+}
+
+.upload-progress-step-error {
+  color: var(--brand-primary);
 }
 
 

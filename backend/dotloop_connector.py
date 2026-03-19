@@ -21,6 +21,7 @@ from typing import Any
 from dotloop_client import DotloopClient, DotloopAPIError
 from db import DocumentRecord, Transaction
 from db_writer import get_extraction, save_document, save_extraction
+from offer_fields import get_offer_field_targets, get_missing_offer_field_targets, merge_recovered_offer_fields
 from ocr_engine import get_engine
 from schemas import DotloopLoopDetails, DotloopSyncStatus, ExtractionResult
 from verifier import compute_overall_confidence
@@ -490,12 +491,20 @@ async def process_from_dotloop(
         # Validate
         validated = DotloopLoopDetails.model_validate(raw_extraction)
         validated_data = validated.model_dump(mode="json")
+        recovery_targets = get_missing_offer_field_targets(validated_data)
+        if recovery_targets:
+            if engine.prefers_file_path:
+                recovered_values, _recovery_usage = engine.recover_missing_fields_from_file(tmp_path, validated_data, recovery_targets)
+            else:
+                recovered_values, _recovery_usage = engine.recover_missing_fields(images_b64, validated_data, recovery_targets)  # type: ignore[possibly-undefined]
+            validated_data, _ = merge_recovered_offer_fields(validated_data, recovered_values)
 
         # Verify citations
+        required_field_targets = get_offer_field_targets(validated_data)
         if engine.prefers_file_path:
-            citations, _verify_usage = engine.verify_from_file(tmp_path, validated_data)
+            citations, _verify_usage = engine.verify_from_file(tmp_path, validated_data, required_field_targets)
         else:
-            citations, _verify_usage = engine.verify(images_b64, validated_data)  # type: ignore[possibly-undefined]
+            citations, _verify_usage = engine.verify(images_b64, validated_data, required_field_targets)  # type: ignore[possibly-undefined]
 
         overall_confidence = compute_overall_confidence(citations)
 
@@ -503,7 +512,8 @@ async def process_from_dotloop(
         from pdf_converter import get_pdf_info
         file_info = get_pdf_info(tmp_path)
 
-        dotloop_api_payload = validated.to_dotloop_api_format()
+        api_model = DotloopLoopDetails.model_validate(validated_data)
+        dotloop_api_payload = api_model.to_dotloop_api_format()
 
         result = ExtractionResult(
             mode=mode,
