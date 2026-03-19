@@ -71,3 +71,42 @@ async def test_dotloop_status_ignores_module_fallback_when_user_is_disconnected(
 
     assert response.status_code == 200
     assert response.json() == {"configured": False}
+
+
+@pytest.mark.asyncio
+async def test_dotloop_connect_url_requires_authenticated_user_state():
+    from auth import get_current_user
+    from server import app
+
+    user = MagicMock(clerk_user_id="clerk-user-1")
+    app.dependency_overrides[get_current_user] = lambda: user
+    try:
+        with patch("routers.integrations.sign_oauth_state", return_value="signed-state"):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/dotloop/oauth/connect-url")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 200
+    assert "signed-state" in response.json()["url"]
+
+
+@pytest.mark.asyncio
+async def test_dotloop_oauth_callback_requires_state_in_auth_mode():
+    from server import app
+
+    with (
+        patch("routers.integrations.AUTH_ENABLED", True),
+        patch(
+            "routers.integrations.httpx.post",
+            return_value=DummyResponse(
+                {"access_token": "access-token", "refresh_token": "refresh-token"}
+            ),
+        ),
+        patch("routers.integrations._resolve_dotloop_profile_id_for_tokens", return_value=73),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/dotloop/oauth/callback?code=abc123")
+
+    assert response.status_code in (302, 307)
+    assert response.headers["location"].endswith("/profile?dotloop_error=missing_state")

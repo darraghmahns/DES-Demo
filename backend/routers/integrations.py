@@ -146,6 +146,30 @@ def _resolve_dotloop_profile_id_for_tokens(
         return None
 
 
+def _build_dotloop_auth_url(request: Request, user) -> str:
+    client_id = os.getenv("DOTLOOP_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=500, detail="DOTLOOP_CLIENT_ID not configured")
+
+    redirect_uri = os.getenv(
+        "DOTLOOP_REDIRECT_URI",
+        f"{_external_base_url(request)}/api/dotloop/oauth/callback",
+    )
+
+    state_param = ""
+    if user and AUTH_ENABLED:
+        state = sign_oauth_state(user.clerk_user_id)
+        state_param = f"&state={state}"
+
+    return (
+        f"{DOTLOOP_AUTH_BASE}/oauth/authorize"
+        f"?response_type=code"
+        f"&client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"{state_param}"
+    )
+
+
 def _user_docusign_tokens(user) -> dict | None:
     """Extract DocuSign token dict from UserRecord, or None."""
     if not user or not getattr(user, "docusign_tokens", None):
@@ -338,29 +362,14 @@ async def dotloop_archive_all_loops(user=Depends(get_current_user)):
 @router.get("/api/dotloop/oauth/connect")
 async def dotloop_oauth_connect(request: Request, user=Depends(get_optional_user)):
     """Redirect browser to Dotloop authorization page."""
-    client_id = os.getenv("DOTLOOP_CLIENT_ID")
-    if not client_id:
-        raise HTTPException(status_code=500, detail="DOTLOOP_CLIENT_ID not configured")
-
-    redirect_uri = os.getenv(
-        "DOTLOOP_REDIRECT_URI",
-        f"{_external_base_url(request)}/api/dotloop/oauth/callback",
-    )
-
-    # Include signed state with user ID so callback can store tokens on the right user
-    state_param = ""
-    if user and AUTH_ENABLED:
-        state = sign_oauth_state(user.clerk_user_id)
-        state_param = f"&state={state}"
-
-    auth_url = (
-        f"{DOTLOOP_AUTH_BASE}/oauth/authorize"
-        f"?response_type=code"
-        f"&client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"{state_param}"
-    )
+    auth_url = _build_dotloop_auth_url(request, user)
     return RedirectResponse(url=auth_url)
+
+
+@router.get("/api/dotloop/oauth/connect-url")
+async def dotloop_oauth_connect_url(request: Request, user=Depends(get_current_user)):
+    """Return the Dotloop OAuth URL for the current authenticated user."""
+    return {"url": _build_dotloop_auth_url(request, user)}
 
 
 @router.get("/api/dotloop/oauth/callback")
@@ -417,6 +426,7 @@ async def dotloop_oauth_callback(
         client_secret,
     )
 
+    stored_on_user = False
     # If we have a signed state, store tokens on the user's record
     if state and AUTH_ENABLED:
         try:
@@ -430,9 +440,14 @@ async def dotloop_oauth_callback(
                     profile_id=profile_id,
                 )
                 await user.save()
+                stored_on_user = True
                 log.info("Stored Dotloop tokens on user %s", clerk_user_id)
         except HTTPException:
-            log.warning("Invalid OAuth state in Dotloop callback, falling back to module-level storage")
+            log.warning("Invalid OAuth state in Dotloop callback")
+            return RedirectResponse(url=f"{frontend_url}/profile?dotloop_error=invalid_state")
+        if not stored_on_user:
+            log.warning("Dotloop callback could not find a user for the OAuth state")
+            return RedirectResponse(url=f"{frontend_url}/profile?dotloop_error=user_not_found")
     elif not AUTH_ENABLED:
         # Dev mode: persist tokens on the dev user profile so they survive restarts
         from db import UserProfile, OAuthTokenSet
@@ -446,6 +461,9 @@ async def dotloop_oauth_callback(
             )
             await dev_user.save()
             log.info("Stored Dotloop tokens on dev user profile")
+    elif AUTH_ENABLED:
+        log.warning("Dotloop callback missing OAuth state in auth-enabled mode")
+        return RedirectResponse(url=f"{frontend_url}/profile?dotloop_error=missing_state")
 
     # Always store module-level as fallback (for webhooks, etc.)
     set_oauth_tokens(

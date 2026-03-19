@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Button, Alert, SimpleGrid, Card } from '@mantine/core';
 import {
-  getDotloopConnectUrl,
+  getDotloopConnectRedirectUrl,
   disconnectDotloop,
 } from '../../api';
 
@@ -17,6 +17,7 @@ export function IntegrationsSection({
   onRefresh,
 }: IntegrationsSectionProps) {
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -48,6 +49,19 @@ export function IntegrationsSection({
       setErrorMessage(e instanceof Error ? e.message : 'Disconnect failed');
     } finally {
       setDisconnecting(null);
+    }
+  }
+
+  async function handleConnect() {
+    setConnecting(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    try {
+      const connectUrl = await getDotloopConnectRedirectUrl();
+      window.location.assign(connectUrl);
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : 'Failed to start Dotloop connection');
+      setConnecting(false);
     }
   }
 
@@ -88,8 +102,13 @@ export function IntegrationsSection({
               {disconnecting === 'dotloop' ? 'Disconnecting...' : 'Disconnect'}
             </Button>
           ) : (
-            <Button component="a" href={getDotloopConnectUrl()} variant="filled" color="cyan">
-              Connect Dotloop
+            <Button
+              onClick={handleConnect}
+              variant="filled"
+              color="cyan"
+              disabled={connecting}
+            >
+              {connecting ? 'Connecting...' : 'Connect Dotloop'}
             </Button>
           )}
         </Card>

@@ -376,6 +376,21 @@ export function getDotloopConnectUrl(): string {
   return `${API_BASE}/api/dotloop/oauth/connect`;
 }
 
+export async function getDotloopConnectRedirectUrl(): Promise<string> {
+  const resp = await fetch(`${API_BASE}/api/dotloop/oauth/connect-url`, {
+    headers: { ...await authHeaders() },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: 'Failed to start Dotloop connection' }));
+    throw new Error(err.detail || `Failed to start Dotloop connection (${resp.status})`);
+  }
+  const data = await resp.json();
+  if (!data.url) {
+    throw new Error('Dotloop connection URL was not returned');
+  }
+  return data.url;
+}
+
 export interface DotloopLoop {
   id: number;
   name: string;
