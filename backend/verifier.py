@@ -1,11 +1,14 @@
 """Verification pass — cites source locations for each extracted value."""
 
 import json
+import logging
 
 from openai import OpenAI
 from pydantic import ValidationError
 
 from schemas import VerificationCitation
+
+log = logging.getLogger(__name__)
 
 VERIFICATION_SYSTEM_PROMPT = """You are a document verification specialist. You previously extracted structured data from a document. Now you must VERIFY each extracted value by citing its exact source location in the document.
 
@@ -54,7 +57,7 @@ def verify_extraction(
     Returns:
         Tuple of (list of VerificationCitation objects, usage dict).
     """
-    from extractor import _usage_dict
+    from extractor import _combine_usage, _parse_json_payload, _repair_json_payload, _usage_dict
 
     content: list[dict] = []
 
@@ -84,11 +87,19 @@ def verify_extraction(
         ],
         response_format={"type": "json_object"},
         temperature=0.0,
-        max_tokens=4096,
+        max_tokens=8192,
         timeout=120.0,
     )
 
-    raw = json.loads(response.choices[0].message.content)
+    usage = _usage_dict(response.usage)
+    content = response.choices[0].message.content or ""
+    try:
+        raw = _parse_json_payload(content)
+    except json.JSONDecodeError as exc:
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        log.warning("Malformed verification JSON from model (finish_reason=%s): %s", finish_reason, exc)
+        raw, repair_usage = _repair_json_payload(content, client)
+        usage = _combine_usage(usage, repair_usage)
 
     # Parse into VerificationCitation objects
     citations_raw = raw.get("citations", [])
@@ -100,7 +111,7 @@ def verify_extraction(
             # Skip malformed citations rather than failing
             continue
 
-    return citations, _usage_dict(response.usage)
+    return citations, usage
 
 
 def compute_overall_confidence(citations: list[VerificationCitation]) -> float:

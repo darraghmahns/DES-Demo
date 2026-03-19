@@ -1,8 +1,12 @@
 """Neural OCR extraction logic for real estate and government documents."""
 
 import json
+import logging
+import re
 
 from openai import OpenAI
+
+log = logging.getLogger(__name__)
 
 REAL_ESTATE_SYSTEM_PROMPT = """You are an expert real estate document analyzer. Extract ALL relevant fields from this purchase agreement into the exact JSON schema below.
 
@@ -258,6 +262,107 @@ def _usage_dict(usage) -> dict:
     }
 
 
+def _combine_usage(*usages: dict | None) -> dict:
+    combined = dict(EMPTY_USAGE)
+    for usage in usages:
+        if not usage:
+            continue
+        for key in combined:
+            combined[key] += int(usage.get(key, 0) or 0)
+    return combined
+
+
+def _extract_balanced_json(text: str) -> str | None:
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None
+
+
+def _parse_json_payload(text: str) -> dict:
+    raw = (text or "").strip()
+    if not raw:
+        raise json.JSONDecodeError("Empty response content", raw, 0)
+
+    candidates = [raw]
+
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
+    candidates.extend(chunk.strip() for chunk in fenced if chunk.strip())
+
+    balanced = _extract_balanced_json(raw)
+    if balanced:
+        candidates.append(balanced.strip())
+
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+            raise json.JSONDecodeError("Top-level JSON value must be an object", candidate, 0)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+
+    if last_error:
+        raise last_error
+    raise json.JSONDecodeError("Unable to parse JSON response", raw, 0)
+
+
+def _repair_json_payload(
+    malformed_content: str,
+    client: OpenAI,
+) -> tuple[dict, dict]:
+    """Ask the model to repair malformed JSON without inventing new values."""
+    repair_prompt = (
+        "Repair the following malformed JSON into a valid JSON object. "
+        "Return only valid JSON. Preserve keys and values exactly where possible. "
+        "If a string is truncated, keep only the visible substring and close it cleanly. "
+        "Do not invent missing values.\n\n"
+        f"Malformed JSON:\n{malformed_content}"
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": "You repair malformed JSON. Return only a valid JSON object.",
+            },
+            {"role": "user", "content": repair_prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+        max_tokens=8192,
+        timeout=120.0,
+    )
+
+    repaired_content = response.choices[0].message.content or ""
+    return _parse_json_payload(repaired_content), _usage_dict(response.usage)
+
+
 def extract_from_images(
     images_b64: list[str],
     mode: str,
@@ -296,11 +401,19 @@ def extract_from_images(
         ],
         response_format={"type": "json_object"},
         temperature=0.0,
-        max_tokens=4096,
+        max_tokens=8192,
         timeout=120.0,
     )
 
-    return json.loads(response.choices[0].message.content), _usage_dict(response.usage)
+    usage = _usage_dict(response.usage)
+    content = response.choices[0].message.content or ""
+    try:
+        return _parse_json_payload(content), usage
+    except json.JSONDecodeError as exc:
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        log.warning("Malformed extraction JSON from model (finish_reason=%s): %s", finish_reason, exc)
+        repaired, repair_usage = _repair_json_payload(content, client)
+        return repaired, _combine_usage(usage, repair_usage)
 
 
 def extract_raw_text(images_b64: list[str], client: OpenAI) -> tuple[list[str], dict]:
