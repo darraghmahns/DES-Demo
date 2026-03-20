@@ -727,6 +727,69 @@ class TestTransactionRouteUpdates:
         finally:
             app.dependency_overrides.clear()
 
+    async def test_create_transaction_from_dotloop_does_not_auto_add_loop_participants(self):
+        from auth import get_current_user
+        from server import app
+
+        loop_detail = {
+            "id": 778,
+            "name": "Offer Loop",
+            "transaction_type": "purchase offer",
+            "participants": [
+                {
+                    "full_name": "Buyer One",
+                    "email": "buyer@example.com",
+                    "role": "BUYER",
+                },
+                {
+                    "full_name": "Seller One",
+                    "email": "seller@example.com",
+                    "role": "SELLER",
+                },
+            ],
+            "documents": [],
+        }
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(
+            id="user-1",
+            dotloop_tokens=None,
+            org_id=None,
+        )
+        mock_settings = MagicMock()
+        mock_settings.motor_collection = MagicMock()
+        with (
+            patch("transaction_routes.dotloop_configured", return_value=True),
+            patch("transaction_routes.get_loop_with_details", return_value=loop_detail),
+            patch("transaction_routes.Transaction.find_one", AsyncMock(return_value=None)),
+            patch("transaction_routes.Transaction.get_settings", return_value=mock_settings),
+            patch("transaction_routes.Transaction.insert", AsyncMock()),
+            patch(
+                "transaction_routes._serialize_transaction",
+                side_effect=lambda value: {
+                    "_id": str(value.id),
+                    "participants": [
+                        {"user_id": participant.user_id, "role": participant.role.value}
+                        for participant in value.participants
+                    ],
+                },
+            ),
+            patch("transaction_routes.UserProfile.find_one", AsyncMock()),
+            patch("transaction_routes.UserProfile.insert", AsyncMock()),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/api/transactions/from-dotloop/778",
+                    json={"agent_role": "listing_agent"},
+                )
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert len(payload["participants"]) == 1
+            assert payload["participants"][0]["user_id"] == "user-1"
+        finally:
+            app.dependency_overrides.clear()
+
     async def test_create_transaction_from_dotloop_rejects_duplicate_loop_link(self):
         from auth import get_current_user
         from server import app

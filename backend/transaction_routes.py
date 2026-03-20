@@ -964,33 +964,6 @@ async def create_transaction_from_dotloop(
         dotloop_sync_error=None,
     )
 
-    participants_by_user_id = {str(u.id)}
-    for participant in preview["participant_suggestions"]:
-        email = participant.get("email")
-        if not email:
-            continue
-        email = _normalize_email(str(email))
-        existing_user = await UserProfile.find_one({"email": email})
-        if not existing_user:
-            existing_user = UserProfile(
-                email=email,
-                name=str(participant.get("name") or ""),
-                has_clerk_account=False,
-            )
-            await existing_user.insert()
-        if str(existing_user.id) in participants_by_user_id:
-            continue
-        participants_by_user_id.add(str(existing_user.id))
-        txn.participants.append(
-            TransactionParticipant(
-                user_id=str(existing_user.id),
-                role=ParticipantRole(participant["role"]),
-                status=ParticipantStatus.INVITED,
-                added_at=_utcnow(),
-                added_by=str(u.id),
-            )
-        )
-
     await txn.insert()
     log.info("Transaction %s created from Dotloop loop %s", txn.id, loop_id)
     return _serialize_transaction(txn)
