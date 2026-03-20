@@ -677,6 +677,15 @@ class InvitationStatus(str, Enum):
     FAILED = "failed"
 
 
+class TransactionUploadJobStatus(str, Enum):
+    """Lifecycle state for a transaction-bound background upload."""
+    PENDING = "pending"
+    RUNNING = "running"
+    LINKING = "linking"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
 class DotloopSyncStatus(str, Enum):
     """Freshness state for a transaction's linked Dotloop loop."""
     NEVER = "never"

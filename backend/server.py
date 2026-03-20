@@ -9,7 +9,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, List, Optional
 
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -31,11 +31,12 @@ from schemas import (
     DotloopParticipant,
     ExtractionResult,
     FOIARequest,
+    TransactionUploadJobStatus,
 )
 from ocr_engine import get_engine
 import property_prefill
 from auth import get_optional_user, get_current_user, AUTH_ENABLED
-from db import init_db, close_db
+from db import TransactionUploadJob, init_db, close_db
 from db_writer import save_document, save_extraction, get_extraction
 from dotloop_connector import (
     is_configured as dotloop_configured,
@@ -725,6 +726,9 @@ async def extract_task_status(task_id: str):
         "filename": task.filename,
         "status": task.status.value,
         "event_count": len(task.events),
+        "transaction_id": task.metadata.get("transaction_id"),
+        "upload_job_id": task.metadata.get("upload_job_id"),
+        "display_filename": task.metadata.get("display_filename") or task.filename,
     }
 
 
@@ -765,22 +769,92 @@ async def _task_sse_stream(task) -> AsyncGenerator[str, None]:
         task.remove_waiter(waiter)
 
 
+async def _set_transaction_upload_job_state(
+    upload_job_id: str,
+    *,
+    status: TransactionUploadJobStatus,
+    progress_message: str | None = None,
+    extraction_id: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Persist coarse-grained transaction upload job state."""
+    try:
+        upload_job = await TransactionUploadJob.get(upload_job_id)
+        if not upload_job:
+            return
+        upload_job.status = status
+        if progress_message is not None:
+            upload_job.progress_message = progress_message
+        if extraction_id is not None:
+            upload_job.extraction_id = extraction_id
+        upload_job.error_message = error_message
+        if status in (TransactionUploadJobStatus.COMPLETE, TransactionUploadJobStatus.ERROR):
+            upload_job.completed_at = datetime.now(timezone.utc)
+        upload_job.updated_at = datetime.now(timezone.utc)
+        await upload_job.save()
+    except Exception as exc:
+        log.warning("Failed to update transaction upload job %s: %s", upload_job_id, exc)
+
+
 async def _run_extraction_task(task, mode: str, pdf_path: str, user_id: str | None = None, org_id: str | None = None) -> None:
     """Run the extraction pipeline as a background task, storing events."""
     from task_manager import TaskStatus, cleanup_old_tasks
 
     task.status = TaskStatus.RUNNING
+    upload_job_id = task.metadata.get("upload_job_id")
+    transaction_id = task.metadata.get("transaction_id")
+    auto_link = bool(task.metadata.get("auto_link"))
 
     def emit(event_type: str, data: dict) -> None:
         task.append_event({"type": event_type, "data": data})
 
-    await _extraction_pipeline(mode, pdf_path, emit, user_id=user_id, org_id=org_id)
+    if upload_job_id:
+        await _set_transaction_upload_job_state(
+            upload_job_id,
+            status=TransactionUploadJobStatus.RUNNING,
+            progress_message="Starting extraction",
+        )
+
+    link_extraction = None
+    if upload_job_id and transaction_id and auto_link:
+        from transaction_routes import _link_extraction_to_transaction_record
+
+        async def _link_uploaded_extraction(extraction_id: str) -> dict[str, Any]:
+            await _link_extraction_to_transaction_record(transaction_id, extraction_id)
+            return {"transaction_id": transaction_id, "linked": True}
+
+        link_extraction = _link_uploaded_extraction
+
+    await _extraction_pipeline(
+        mode,
+        pdf_path,
+        emit,
+        user_id=user_id,
+        org_id=org_id,
+        link_extraction=link_extraction,
+    )
 
     # Mark final status based on last event
     if task.events and task.events[-1]["type"] == "error":
         task.mark_complete(TaskStatus.ERROR)
+        if upload_job_id:
+            await _set_transaction_upload_job_state(
+                upload_job_id,
+                status=TransactionUploadJobStatus.ERROR,
+                progress_message="Processing failed",
+                error_message=task.events[-1]["data"].get("message") or "Upload processing failed",
+            )
     else:
         task.mark_complete(TaskStatus.COMPLETE)
+        if upload_job_id:
+            complete_payload = task.events[-1]["data"] if task.events and task.events[-1]["type"] == "complete" else {}
+            await _set_transaction_upload_job_state(
+                upload_job_id,
+                status=TransactionUploadJobStatus.COMPLETE,
+                progress_message="Done",
+                extraction_id=complete_payload.get("extraction_id"),
+                error_message=None,
+            )
 
     cleanup_old_tasks()
 
@@ -788,6 +862,7 @@ async def _run_extraction_task(task, mode: str, pdf_path: str, user_id: str | No
 async def _extraction_pipeline(
     mode: str, pdf_path: str, emit,
     user_id: str | None = None, org_id: str | None = None,
+    link_extraction: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None,
 ) -> None:
     """Core extraction pipeline logic, decoupled from SSE streaming.
 
@@ -798,6 +873,8 @@ async def _extraction_pipeline(
     """
     total_steps = 5  # Load, Convert, Extract, Validate, Output
     total_steps += 1  # Verify citations
+    if link_extraction is not None:
+        total_steps += 1  # Link to transaction
     if mode == "real_estate":
         total_steps += 1  # Recover Missing Comparison Fields
         if property_prefill.is_configured():
@@ -1152,9 +1229,26 @@ async def _extraction_pipeline(
             "data": {"output_path": str(output_path)},
         })
 
+        link_data = None
+        if link_extraction is not None:
+            current_step += 1
+            emit("step", {
+                "step": current_step, "total": total_steps,
+                "title": "Link to transaction", "status": "running",
+            })
+            if not extraction_id:
+                raise RuntimeError("Extraction did not produce an ID for transaction linking")
+            link_data = await link_extraction(extraction_id)
+            emit("step_complete", {
+                "step": current_step, "title": "Link to transaction", "status": "complete",
+                "data": link_data or {"linked": True},
+            })
+
         complete_data = result.model_dump(mode="json")
         if extraction_id:
             complete_data["extraction_id"] = extraction_id
+        if link_data:
+            complete_data.update(link_data)
         emit("complete", complete_data)
 
     except Exception as e:

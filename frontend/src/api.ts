@@ -314,8 +314,11 @@ export interface TaskInfo {
   task_id: string;
   mode: string;
   filename: string;
+  display_filename?: string;
   status: string;
   event_count: number;
+  transaction_id?: string;
+  upload_job_id?: string;
 }
 
 export async function fetchActiveTasks(): Promise<TaskInfo[]> {

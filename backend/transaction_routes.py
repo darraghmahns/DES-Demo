@@ -17,7 +17,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel, ValidationError
 
 from auth import AUTH_ENABLED, get_current_user
-from db import DocumentRecord, Transaction, TransactionDocument, UserDocument, UserProfile
+from db import (
+    DocumentRecord,
+    Transaction,
+    TransactionDocument,
+    TransactionUploadJob,
+    TransactionUploadStep,
+    UserDocument,
+    UserProfile,
+)
 from db_writer import save_document, save_extraction
 from dotloop_client import DotloopAPIError
 from dotloop_connector import (
@@ -40,6 +48,7 @@ from schemas import (
     ParticipantStatus,
     TransactionParticipant,
     TransactionStatus,
+    TransactionUploadJobStatus,
 )
 from verifier import compute_overall_confidence
 
@@ -113,6 +122,14 @@ class DotloopImportDocumentsBody(BaseModel):
     documents: list[DotloopImportDocumentRequest]
 
 
+class TransactionUploadStartResponse(BaseModel):
+    job_id: str
+    task_id: str
+    transaction_id: str
+    original_filename: str
+    status: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -154,6 +171,120 @@ def _serialize_transaction(txn: Transaction) -> dict:
     return data
 
 
+def _serialize_upload_job(job: TransactionUploadJob, *, transaction_name: str | None = None) -> dict[str, Any]:
+    data = _snapshot_upload_job(job)
+    data["id"] = str(job.id)
+    if transaction_name is not None:
+        data["transaction_name"] = transaction_name
+    return data
+
+
+def _upsert_upload_job_step(
+    steps: list[TransactionUploadStep],
+    *,
+    key: str,
+    title: str,
+    status: str,
+) -> list[TransactionUploadStep]:
+    next_steps = list(steps)
+    for index, step in enumerate(next_steps):
+        if step.key == key:
+            next_steps[index] = TransactionUploadStep(key=key, title=title, status=status)
+            return next_steps
+    next_steps.append(TransactionUploadStep(key=key, title=title, status=status))
+    return next_steps
+
+
+def _mark_running_step_error(steps: list[TransactionUploadStep]) -> list[TransactionUploadStep]:
+    next_steps = list(steps)
+    for index, step in enumerate(next_steps):
+        if step.status == "running":
+            next_steps[index] = TransactionUploadStep(key=step.key, title=step.title, status="error")
+            return next_steps
+    return next_steps
+
+
+def _snapshot_upload_job(job: TransactionUploadJob) -> dict[str, Any]:
+    """Combine persisted job state with in-memory task events for live restoration."""
+    data = job.model_dump(mode="json")
+    task = None
+    if job.task_id:
+        from task_manager import get_task
+
+        task = get_task(job.task_id)
+
+    if not task:
+        return data
+
+    steps = list(job.steps)
+    if not steps:
+        steps = [TransactionUploadStep(key="upload", title="Upload document", status="complete")]
+
+    current_step = job.current_step
+    total_steps = job.total_steps
+    progress_message = job.progress_message
+    error_message = job.error_message
+    extraction_id = job.extraction_id
+    status = job.status
+    completed_at = data.get("completed_at")
+
+    for event in task.events:
+        event_type = event.get("type")
+        event_data = event.get("data", {})
+
+        if event_type == "step":
+            step_number = int(event_data.get("step") or 0)
+            total_steps = event_data.get("total", total_steps)
+            title = event_data.get("title") or "Processing"
+            current_step = max(current_step, step_number)
+            progress_message = title
+            status = (
+                TransactionUploadJobStatus.LINKING
+                if title == "Link to transaction"
+                else TransactionUploadJobStatus.RUNNING
+            )
+            steps = _upsert_upload_job_step(
+                steps,
+                key=f"extract-{step_number}",
+                title=title,
+                status="running",
+            )
+        elif event_type == "step_complete":
+            step_number = int(event_data.get("step") or 0)
+            title = event_data.get("title") or "Processing"
+            current_step = max(current_step, step_number)
+            progress_message = title
+            steps = _upsert_upload_job_step(
+                steps,
+                key=f"extract-{step_number}",
+                title=title,
+                status="complete",
+            )
+        elif event_type == "complete":
+            status = TransactionUploadJobStatus.COMPLETE
+            progress_message = "Done"
+            extraction_id = event_data.get("extraction_id") or extraction_id
+            if task.completed_at:
+                completed_at = task.completed_at.isoformat()
+        elif event_type == "error":
+            status = TransactionUploadJobStatus.ERROR
+            error_message = event_data.get("message") or error_message
+            progress_message = error_message or progress_message
+            steps = _mark_running_step_error(steps)
+            if task.completed_at:
+                completed_at = task.completed_at.isoformat()
+
+    data["status"] = status.value if isinstance(status, TransactionUploadJobStatus) else str(status)
+    data["steps"] = [step.model_dump(mode="json") for step in steps]
+    data["current_step"] = current_step
+    data["total_steps"] = total_steps
+    data["progress_message"] = progress_message
+    data["error_message"] = error_message
+    data["extraction_id"] = extraction_id
+    data["completed_at"] = completed_at
+    return data
+
+
 async def _get_transaction_for_user(txn_id: str, user: UserProfile) -> Transaction:
     """Fetch a transaction and verify the user is involved."""
     txn = await Transaction.get(txn_id)
@@ -174,6 +305,26 @@ async def _get_owned_transaction(txn_id: str, user: UserProfile) -> Transaction:
     txn = await _get_transaction_for_user(txn_id, user)
     if txn.created_by != str(user.id):
         raise HTTPException(status_code=403, detail="Only the creator can update this transaction")
+    return txn
+
+
+async def _link_extraction_to_transaction_record(txn_id: str, extraction_id: str) -> Transaction:
+    txn = await Transaction.get(txn_id)
+    if not txn:
+        raise RuntimeError("Transaction not found for upload job")
+
+    doc_id = extraction_id.split(":")[0] if ":" in extraction_id else extraction_id
+    try:
+        doc_record = await DocumentRecord.get(doc_id)
+    except Exception:
+        doc_record = None
+    if not doc_record:
+        raise RuntimeError("Extraction not found for upload job")
+
+    if doc_id not in txn.extraction_ids:
+        txn.extraction_ids.append(doc_id)
+        txn.updated_at = _utcnow()
+        await txn.save()
     return txn
 
 
@@ -1090,12 +1241,53 @@ async def list_transactions(
     return results
 
 
+@router.get("/upload-jobs/active")
+async def list_active_transaction_upload_jobs(user=Depends(get_current_user)):
+    """List the current user's active transaction upload jobs for navbar status."""
+    u = await _get_user_or_dev(user)
+    jobs = await TransactionUploadJob.find(
+        {
+            "uploaded_by": str(u.id),
+            "status": {
+                "$in": [
+                    TransactionUploadJobStatus.PENDING,
+                    TransactionUploadJobStatus.RUNNING,
+                    TransactionUploadJobStatus.LINKING,
+                ]
+            },
+        }
+    ).sort("-updated_at").to_list()
+
+    transaction_ids = [job.transaction_id for job in jobs]
+    transactions = await Transaction.find({"_id": {"$in": transaction_ids}}).to_list() if transaction_ids else []
+    transaction_names = {str(txn.id): txn.name for txn in transactions}
+
+    return {
+        "jobs": [
+            _serialize_upload_job(job, transaction_name=transaction_names.get(job.transaction_id))
+            for job in jobs
+        ]
+    }
+
+
 @router.get("/{txn_id}")
 async def get_transaction(txn_id: str, user=Depends(get_current_user)):
     """Get a transaction's full details."""
     u = await _get_user_or_dev(user)
     txn = await _get_transaction_for_user(txn_id, u)
     return _serialize_transaction(txn)
+
+
+@router.get("/{txn_id}/upload-jobs")
+async def list_transaction_upload_jobs(
+    txn_id: str,
+    user=Depends(get_current_user),
+):
+    """List active and recent upload jobs for a transaction."""
+    u = await _get_user_or_dev(user)
+    await _get_transaction_for_user(txn_id, u)
+    jobs = await TransactionUploadJob.find({"transaction_id": txn_id}).sort("-updated_at").limit(10).to_list()
+    return {"jobs": [_serialize_upload_job(job) for job in jobs]}
 
 
 @router.put("/{txn_id}")
@@ -1322,6 +1514,68 @@ async def list_transaction_documents(
 
     docs = await TransactionDocument.find({"transaction_id": txn_id}).sort("-uploaded_at").to_list()
     return [{"_id": str(doc.id), **doc.model_dump(mode="json")} for doc in docs]
+
+
+@router.post("/{txn_id}/documents/upload-and-extract")
+async def upload_and_extract_transaction_document(
+    txn_id: str,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    """Upload a transaction document and launch a background extraction job."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    os.makedirs(_TXN_DOCS_DIR, exist_ok=True)
+    contents = await file.read()
+    original_filename = os.path.basename(file.filename)
+    file_hash = hashlib.sha256(contents).hexdigest()
+    dest_filename = f"{file_hash[:12]}_{original_filename}"
+    dest_path = os.path.join(_TXN_DOCS_DIR, dest_filename)
+    with open(dest_path, "wb") as handle:
+        handle.write(contents)
+
+    upload_job = TransactionUploadJob(
+        transaction_id=str(txn.id),
+        uploaded_by=str(u.id),
+        original_filename=original_filename,
+        stored_filename=dest_filename,
+        file_path=dest_path,
+        file_hash=file_hash,
+        status=TransactionUploadJobStatus.PENDING,
+        progress_message="Upload accepted. Waiting for extraction.",
+        steps=[TransactionUploadStep(key="upload", title="Upload document", status="complete")],
+        auto_link=True,
+    )
+    await upload_job.insert()
+
+    from server import _run_extraction_task
+    from task_manager import create_task
+
+    task = create_task(
+        "real_estate",
+        dest_filename,
+        metadata={
+            "transaction_id": str(txn.id),
+            "upload_job_id": str(upload_job.id),
+            "display_filename": original_filename,
+            "file_path": dest_path,
+            "auto_link": True,
+        },
+    )
+    upload_job.task_id = task.task_id
+    upload_job.updated_at = _utcnow()
+    await upload_job.save()
+
+    asyncio_task = asyncio.create_task(
+        _run_extraction_task(task, "real_estate", dest_path, user_id=str(u.id), org_id=u.org_id)
+    )
+    task._asyncio_task = asyncio_task
+
+    return _serialize_upload_job(upload_job)
 
 
 @router.post("/{txn_id}/documents")

@@ -41,6 +41,7 @@ class ExtractionTask:
     filename: str
     status: TaskStatus = TaskStatus.PENDING
     events: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = field(default=None)
     _waiters: list[asyncio.Event] = field(default_factory=list, repr=False)
@@ -78,10 +79,10 @@ class ExtractionTask:
 _tasks: dict[str, ExtractionTask] = {}
 
 
-def create_task(mode: str, filename: str) -> ExtractionTask:
+def create_task(mode: str, filename: str, metadata: dict[str, Any] | None = None) -> ExtractionTask:
     """Create a new extraction task (does not start it yet)."""
     task_id = uuid.uuid4().hex[:12]
-    task = ExtractionTask(task_id=task_id, mode=mode, filename=filename)
+    task = ExtractionTask(task_id=task_id, mode=mode, filename=filename, metadata=metadata or {})
     _tasks[task_id] = task
     return task
 
@@ -113,6 +114,9 @@ def list_tasks() -> list[dict[str, Any]]:
             "status": t.status.value,
             "event_count": len(t.events),
             "created_at": t.created_at.isoformat(),
+            "transaction_id": t.metadata.get("transaction_id"),
+            "upload_job_id": t.metadata.get("upload_job_id"),
+            "display_filename": t.metadata.get("display_filename") or t.filename,
         }
         for t in _tasks.values()
     ]

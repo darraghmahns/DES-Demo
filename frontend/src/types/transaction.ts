@@ -13,6 +13,7 @@ export type ParticipantStatus = 'invited' | 'active' | 'removed';
 export type InvitationStatus = 'created' | 'sent' | 'opened' | 'accepted' | 'expired' | 'revoked' | 'failed';
 export type DotloopSyncStatus = 'never' | 'current' | 'stale' | 'error';
 export type AgentRole = 'listing_agent' | 'buying_agent';
+export type TransactionUploadJobStatus = 'pending' | 'running' | 'linking' | 'complete' | 'error';
 
 export type ParticipantRole =
   | 'BUYER'
@@ -97,6 +98,35 @@ export interface TransactionInvitation {
   provider_message_id?: string | null;
   last_error?: string | null;
   invite_url?: string | null;
+}
+
+export interface TransactionUploadProgressStep {
+  key: string;
+  title: string;
+  status: 'pending' | 'running' | 'complete' | 'error';
+}
+
+export interface TransactionUploadJob {
+  id: string;
+  transaction_id: string;
+  uploaded_by: string;
+  original_filename: string;
+  stored_filename: string;
+  file_path: string;
+  file_hash: string;
+  task_id?: string | null;
+  status: TransactionUploadJobStatus;
+  current_step: number;
+  total_steps?: number | null;
+  progress_message?: string | null;
+  steps: TransactionUploadProgressStep[];
+  extraction_id?: string | null;
+  error_message?: string | null;
+  auto_link: boolean;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  transaction_name?: string;
 }
 
 export const STATUS_LABELS: Record<TransactionStatus, string> = {

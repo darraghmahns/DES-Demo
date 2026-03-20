@@ -15,16 +15,19 @@ import {
   type AgentRole,
   type ParticipantRole,
   type TransactionStatus,
+  type TransactionUploadJob,
 } from '../types/transaction';
 import {
   DotloopLoopConflictError,
   type DotloopLoopConflictDetail,
   isDotloopLoopConflictError,
   listTransactionDocuments,
+  listTransactionUploadJobs,
   linkDotloopLoop,
+  uploadAndExtractTransactionDocument,
   type TransactionDocRecord,
 } from '../api/transactions';
-import { uploadFile, startExtraction, subscribeToTask, fetchDotloopLoops, searchDotloopLoops, fetchOffersComparison } from '../api';
+import { subscribeToTask, fetchDotloopLoops, searchDotloopLoops, fetchOffersComparison } from '../api';
 import type { SSEEvent, DotloopLoop, OffersComparisonResult, OfferData, OfferField } from '../api';
 import { useIntegrations } from '../hooks/useIntegrations';
 import { OfferRequirementsModal } from '../components/offers/OfferRequirementsModal';
@@ -85,12 +88,16 @@ function formatDateTime(iso?: string | null): string {
 
 interface InlineUploadState {
   status: 'idle' | 'uploading' | 'extracting' | 'linking' | 'done' | 'error';
+  jobId?: string;
+  taskId?: string;
+  transactionId?: string;
   filename?: string;
   progress?: string;
   percent?: number;
   error?: string;
   steps?: UploadProgressStep[];
   totalSteps?: number;
+  completedAt?: string | null;
 }
 
 type UploadProgressStepStatus = 'pending' | 'running' | 'complete' | 'error';
@@ -143,6 +150,50 @@ function uploadStepIcon(status: UploadProgressStepStatus): string {
   }
 }
 
+function buildUploadStateFromJob(job: TransactionUploadJob): InlineUploadState {
+  const base: InlineUploadState = {
+    status: 'extracting',
+    jobId: job.id,
+    taskId: job.task_id ?? undefined,
+    transactionId: job.transaction_id,
+    filename: job.original_filename,
+    progress: job.progress_message ?? undefined,
+    percent: extractionPercent(
+      Math.max(job.current_step || 1, 1),
+      Math.max(job.total_steps || job.current_step || 1, 1),
+      job.status === 'complete',
+    ),
+    steps: job.steps?.map((step) => ({ ...step })) ?? [],
+    totalSteps: job.total_steps ?? undefined,
+    completedAt: job.completed_at ?? undefined,
+  };
+
+  switch (job.status) {
+    case 'pending':
+      return {
+        ...base,
+        status: 'uploading',
+        progress: job.progress_message ?? 'Upload accepted. Waiting for extraction.',
+        percent: Math.max(base.percent ?? 0, 12),
+      };
+    case 'running':
+      return { ...base, status: 'extracting' };
+    case 'linking':
+      return { ...base, status: 'linking', percent: Math.max(base.percent ?? 0, 92) };
+    case 'complete':
+      return { ...base, status: 'done', progress: 'Done', percent: 100 };
+    case 'error':
+      return {
+        ...base,
+        status: 'error',
+        error: job.error_message ?? 'Upload processing failed',
+        progress: job.error_message ?? 'Upload processing failed',
+      };
+    default:
+      return { status: 'idle' };
+  }
+}
+
 export function TransactionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -150,7 +201,7 @@ export function TransactionDetail() {
     transaction, completion, loading, error,
     refresh, update, removeParticipantById,
     sendInvitation, invitations, resendTransactionInvitation, revokeTransactionInvitation, runAutoFill,
-    extractions, unlinkExtraction, linkExtraction,
+    extractions, unlinkExtraction,
   } = useTransactionDetail(id);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [offersData, setOffersData] = useState<OffersComparisonResult | null>(null);
@@ -168,9 +219,15 @@ export function TransactionDetail() {
   // Upload state lives here so it persists across tab switches
   const [uploadState, setUploadState] = useState<InlineUploadState>({ status: 'idle', percent: 0, steps: [] });
   const unsubRef = useRef<(() => void) | null>(null);
+  const activeTaskIdRef = useRef<string | null>(null);
+  const dismissTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    return () => { unsubRef.current?.(); };
+    return () => {
+      unsubRef.current?.();
+      activeTaskIdRef.current = null;
+      if (dismissTimerRef.current) window.clearTimeout(dismissTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -195,73 +252,35 @@ export function TransactionDetail() {
     listTransactionDocuments(id).then(setDocs).catch(() => setDocs([]));
   };
 
-  useEffect(() => {
-    if (!id) return;
-    listTransactionDocuments(id)
-      .then(setDocs)
-      .catch(() => setDocs([]))
-      .finally(() => setDocsLoading(false));
-  }, [id]);
+  const scheduleUploadDismiss = () => {
+    if (dismissTimerRef.current) window.clearTimeout(dismissTimerRef.current);
+    dismissTimerRef.current = window.setTimeout(() => {
+      setUploadState({ status: 'idle', percent: 0, steps: [] });
+      dismissTimerRef.current = null;
+    }, 5000);
+  };
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
+  const subscribeToUploadTask = (job: Pick<TransactionUploadJob, 'id' | 'task_id' | 'transaction_id' | 'original_filename'>) => {
+    if (!job.task_id || activeTaskIdRef.current === job.task_id) return;
 
-    setUploadState({
-      status: 'uploading',
-      filename: file.name,
-      progress: 'Uploading document',
-      percent: 8,
-      steps: [{ key: 'upload', title: 'Upload document', status: 'running' }],
-    });
-
-    let docInfo: { name: string };
-    try {
-      docInfo = await uploadFile(file);
-    } catch (err) {
-      setUploadState((prev) => ({
-        ...prev,
-        status: 'error',
-        error: err instanceof Error ? err.message : 'Upload failed',
-        steps: markRunningUploadStepError(prev.steps),
-      }));
-      return;
-    }
-
-    setUploadState((prev) => ({
-      ...prev,
-      status: 'extracting',
-      progress: 'Waiting for extraction',
-      percent: 15,
-      steps: upsertUploadStep(prev.steps, { key: 'upload', title: 'Upload document', status: 'complete' }),
-    }));
-
-    let taskId: string;
-    try {
-      const result = await startExtraction('real_estate', docInfo.name);
-      taskId = result.task_id;
-    } catch (err) {
-      setUploadState((prev) => ({
-        ...prev,
-        status: 'error',
-        error: err instanceof Error ? err.message : 'Extraction failed',
-        steps: markRunningUploadStepError(prev.steps),
-      }));
-      return;
-    }
-
-    unsubRef.current = subscribeToTask(taskId, async (event: SSEEvent) => {
+    unsubRef.current?.();
+    activeTaskIdRef.current = job.task_id;
+    unsubRef.current = subscribeToTask(job.task_id, async (event: SSEEvent) => {
       if (event.type === 'step') {
+        const stepTitle = event.data.title as string;
         setUploadState((prev) => ({
           ...prev,
-          status: 'extracting',
-          progress: event.data.title,
+          jobId: job.id,
+          taskId: job.task_id ?? undefined,
+          transactionId: job.transaction_id,
+          filename: prev.filename ?? job.original_filename,
+          status: stepTitle === 'Link to transaction' ? 'linking' : 'extracting',
+          progress: stepTitle,
           percent: extractionPercent(event.data.step, event.data.total, false),
           totalSteps: event.data.total,
           steps: upsertUploadStep(prev.steps, {
             key: `extract-${event.data.step}`,
-            title: event.data.title,
+            title: stepTitle,
             status: 'running',
           }),
         }));
@@ -276,53 +295,126 @@ export function TransactionDetail() {
           }),
         }));
       } else if (event.type === 'complete') {
-        const extractionId = event.data.extraction_id;
-        if (extractionId) {
-          setUploadState((prev) => ({
-            ...prev,
-            status: 'linking',
-            progress: 'Linking to transaction',
-            percent: 95,
-            steps: upsertUploadStep(prev.steps, { key: 'link', title: 'Link to transaction', status: 'running' }),
-          }));
-          try {
-            await linkExtraction(String(extractionId));
-            setUploadState((prev) => ({
-              ...prev,
-              status: 'done',
-              progress: 'Done',
-              percent: 100,
-              steps: upsertUploadStep(prev.steps, { key: 'link', title: 'Link to transaction', status: 'complete' }),
-            }));
-            setTimeout(() => setUploadState({ status: 'idle' }), 3000);
-          } catch {
-            setUploadState((prev) => ({
-              ...prev,
-              status: 'error',
-              error: 'Failed to link extraction to transaction',
-              steps: markRunningUploadStepError(prev.steps),
-            }));
-          }
-        } else {
-          setUploadState((prev) => ({
-            ...prev,
-            status: 'done',
-            progress: 'Done',
-            percent: 100,
-          }));
-          setTimeout(() => setUploadState({ status: 'idle' }), 3000);
-        }
+        setUploadState((prev) => ({
+          ...prev,
+          status: 'done',
+          progress: 'Done',
+          percent: 100,
+          completedAt: new Date().toISOString(),
+        }));
+        activeTaskIdRef.current = null;
         unsubRef.current?.();
+        unsubRef.current = null;
+        await refresh();
+        refreshDocs();
+        scheduleUploadDismiss();
       } else if (event.type === 'error') {
         setUploadState((prev) => ({
           ...prev,
           status: 'error',
           error: event.data.message,
+          progress: event.data.message,
           steps: markRunningUploadStepError(prev.steps),
         }));
+        activeTaskIdRef.current = null;
         unsubRef.current?.();
+        unsubRef.current = null;
       }
     });
+  };
+
+  useEffect(() => {
+    if (!id) return;
+    listTransactionDocuments(id)
+      .then(setDocs)
+      .catch(() => setDocs([]))
+      .finally(() => setDocsLoading(false));
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+
+    let cancelled = false;
+    unsubRef.current?.();
+    unsubRef.current = null;
+    activeTaskIdRef.current = null;
+    if (dismissTimerRef.current) {
+      window.clearTimeout(dismissTimerRef.current);
+      dismissTimerRef.current = null;
+    }
+
+    const restoreUploadState = async () => {
+      try {
+        const jobs = await listTransactionUploadJobs(id);
+        if (cancelled || jobs.length === 0) {
+          if (!cancelled) setUploadState({ status: 'idle', percent: 0, steps: [] });
+          return;
+        }
+
+        const activeJob = jobs.find((job) => ['pending', 'running', 'linking'].includes(job.status));
+        const latestJob = activeJob ?? jobs[0];
+        const isRecentTerminal = latestJob.status === 'complete' || latestJob.status === 'error'
+          ? Boolean(latestJob.completed_at)
+            && (Date.now() - new Date(latestJob.completed_at!).getTime()) < 10 * 60 * 1000
+          : false;
+
+        if (activeJob || isRecentTerminal) {
+          setUploadState(buildUploadStateFromJob(latestJob));
+          if (activeJob) {
+            subscribeToUploadTask(activeJob);
+          } else if (latestJob.status === 'complete') {
+            scheduleUploadDismiss();
+          }
+        } else {
+          setUploadState({ status: 'idle', percent: 0, steps: [] });
+        }
+      } catch {
+        if (!cancelled) setUploadState({ status: 'idle', percent: 0, steps: [] });
+      }
+    };
+
+    void restoreUploadState();
+
+    return () => {
+      cancelled = true;
+      unsubRef.current?.();
+      unsubRef.current = null;
+      activeTaskIdRef.current = null;
+      if (dismissTimerRef.current) {
+        window.clearTimeout(dismissTimerRef.current);
+        dismissTimerRef.current = null;
+      }
+    };
+  }, [id]);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !id) return;
+    e.target.value = '';
+
+    setUploadState({
+      status: 'uploading',
+      transactionId: id,
+      filename: file.name,
+      progress: 'Uploading document',
+      percent: 8,
+      steps: [{ key: 'upload', title: 'Upload document', status: 'running' }],
+    });
+
+    try {
+      const job = await uploadAndExtractTransactionDocument(id, file);
+      setUploadState(buildUploadStateFromJob(job));
+      subscribeToUploadTask(job);
+    } catch (err) {
+      setUploadState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err instanceof Error ? err.message : 'Upload failed',
+        progress: err instanceof Error ? err.message : 'Upload failed',
+        steps: markRunningUploadStepError(prev.steps),
+      }));
+      activeTaskIdRef.current = null;
+    }
   };
 
   if (loading) return <div className="loading-state">Loading transaction...</div>;

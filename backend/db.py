@@ -26,6 +26,7 @@ from schemas import (
     VerificationCitation,
     DotloopPropertyAddress,
     ParticipantRole,
+    TransactionUploadJobStatus,
 )
 from scout_models import ScoutResult
 
@@ -53,6 +54,14 @@ class OnboardingStepStatus(BaseModel):
     step_id: str
     status: Literal["completed", "skipped", "pending"] = "pending"
     completed_at: Optional[str] = None
+
+
+class TransactionUploadStep(BaseModel):
+    """A single persisted transaction upload progress step."""
+
+    key: str
+    title: str
+    status: Literal["pending", "running", "complete", "error"] = "pending"
 
 
 class ExtractionRecord(BaseModel):
@@ -314,6 +323,39 @@ class TransactionInvitation(Document):
         ]
 
 
+class TransactionUploadJob(Document):
+    """A transaction-scoped upload/extraction job that survives navigation."""
+
+    transaction_id: str
+    uploaded_by: str
+    original_filename: str
+    stored_filename: str
+    file_path: str
+    file_hash: str
+    task_id: Optional[str] = None
+    status: TransactionUploadJobStatus = TransactionUploadJobStatus.PENDING
+    current_step: int = 0
+    total_steps: Optional[int] = None
+    progress_message: Optional[str] = None
+    steps: List[TransactionUploadStep] = Field(default_factory=list)
+    extraction_id: Optional[str] = None
+    error_message: Optional[str] = None
+    auto_link: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+
+    class Settings:
+        name = "transaction_upload_jobs"
+        indexes = [
+            "transaction_id",
+            "uploaded_by",
+            "task_id",
+            "status",
+            "updated_at",
+        ]
+
+
 class UserDocument(Document):
     """A document uploaded to a user's profile (persists across transactions)."""
 
@@ -393,6 +435,7 @@ ALL_DOCUMENT_MODELS = [
     BrokerageProfile,
     Transaction,
     TransactionInvitation,
+    TransactionUploadJob,
     UserDocument,
     TransactionDocument,
 ]

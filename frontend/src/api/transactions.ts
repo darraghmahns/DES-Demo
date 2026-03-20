@@ -7,6 +7,7 @@ import type {
   Transaction,
   TransactionInvitation,
   TransactionStatus,
+  TransactionUploadJob,
 } from '../types/transaction';
 
 // ---------------------------------------------------------------------------
@@ -152,6 +153,28 @@ export async function uploadOfferDocument(
     `/api/transactions/${txnId}/documents/upload-file`,
     { method: 'POST', body: form },
   );
+}
+
+export async function uploadAndExtractTransactionDocument(
+  txnId: string,
+  file: File,
+): Promise<TransactionUploadJob> {
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch<TransactionUploadJob>(
+    `/api/transactions/${txnId}/documents/upload-and-extract`,
+    { method: 'POST', body: form },
+  );
+}
+
+export async function listTransactionUploadJobs(txnId: string): Promise<TransactionUploadJob[]> {
+  const response = await apiFetch<{ jobs: TransactionUploadJob[] }>(`/api/transactions/${txnId}/upload-jobs`);
+  return response.jobs ?? [];
+}
+
+export async function listActiveTransactionUploadJobs(): Promise<TransactionUploadJob[]> {
+  const response = await apiFetch<{ jobs: TransactionUploadJob[] }>('/api/transactions/upload-jobs/active');
+  return response.jobs ?? [];
 }
 
 // ---------------------------------------------------------------------------

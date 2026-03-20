@@ -2972,6 +2972,25 @@ body {
   gap: 12px;
 }
 
+.navbar-upload-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(198, 58, 43, 0.28);
+  background: rgba(198, 58, 43, 0.08);
+  color: var(--brand-primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.navbar-upload-chip:hover {
+  background: rgba(198, 58, 43, 0.14);
+  border-color: rgba(198, 58, 43, 0.4);
+}
+
 .navbar-dev-badge {
   font-size: 11px;
   color: var(--yellow);

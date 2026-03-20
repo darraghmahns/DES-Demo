@@ -13,6 +13,7 @@ from schemas import (
     ParticipantStatus,
     TransactionParticipant,
     TransactionStatus,
+    TransactionUploadJobStatus,
     UserDocumentType,
 )
 
@@ -22,6 +23,20 @@ class DummyUser:
         self.id = user_id
         self.name = name
         self.email = email
+
+
+class FakeCursor:
+    def __init__(self, items):
+        self.items = items
+
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    async def to_list(self):
+        return self.items
 
 
 class DummyTransaction:
@@ -424,6 +439,141 @@ class TestTransactionRouteUpdates:
             assert any("Property address" in blocker for blocker in payload["blockers"])
             assert any("participant" in blocker.lower() for blocker in payload["blockers"])
             assert payload["documents"]["completion"] == 0.0
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_transaction_upload_start_creates_job_and_launches_background_task(self, tmp_path):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        user = MagicMock(id="user-1", org_id="org-1")
+
+        created_task = MagicMock(task_id="task-123", metadata={}, _asyncio_task=None)
+
+        async def assign_job_id(job):
+            job.id = "job-123"
+
+        def schedule_and_close(coro):
+            coro.close()
+            return MagicMock()
+
+        app.dependency_overrides[get_current_user] = lambda: user
+        with (
+            patch("transaction_routes._get_transaction_for_user", AsyncMock(return_value=txn)),
+            patch("transaction_routes._TXN_DOCS_DIR", str(tmp_path)),
+            patch("transaction_routes.TransactionUploadJob.get_settings", return_value=MagicMock(pymongo_collection=MagicMock())),
+            patch("transaction_routes.TransactionUploadJob.insert", new=assign_job_id),
+            patch("transaction_routes.TransactionUploadJob.save", new=AsyncMock()),
+            patch("task_manager.create_task", return_value=created_task) as create_task_mock,
+            patch("server._run_extraction_task", new=AsyncMock()),
+            patch("transaction_routes.asyncio.create_task", side_effect=schedule_and_close) as schedule_mock,
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/api/transactions/txn-123/documents/upload-and-extract",
+                    files={"file": ("offer.pdf", b"%PDF-1.4 sample", "application/pdf")},
+                )
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["id"] == "job-123"
+            assert payload["task_id"] == "task-123"
+            assert payload["original_filename"] == "offer.pdf"
+            assert payload["status"] == "pending"
+            create_task_mock.assert_called_once()
+            create_args = create_task_mock.call_args
+            assert create_args.args[0] == "real_estate"
+            assert create_args.kwargs["metadata"]["transaction_id"] == "txn-123"
+            assert create_args.kwargs["metadata"]["upload_job_id"] == "job-123"
+            assert create_args.kwargs["metadata"]["display_filename"] == "offer.pdf"
+            assert create_args.kwargs["metadata"]["auto_link"] is True
+            schedule_mock.assert_called_once()
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_list_transaction_upload_jobs_returns_live_task_snapshot(self):
+        from auth import get_current_user
+        from db import TransactionUploadJob, TransactionUploadStep
+        from server import app
+
+        txn = DummyTransaction(None)
+        job = TransactionUploadJob.model_construct(
+            transaction_id="txn-123",
+            uploaded_by="user-1",
+            original_filename="offer.pdf",
+            stored_filename="stored_offer.pdf",
+            file_path="/tmp/stored_offer.pdf",
+            file_hash="abc123",
+            task_id="task-123",
+            steps=[TransactionUploadStep(key="upload", title="Upload document", status="complete")],
+        )
+        job.id = "job-123"
+
+        task = MagicMock(
+            task_id="task-123",
+            completed_at=None,
+            events=[
+                {"type": "step", "data": {"step": 1, "total": 7, "title": "Convert to Images"}},
+                {"type": "step_complete", "data": {"step": 1, "title": "Convert to Images"}},
+            ],
+        )
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_transaction_for_user", AsyncMock(return_value=txn)),
+            patch("transaction_routes.TransactionUploadJob.find", return_value=FakeCursor([job])),
+            patch("task_manager.get_task", return_value=task),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/transactions/txn-123/upload-jobs")
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["jobs"][0]["id"] == "job-123"
+            assert payload["jobs"][0]["status"] == "running"
+            assert payload["jobs"][0]["current_step"] == 1
+            assert payload["jobs"][0]["progress_message"] == "Convert to Images"
+            assert payload["jobs"][0]["steps"][-1]["title"] == "Convert to Images"
+            assert payload["jobs"][0]["steps"][-1]["status"] == "complete"
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_list_active_transaction_upload_jobs_only_returns_incomplete_jobs(self):
+        from auth import get_current_user
+        from db import TransactionUploadJob
+        from server import app
+
+        active_job = TransactionUploadJob.model_construct(
+            transaction_id="txn-123",
+            uploaded_by="user-1",
+            original_filename="offer.pdf",
+            stored_filename="stored_offer.pdf",
+            file_path="/tmp/stored_offer.pdf",
+            file_hash="abc123",
+        )
+        active_job.id = "job-123"
+        active_job.status = TransactionUploadJobStatus.PENDING
+
+        txn = DummyTransaction(None)
+        txn.id = "txn-123"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes.TransactionUploadJob.find", return_value=FakeCursor([active_job])),
+            patch("transaction_routes.Transaction.find", return_value=FakeCursor([txn])),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/transactions/upload-jobs/active")
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert len(payload["jobs"]) == 1
+            assert payload["jobs"][0]["id"] == "job-123"
+            assert payload["jobs"][0]["transaction_name"] == txn.name
         finally:
             app.dependency_overrides.clear()
 

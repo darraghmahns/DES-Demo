@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom';
 import { Burger } from '@mantine/core';
 import { SignedIn, SignedOut, SignIn, OrganizationSwitcher } from '@clerk/clerk-react';
 import { useDemoAuth } from '../../hooks/useDemoAuth';
+import { _getAuthToken } from '../../api/client';
 import { getProfile } from '../../api/profile';
+import { listActiveTransactionUploadJobs } from '../../api/transactions';
 import { ComparariLogo } from '../branding/ComparariLogo';
 
 const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -16,6 +18,7 @@ interface NavbarProps {
 export function Navbar({ onMenuToggle, drawerOpen }: NavbarProps) {
   const { isDemoMode, demoUser, exitDemo } = useDemoAuth();
   const [profileName, setProfileName] = useState<string | null>(null);
+  const [activeUploadJobs, setActiveUploadJobs] = useState<Array<{ transaction_id: string }>>([]);
 
   useEffect(() => {
     if (!isDemoMode) return;
@@ -28,6 +31,38 @@ export function Navbar({ onMenuToggle, drawerOpen }: NavbarProps) {
     window.addEventListener('profile-updated', fetchName);
     return () => window.removeEventListener('profile-updated', fetchName);
   }, [isDemoMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const pollActiveUploads = async () => {
+      try {
+        const token = await _getAuthToken?.();
+        if (CLERK_ENABLED && !isDemoMode && !token) {
+          if (!cancelled) setActiveUploadJobs([]);
+          return;
+        }
+        const jobs = await listActiveTransactionUploadJobs();
+        if (!cancelled) {
+          setActiveUploadJobs(jobs.map((job) => ({ transaction_id: job.transaction_id })));
+        }
+      } catch {
+        if (!cancelled) setActiveUploadJobs([]);
+      }
+    };
+
+    void pollActiveUploads();
+    const intervalId = window.setInterval(() => { void pollActiveUploads(); }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [isDemoMode]);
+
+  const activeUploadHref = activeUploadJobs.length === 1
+    ? `/transactions/${activeUploadJobs[0].transaction_id}`
+    : '/transactions';
 
   return (
     <nav className="navbar">
@@ -44,6 +79,11 @@ export function Navbar({ onMenuToggle, drawerOpen }: NavbarProps) {
         </Link>
       </div>
       <div className="navbar-actions">
+        {activeUploadJobs.length > 0 && (
+          <Link to={activeUploadHref} className="navbar-upload-chip">
+            {activeUploadJobs.length} Upload{activeUploadJobs.length === 1 ? '' : 's'} Running
+          </Link>
+        )}
         {isDemoMode ? (
           <>
             <span className="navbar-demo-badge">Demo Mode</span>

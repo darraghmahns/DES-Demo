@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from schemas import PropertyEnrichment, VerificationCitation
+from schemas import PropertyEnrichment, TransactionUploadJobStatus, VerificationCitation
 
 
 # ---------------------------------------------------------------------------
@@ -696,3 +696,64 @@ class TestDBFailureNonFatal:
         # extraction_id should be absent since DB save failed
         complete_data = [e[1] for e in events if e[0] == "complete"][0]
         assert "extraction_id" not in complete_data
+
+
+class TestTransactionUploadLinking:
+    @pytest.mark.asyncio
+    async def test_pipeline_links_to_transaction_before_complete(
+        self, tmp_pdf, mock_engine, mock_compliance_report, mock_enrichment,
+    ):
+        from server import _extraction_pipeline
+
+        emit, events = _collect_emitter()
+        link_extraction = AsyncMock(return_value={"transaction_id": "txn-123", "linked": True})
+        patches = _standard_patches(mock_engine, mock_compliance_report, mock_enrichment)
+
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            await _extraction_pipeline("real_estate", tmp_pdf, emit, link_extraction=link_extraction)
+
+        step_titles = [data["title"] for event_type, data in events if event_type == "step"]
+        step_complete_titles = [data["title"] for event_type, data in events if event_type == "step_complete"]
+        complete_data = [data for event_type, data in events if event_type == "complete"][0]
+
+        assert "Link to transaction" in step_titles
+        assert "Link to transaction" in step_complete_titles
+        link_extraction.assert_awaited_once_with("ext-id-456")
+        assert complete_data["extraction_id"] == "ext-id-456"
+        assert complete_data["transaction_id"] == "txn-123"
+        assert complete_data["linked"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_extraction_task_marks_upload_job_error_when_pipeline_errors(self):
+        from server import _run_extraction_task
+        from task_manager import create_task, TaskStatus
+
+        upload_job = MagicMock()
+        upload_job.save = AsyncMock()
+
+        async def fake_pipeline(_mode, _path, emit, **_kwargs):
+            emit("error", {"message": "Link failed"})
+
+        with (
+            patch("server.TransactionUploadJob.get", new=AsyncMock(return_value=upload_job)),
+            patch("server._extraction_pipeline", new=fake_pipeline),
+        ):
+            task = create_task(
+                "real_estate",
+                "offer.pdf",
+                metadata={
+                    "upload_job_id": "job-123",
+                    "transaction_id": "txn-123",
+                    "auto_link": True,
+                },
+            )
+            await _run_extraction_task(task, "real_estate", "/tmp/offer.pdf", user_id="user-1")
+
+        assert task.status == TaskStatus.ERROR
+        assert upload_job.status == TransactionUploadJobStatus.ERROR
+        assert upload_job.error_message == "Link failed"
+        assert upload_job.completed_at is not None
+        assert upload_job.save.await_count >= 1
