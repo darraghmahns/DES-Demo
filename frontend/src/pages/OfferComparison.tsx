@@ -5,7 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Group } from '@mantine/core';
 import { fetchExtractions, fetchOffersComparison, deleteExtraction, updateOfferFields } from '../api';
 import type { ExtractionSummary, OffersComparisonResult, OfferField, VerificationCitation } from '../api';
-import { listTransactions } from '../api/transactions';
+import { fetchTransactionExtractions, listTransactions } from '../api/transactions';
 import type { Transaction } from '../types/transaction';
 import { ComparisonCellCitation } from '../components/offers/ComparisonCellCitation';
 
@@ -66,6 +66,10 @@ function getDateClass(
 
 type FieldValue = string | number | boolean | null;
 type LocalEdits = Map<string, Record<string, string>>;
+type ComparisonExtractionOption = Pick<
+  ExtractionSummary,
+  'id' | 'document_id' | 'filename' | 'overall_confidence' | 'pages_processed' | 'created_at'
+>;
 
 function parseFieldValue(raw: string, type: OfferField['type']): FieldValue {
   if (raw === '') return null;
@@ -365,12 +369,14 @@ function ComparisonTable({ result, localEdits, highlightedRow, onRowHover, onRem
 
 export function OfferComparison() {
   const [searchParams] = useSearchParams();
+  const preloadTxnId = searchParams.get('txn');
+  const preloadIdsParam = searchParams.get('ids') ?? '';
   // IDs passed from the Offers tab — if present, filter and pre-select only those
-  const preloadIds = searchParams.get('ids')
-    ? new Set(searchParams.get('ids')!.split(',').filter(Boolean))
+  const preloadIds = preloadIdsParam
+    ? new Set(preloadIdsParam.split(',').filter(Boolean))
     : null;
 
-  const [extractions, setExtractions] = useState<ExtractionSummary[]>([]);
+  const [extractions, setExtractions] = useState<ComparisonExtractionOption[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<OffersComparisonResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -404,8 +410,32 @@ export function OfferComparison() {
   }, []);
 
   useEffect(() => {
+    setLoadingExtractions(true);
+    setError(null);
+    const extractionRequest = preloadTxnId
+      ? fetchTransactionExtractions(preloadTxnId).then((items) =>
+          items.map((item) => ({
+            id: item.id,
+            document_id: item.id,
+            filename: item.filename,
+            overall_confidence: item.overall_confidence,
+            pages_processed: item.pages_processed,
+            created_at: item.created_at,
+          })),
+        )
+      : fetchExtractions('real_estate').then((items) =>
+          items.map((item) => ({
+            id: item.id,
+            document_id: item.document_id,
+            filename: item.filename,
+            overall_confidence: item.overall_confidence,
+            pages_processed: item.pages_processed,
+            created_at: item.created_at,
+          })),
+        );
+
     Promise.all([
-      fetchExtractions('real_estate'),
+      extractionRequest,
       listTransactions(),
     ]).then(([all, txns]) => {
       // Build doc_id -> transaction lookup
@@ -426,12 +456,14 @@ export function OfferComparison() {
       setExtractions(visible);
       if (preloadIds) {
         setSelectedIds(new Set(visible.map(e => e.id)));
+      } else {
+        setSelectedIds(new Set());
       }
     })
       .catch(() => setError('Failed to load extractions'))
       .finally(() => setLoadingExtractions(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [preloadIdsParam, preloadTxnId]);
 
   // Extractions visible in the selector after applying the transaction filter
   const visibleExtractions = filterTxnId
@@ -467,7 +499,7 @@ export function OfferComparison() {
     setResult(null);
   }
 
-  async function handleDelete(ext: ExtractionSummary) {
+  async function handleDelete(ext: ComparisonExtractionOption) {
     setDeleting(prev => new Set(prev).add(ext.id));
     try {
       // Pass the plain document_id (no composite suffix) to avoid URL encoding issues
@@ -489,7 +521,7 @@ export function OfferComparison() {
   }
 
   async function handleCompare() {
-    if (selectedIds.size < 2) return;
+    if (selectedIds.size < 1) return;
     setLoading(true);
     setError(null);
     try {
@@ -507,7 +539,7 @@ export function OfferComparison() {
       <Group justify="space-between" mb="lg">
         <div>
           <h1>Offer Comparison</h1>
-          <p className="page-subtitle">Select 2 or more offers to compare side by side.</p>
+          <p className="page-subtitle">Select 1 or more offers to compare side by side.</p>
         </div>
       </Group>
 
@@ -541,11 +573,20 @@ export function OfferComparison() {
           <div className="loading-state">Loading extractions...</div>
         ) : extractions.length === 0 ? (
           <div className="comparison-empty-state">
-            <p>No real estate extractions found.</p>
-            <p>Run an extraction on a purchase agreement first.</p>
-            <Link to="/transactions" className="btn-primary" style={{ marginTop: 12 }}>
-              Go to Transactions
-            </Link>
+            {preloadTxnId ? (
+              <>
+                <p>No offers linked to this transaction yet.</p>
+                <p>Upload and extract an offer from the transaction Documents tab first.</p>
+              </>
+            ) : (
+              <>
+                <p>No real estate extractions found.</p>
+                <p>Run an extraction on a purchase agreement first.</p>
+                <Link to="/transactions" className="btn-primary" style={{ marginTop: 12 }}>
+                  Go to Transactions
+                </Link>
+              </>
+            )}
           </div>
         ) : visibleExtractions.length === 0 ? (
           <div className="comparison-empty-state">
@@ -599,10 +640,14 @@ export function OfferComparison() {
         <button
           className="btn-primary"
           onClick={handleCompare}
-          disabled={selectedIds.size < 2 || loading}
+          disabled={selectedIds.size < 1 || loading}
           style={{ marginTop: 16 }}
         >
-          {loading ? 'Comparing...' : `Compare ${selectedIds.size > 0 ? `(${selectedIds.size})` : ''} Offers`}
+          {loading
+            ? 'Comparing...'
+            : selectedIds.size === 1
+              ? 'Compare Offer'
+              : `Compare ${selectedIds.size > 0 ? `(${selectedIds.size})` : ''} Offers`}
         </button>
       </section>
 

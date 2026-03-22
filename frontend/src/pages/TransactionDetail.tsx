@@ -632,7 +632,7 @@ export function TransactionDetail() {
                   onUnlink={unlinkExtraction}
                   onDocsRefresh={refreshDocs}
                   onNavigateToCompare={() =>
-                    navigate(`/comparison?ids=${extractions.map(e => e.id).join(',')}`)
+                    navigate(`/comparison?txn=${id}&ids=${extractions.map(e => e.id).join(',')}`)
                   }
                 />
               )}
@@ -1745,9 +1745,9 @@ function OffersTab({
     <div className="extractions-tab">
       <div className="extractions-tab-header">
         <span>{extractions.length} offer{extractions.length !== 1 ? 's' : ''} received</span>
-        {extractions.length >= 2 && (
+        {extractions.length >= 1 && (
           <Button size="sm" variant="filled" color="cyan" onClick={onNavigateToCompare}>
-            Compare All Offers
+            {extractions.length === 1 ? 'Compare Offer' : 'Compare All Offers'}
           </Button>
         )}
       </div>

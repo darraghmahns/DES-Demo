@@ -133,6 +133,7 @@ async def list_extractions(
     limit: int = 50,
     user_id: str | None = None,
     org_id: str | None = None,
+    legacy_user_ids: list[str] | None = None,
 ) -> list[dict]:
     """List recent extractions with basic metadata.
 
@@ -145,13 +146,17 @@ async def list_extractions(
     if mode:
         filters["mode"] = mode
 
+    compatible_user_ids: list[str] = []
+    if user_id:
+        compatible_user_ids.append(user_id)
+    if legacy_user_ids:
+        compatible_user_ids.extend(uid for uid in legacy_user_ids if uid and uid not in compatible_user_ids)
+
     if org_id:
         filters["org_id"] = org_id
-    elif user_id:
-        filters["$or"] = [
-            {"user_id": user_id},
-            {"user_id": None},
-        ]
+    elif compatible_user_ids:
+        filters["$or"] = [{"user_id": uid} for uid in compatible_user_ids]
+        filters["$or"].append({"user_id": None})
 
     query = DocumentRecord.find(filters)
     docs = await query.sort(-DocumentRecord.uploaded_at).limit(limit).to_list()

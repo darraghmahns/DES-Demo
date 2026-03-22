@@ -118,6 +118,35 @@ app.add_middleware(
 app.include_router(integrations_router)
 
 # Register Phase 2 routers
+
+
+def _canonical_user_id(user) -> str | None:
+    if not user:
+        return None
+    user_id = getattr(user, "id", None)
+    return str(user_id) if user_id is not None else None
+
+
+def _legacy_extraction_user_ids(user) -> list[str]:
+    if not user:
+        return []
+    legacy_ids: list[str] = []
+    clerk_user_id = getattr(user, "clerk_user_id", None)
+    if clerk_user_id:
+        legacy_ids.append(clerk_user_id)
+    return legacy_ids
+
+
+def _can_access_document(doc, *, user, allow_unowned: bool = True) -> bool:
+    if not user:
+        return False
+    if user.org_id:
+        return doc.org_id == user.org_id
+    compatible_ids = [_canonical_user_id(user), *_legacy_extraction_user_ids(user)]
+    compatible_ids = [uid for uid in compatible_ids if uid]
+    if doc.user_id in compatible_ids:
+        return True
+    return allow_unowned and doc.user_id is None
 from profile_routes import router as profile_router
 from profile_doc_routes import router as profile_doc_router
 
@@ -676,7 +705,7 @@ async def extract(request: ExtractRequest, user=Depends(get_current_user)):
         return {"task_id": existing.task_id, "status": existing.status.value}
 
     # Create and launch background task
-    user_id = user.clerk_user_id if user else None
+    user_id = _canonical_user_id(user)
     org_id = user.org_id if user else None
     task = create_task(request.mode, request.filename)
     asyncio_task = asyncio.create_task(
@@ -1295,10 +1324,10 @@ async def clear_extraction_cache(mode: str = Query(None), user=Depends(get_curre
         if user.org_id:
             filters["org_id"] = user.org_id
         else:
-            filters["$or"] = [
-                {"user_id": user.clerk_user_id},
-                {"user_id": None},
-            ]
+            compatible_ids = [_canonical_user_id(user), *_legacy_extraction_user_ids(user)]
+            compatible_ids = [uid for uid in compatible_ids if uid]
+            filters["$or"] = [{"user_id": uid} for uid in compatible_ids]
+            filters["$or"].append({"user_id": None})
 
     docs = await DocumentRecord.find(filters).to_list()
     deleted_count = 0
@@ -1313,9 +1342,15 @@ async def clear_extraction_cache(mode: str = Query(None), user=Depends(get_curre
 async def get_extractions(mode: str | None = None, limit: int = Query(50), user=Depends(get_optional_user)):
     """List recent extractions with metadata for dropdown selection."""
     from db_writer import list_extractions
-    user_id = user.clerk_user_id if user else None
+    user_id = _canonical_user_id(user)
     org_id = user.org_id if user else None
-    results = await list_extractions(mode=mode, limit=limit, user_id=user_id, org_id=org_id)
+    results = await list_extractions(
+        mode=mode,
+        limit=limit,
+        user_id=user_id,
+        org_id=org_id,
+        legacy_user_ids=_legacy_extraction_user_ids(user),
+    )
     return {"extractions": results}
 
 
@@ -1326,6 +1361,8 @@ async def delete_extraction(doc_id: str, user=Depends(get_current_user)):
     doc = await DocumentRecord.get(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Extraction not found")
+    if not _can_access_document(doc, user=user):
+        raise HTTPException(status_code=403, detail="Forbidden")
     # Remove from any transactions that reference this doc
     async for txn in Transaction.find({"extraction_ids": doc_id}):
         txn.extraction_ids = [eid for eid in txn.extraction_ids if eid != doc_id]
