@@ -15,4 +15,5 @@ certifi>=2024.0.0
 pymongo[srv]>=4.6.0
 PyJWT[crypto]>=2.8.0
 svix>=1.0.0
+slowapi>=0.1.9
 # docling and ollama excluded — only needed for ENGINE=local
