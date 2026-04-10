@@ -6,7 +6,11 @@ type CitationState = 'supported' | 'not_found' | 'not_captured';
 type CellValue = string | number | boolean | null;
 
 function buildFallbackText(value: CellValue, state: CitationState): string {
-  if (state === 'not_found') return 'Not found in document';
+  if (state === 'not_found') {
+    if (value === null || value === undefined || value === '') return 'Not found in document';
+    if (value === false) return 'Negative result could not be verified in document';
+    return 'Value extracted, but source location was not verified';
+  }
   if (value === null || value === undefined || value === '') return 'No citation captured for this empty result';
   if (value === false) return 'No citation captured for this negative result';
   return 'No citation captured for this value';
@@ -20,6 +24,13 @@ function stringifyValue(value: CellValue): string {
 
 function citationSummary(citation: VerificationCitation): string {
   return `Page ${citation.page_number}, ${citation.line_or_region}. ${citation.surrounding_text}`;
+}
+
+function isSyntheticNotFoundCitation(citation: VerificationCitation): boolean {
+  return citation.page_number === 0
+    && citation.line_or_region.trim().toLowerCase() === 'not found'
+    && citation.surrounding_text.trim().toUpperCase() === 'NOT FOUND'
+    && Number(citation.confidence ?? 0) <= 0;
 }
 
 export function ComparisonCellCitation({
@@ -44,7 +55,7 @@ export function ComparisonCellCitation({
   disabled?: boolean;
 }) {
   const fallbackText = buildFallbackText(value, state);
-  const visibleCitations = citations.slice(0, 3);
+  const visibleCitations = citations.filter(citation => !isSyntheticNotFoundCitation(citation)).slice(0, 3);
   const ariaLabel = [
     fieldLabel,
     `Current value: ${stringifyValue(value)}.`,

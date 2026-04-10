@@ -14,6 +14,7 @@ export type InvitationStatus = 'created' | 'sent' | 'opened' | 'accepted' | 'exp
 export type DotloopSyncStatus = 'never' | 'current' | 'stale' | 'error';
 export type AgentRole = 'listing_agent' | 'buying_agent';
 export type TransactionUploadJobStatus = 'pending' | 'running' | 'linking' | 'complete' | 'error';
+export type AttachmentState = 'none' | 'required' | 'attached';
 
 export type ParticipantRole =
   | 'BUYER'
@@ -123,10 +124,61 @@ export interface TransactionUploadJob {
   extraction_id?: string | null;
   error_message?: string | null;
   auto_link: boolean;
+  offer_extraction_id?: string | null;
+  requested_doc_type?: string | null;
+  attachment_state?: AttachmentState;
+  attachment_candidates?: string[];
+  document_type?: string | null;
+  document_title?: string | null;
+  support_level?: string | null;
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
   transaction_name?: string;
+}
+
+export interface OfferWorkspaceSummary {
+  id: string;
+  filename: string;
+  mode: string;
+  overall_confidence: number;
+  pages_processed: number;
+  created_at: string | null;
+  document_type?: string | null;
+  document_form_id?: string | null;
+  document_title?: string | null;
+  document_revision?: string | null;
+  support_level?: string | null;
+}
+
+export interface OfferWorkspaceDocument {
+  _id: string;
+  transaction_id: string;
+  doc_type: string;
+  source: string;
+  filename: string;
+  uploaded_by: string;
+  uploaded_at: string | null;
+  offer_extraction_id?: string | null;
+  document_record_id?: string | null;
+  attachment_role?: string | null;
+  attached_at?: string | null;
+}
+
+export interface OfferThread {
+  extraction_id: string;
+  document_id: string;
+  summary: OfferWorkspaceSummary;
+  attached_extractions: Array<OfferWorkspaceSummary & { attached_at?: string | null }>;
+  supporting_documents: OfferWorkspaceDocument[];
+}
+
+export interface OfferWorkspace {
+  offers: OfferThread[];
+  loose_extractions: OfferWorkspaceSummary[];
+  loose_documents: OfferWorkspaceDocument[];
+  root_offer_ids: string[];
+  attachment_candidates: Array<{ extraction_id: string; label: string }>;
 }
 
 export const STATUS_LABELS: Record<TransactionStatus, string> = {

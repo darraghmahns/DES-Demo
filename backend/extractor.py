@@ -8,6 +8,8 @@ from typing import Any
 from openai import OpenAI
 
 from offer_fields import stringify_field_value
+from real_estate_classifier import FORM_DEFINITIONS
+from schemas import RealEstateDocumentSummary
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ You MUST return a JSON object with this exact structure:
     "offer_date": null,
     "offer_expiration_date": null,
     "inspection_date": null,
+    "inspection_release_date": null,
+    "inspection_release_time": null,
     "inspection_negotiation_deadline": null,
     "insurance_contingency_date": null,
     "loan_application_deadline": null,
@@ -67,11 +71,13 @@ You MUST return a JSON object with this exact structure:
     "detection_devices": null,
     "opd_delivered": null,
     "inspection_contingency": null,
+    "inspection_release_clause_text": null,
     "financing_contingency": null,
     "appraisal_contingency": null,
     "title_contingency": null,
     "insurance_contingency": null,
     "sale_of_home_contingency": null,
+    "buyer_physically_visited_property": null,
     "additional_provisions": null,
     "notes": null
   },
@@ -85,6 +91,8 @@ Rules:
 - For prices, use numeric values only (no $ signs or commas). Example: 485000.0
 - For dates, use MM/DD/YYYY format.
 - Valid participant roles: BUYER, SELLER, LISTING_AGENT, BUYING_AGENT, LISTING_BROKER, BUYING_BROKER, ESCROW_TITLE_REP, LOAN_OFFICER, OTHER
+- For mutually exclusive checkbox groups, return ONLY the visibly checked option. If none are clearly checked, or more than one option is checked, use null instead of guessing.
+- For boolean checkbox fields, return true or false only when the document explicitly shows the checked statement or checkbox state. Use null if the section is absent or ambiguous.
 - Include ALL participants found anywhere in the document: buyers, sellers, agents, and brokers.
   Use the printed name whenever possible — not a signature.
 
@@ -124,11 +132,11 @@ Rules:
   - closing_fee_paid_by: who pays the title company / closing agent / settlement fee. Look for a section
     or line about closing costs or closing fees — may be labeled "CLOSING FEE", "CLOSING COSTS",
     "SETTLEMENT FEE", "TITLE/CLOSING FEE", or similar. Look for Seller / Buyer / Equally Shared / Split
-    checkboxes on that line. Extract the checked option as a string (e.g. "Equally Shared", "Seller", "Buyer"). Use null if not present.
+    checkboxes on that line. Extract the checked option as exactly one of: "Equally Shared", "Seller", or "Buyer". If the group is blank or ambiguous, use null.
   - fincen_fee_paid_by: who pays the FinCEN reporting fee. Look for a section mentioning FinCEN,
     federal reporting, financial crimes reporting, or similar — may be labeled "FINCEN FEE",
     "FINCEN REPORTS", "FEDERAL REPORTING FEE". Look for Seller / Buyer / Equally Shared checkboxes.
-    Extract the checked option as a string. Use null if not present.
+    Extract the checked option as exactly one of: "Equally Shared", "Seller", or "Buyer". If the group is blank or ambiguous, use null.
 
 - For contract_dates:
   - contract_agreement_date: the date this agreement/offer was made or signed. Usually found near the
@@ -140,6 +148,10 @@ Rules:
     "Offer Expiration", "Acceptance Deadline", "Buyer's Commitment" deadline, or found in a sentence
     like "Buyer grants Seller until [date] to accept".
   - inspection_date: the inspection contingency deadline (last day to complete inspection).
+  - inspection_release_date: the date next to "Release Date" for an inspection or repair release clause.
+    Extract only the date portion in MM/DD/YYYY format.
+  - inspection_release_time: the time text paired with inspection_release_date, usually after "at".
+    Preserve the exact visible time and timezone text (for example "5:00 p.m. (Mountain Time)").
   - inspection_negotiation_deadline: the deadline to complete negotiations following inspection.
   - insurance_contingency_date: the insurance contingency deadline date.
   - loan_application_deadline: the date by which the buyer must submit their loan application.
@@ -188,6 +200,9 @@ Rules:
     buyer the right to inspect. May be in a section labeled "INSPECTION CONTINGENCY", "PROPERTY
     INSPECTION CONTINGENCY", "INSPECTION CLAUSE", or similar. A checked box at the start of such a
     section = true. A crossed-out, waived, or explicitly unchecked section = false. null if absent.
+  - inspection_release_clause_text: when the document says "This Agreement is contingent upon" or similar
+    and then provides inspection/repair release language, capture that clause text verbatim. Do not include
+    the separate "Release Date" label, date, or time in this field.
   - financing_contingency: true if contingent on buyer obtaining a loan/mortgage. Section may be labeled
     "FINANCING CONTINGENCY", "LOAN CONTINGENCY", "FINANCING CONDITIONS", "MORTGAGE CONTINGENCY".
     false if the section has an explicitly checked "NO" box, is crossed out, or states the offer is
@@ -204,6 +219,10 @@ Rules:
     may be labeled "INSURANCE CONTINGENCY", "HAZARD INSURANCE CONTINGENCY", "HOMEOWNER'S INSURANCE".
     false if explicitly waived; null if absent.
   - sale_of_home_contingency: look for a SALE OF HOME or SALE OF BUYER'S PROPERTY contingency section. true if checked/included; false if explicitly waived; null if absent.
+  - buyer_physically_visited_property: look for a buyer acknowledgments or representations section with
+    mutually exclusive statements such as "has physically visited the Property in person" and
+    "has not physically visited". Return true if the visited statement is checked, false if the not-visited
+    statement is checked, and null if the section is absent or ambiguous.
   - additional_provisions: verbatim text of any ADDITIONAL PROVISIONS, special conditions, or addendum titles listed in the contract. null if none.
   - notes: any other noteworthy terms, conditions, or information not captured above. null if none.
 
@@ -267,8 +286,58 @@ Rules:
 - If a field is still not present, return null
 - Do not change fields that are not listed
 - For booleans, return true or false only when the document explicitly supports that reading
+- For checkbox-backed fields, read the box state carefully. For mutually exclusive groups, return only the
+  single checked option. If the group is blank or ambiguous, return null.
 - For currency, return a number
 - For dates, return the exact date string found in the document
+"""
+
+REAL_ESTATE_CLASSIFICATION_PROMPT = """You classify Montana real-estate documents using lightweight metadata only.
+
+You are given:
+- filename
+- parsed header title/subtitle
+- a short first-page excerpt
+- a controlled list of exact form ids
+
+Return JSON with:
+{
+  "document_form_id": "<exact candidate form id or UNKNOWN>",
+  "document_title": "<best human-readable form title>",
+  "document_subtitle": "<subtitle if any>",
+  "document_revision": "<Month YYYY or null>",
+  "document_publisher": "<publisher or null>",
+  "document_footer_text": "<footer title line or null>",
+  "classification_confidence": 0.0
+}
+
+Rules:
+- Choose only from the provided candidate form ids or UNKNOWN
+- Use UNKNOWN when metadata is ambiguous
+- Do not invent a form id that is not in the provided list
+- Confidence must be between 0.0 and 1.0
+"""
+
+REAL_ESTATE_SUMMARY_PROMPT = """You extract a generic structured summary from a Montana real-estate form that is not being treated as a full purchase offer.
+
+You are given:
+- the document pages
+- the classified form metadata
+
+Return a structured summary that captures:
+- the document's purpose
+- the referenced property if present
+- the referenced agreement if present
+- named parties
+- key dates
+- key dollar amounts
+- requested actions / remedies / amendments if present
+- any other important notes
+
+Rules:
+- Extract only what is explicitly written
+- Do not force the document into a purchase-offer schema
+- If a field is not present, use null or an empty list
 """
 
 
@@ -448,6 +517,79 @@ def recover_missing_fields_from_images(
     if not isinstance(recoveries, dict):
         return {}, usage
     return recoveries, usage
+
+
+def classify_real_estate_metadata(
+    metadata: dict[str, Any],
+    client: OpenAI,
+) -> tuple[dict, dict]:
+    """Use a lightweight model fallback to classify from metadata only."""
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": REAL_ESTATE_CLASSIFICATION_PROMPT},
+            {"role": "user", "content": json.dumps(metadata, indent=2)},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+        max_tokens=512,
+        timeout=60.0,
+    )
+    usage = _usage_dict(response.usage)
+    content = response.choices[0].message.content or ""
+    try:
+        payload = _parse_json_payload(content)
+    except json.JSONDecodeError as exc:
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        log.warning("Malformed classification JSON from model (finish_reason=%s): %s", finish_reason, exc)
+        payload, repair_usage = _repair_json_payload(content, client)
+        usage = _combine_usage(usage, repair_usage)
+    candidate_ids = {definition.form_id for definition in FORM_DEFINITIONS}
+    form_id = str(payload.get("document_form_id") or "UNKNOWN").strip().upper()
+    if form_id not in candidate_ids and form_id != "UNKNOWN":
+        payload["document_form_id"] = "UNKNOWN"
+        payload["classification_confidence"] = 0.0
+    return payload, usage
+
+
+def extract_real_estate_summary_from_images(
+    images_b64: list[str],
+    classification: dict[str, Any],
+    client: OpenAI,
+) -> tuple[dict, dict]:
+    """Extract a generic structured summary for non-offer real-estate forms."""
+    content: list[dict] = [
+        {"type": "text", "text": f"Classification metadata:\\n{json.dumps(classification, indent=2)}"},
+    ]
+    for i, img_b64 in enumerate(images_b64):
+        content.append({"type": "text", "text": f"--- Page {i + 1} of {len(images_b64)} ---"})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{img_b64}", "detail": "high"},
+        })
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": REAL_ESTATE_SUMMARY_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+        max_tokens=4096,
+        timeout=120.0,
+    )
+    usage = _usage_dict(response.usage)
+    content = response.choices[0].message.content or ""
+    try:
+        payload = _parse_json_payload(content)
+    except json.JSONDecodeError as exc:
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        log.warning("Malformed summary JSON from model (finish_reason=%s): %s", finish_reason, exc)
+        payload, repair_usage = _repair_json_payload(content, client)
+        usage = _combine_usage(usage, repair_usage)
+    validated = RealEstateDocumentSummary.model_validate(payload)
+    return validated.model_dump(mode="json"), usage
 
 
 def extract_from_images(

@@ -5,7 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Group } from '@mantine/core';
 import { fetchExtractions, fetchOffersComparison, deleteExtraction, updateOfferFields } from '../api';
 import type { ExtractionSummary, OffersComparisonResult, OfferField, VerificationCitation } from '../api';
-import { fetchTransactionExtractions, listTransactions } from '../api/transactions';
+import { fetchOfferWorkspace, listTransactions } from '../api/transactions';
 import type { Transaction } from '../types/transaction';
 import { ComparisonCellCitation } from '../components/offers/ComparisonCellCitation';
 
@@ -68,7 +68,15 @@ type FieldValue = string | number | boolean | null;
 type LocalEdits = Map<string, Record<string, string>>;
 type ComparisonExtractionOption = Pick<
   ExtractionSummary,
-  'id' | 'document_id' | 'filename' | 'overall_confidence' | 'pages_processed' | 'created_at'
+  | 'id'
+  | 'document_id'
+  | 'filename'
+  | 'overall_confidence'
+  | 'pages_processed'
+  | 'created_at'
+  | 'document_title'
+  | 'document_type'
+  | 'document_revision'
 >;
 
 function parseFieldValue(raw: string, type: OfferField['type']): FieldValue {
@@ -413,14 +421,17 @@ export function OfferComparison() {
     setLoadingExtractions(true);
     setError(null);
     const extractionRequest = preloadTxnId
-      ? fetchTransactionExtractions(preloadTxnId).then((items) =>
-          items.map((item) => ({
-            id: item.id,
-            document_id: item.id,
-            filename: item.filename,
-            overall_confidence: item.overall_confidence,
-            pages_processed: item.pages_processed,
-            created_at: item.created_at,
+      ? fetchOfferWorkspace(preloadTxnId).then((workspace) =>
+          workspace.offers.map((offer) => ({
+            id: offer.extraction_id,
+            document_id: offer.document_id,
+            filename: offer.summary.filename,
+            overall_confidence: offer.summary.overall_confidence,
+            pages_processed: offer.summary.pages_processed,
+            created_at: offer.summary.created_at,
+            document_title: offer.summary.document_title,
+            document_type: offer.summary.document_type,
+            document_revision: offer.summary.document_revision,
           })),
         )
       : fetchExtractions('real_estate').then((items) =>
@@ -431,6 +442,9 @@ export function OfferComparison() {
             overall_confidence: item.overall_confidence,
             pages_processed: item.pages_processed,
             created_at: item.created_at,
+            document_title: item.document_title,
+            document_type: item.document_type,
+            document_revision: item.document_revision,
           })),
         );
 
@@ -448,10 +462,10 @@ export function OfferComparison() {
       setTxnByDocId(map);
       setTransactions(txns);
 
-      // preloadIds are plain ObjectIds (from fetchTransactionExtractions);
-      // list_extractions returns composite "doc_id:idx" as `id` but plain doc_id as `document_id`
+      // preloadIds are plain document ids for transaction-scoped compare;
+      // global list_extractions returns composite "doc_id:idx" as `id` but plain doc_id as `document_id`
       const visible = preloadIds
-        ? all.filter(e => preloadIds.has(e.document_id))
+        ? all.filter(e => preloadIds.has(e.id) || preloadIds.has(e.document_id))
         : all;
       setExtractions(visible);
       if (preloadIds) {
@@ -522,10 +536,10 @@ export function OfferComparison() {
 
   async function handleCompare() {
     if (selectedIds.size < 1) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await fetchOffersComparison(Array.from(selectedIds));
+      setLoading(true);
+      setError(null);
+      try {
+      const data = await fetchOffersComparison(Array.from(selectedIds), preloadTxnId ?? undefined);
       setResult(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Comparison failed');
@@ -596,6 +610,8 @@ export function OfferComparison() {
           <div className="comparison-card-list">
             {visibleExtractions.map((ext) => {
               const linkedTxn = txnByDocId.get(ext.document_id);
+              const displayTitle = ext.document_title || ext.filename;
+              const displayType = ext.document_type ? ext.document_type.replace(/_/g, ' ') : null;
               return (
                 <div
                   key={ext.id}
@@ -608,9 +624,11 @@ export function OfferComparison() {
                       onChange={() => toggleId(ext.id)}
                     />
                     <div className="comparison-card-info">
-                      <span className="comparison-card-filename">{ext.filename}</span>
+                      <span className="comparison-card-filename">{displayTitle}</span>
                       <span className="comparison-card-meta">
                         {ext.pages_processed}p -{' '}
+                        {displayType ? `${displayType} - ` : ''}
+                        {ext.document_revision ? `${ext.document_revision} - ` : ''}
                         <span className={`conf-badge-inline ${ext.overall_confidence >= 0.85 ? 'high' : ext.overall_confidence >= 0.65 ? 'medium' : 'low'}`}>
                           {Math.round(ext.overall_confidence * 100)}%
                         </span>

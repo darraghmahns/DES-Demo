@@ -59,6 +59,19 @@ def test_extract_from_images_repairs_truncated_json():
     assert client.chat.completions.calls[0]["max_tokens"] == 8192
 
 
+def test_extract_from_images_prompt_mentions_new_release_and_checkbox_fields():
+    client = DummyClient([_response('{"loop_name":"Example"}')])
+
+    extract_from_images(["base64data"], "real_estate", client)
+
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert '"inspection_release_date": null' in system_prompt
+    assert '"inspection_release_time": null' in system_prompt
+    assert '"inspection_release_clause_text": null' in system_prompt
+    assert '"buyer_physically_visited_property": null' in system_prompt
+    assert "mutually exclusive checkbox groups" in system_prompt
+
+
 def test_verify_extraction_repairs_malformed_json():
     malformed = '{"citations":[{"field_name":"loop_name","extracted_value":"Example","page_number":1,"line_or_region":"top","surrounding_text":"Example","confidence":0.9}'
     repaired = '{"citations":[{"field_name":"loop_name","extracted_value":"Example","page_number":1,"line_or_region":"top","surrounding_text":"Example","confidence":0.9}]}'
@@ -72,6 +85,24 @@ def test_verify_extraction_repairs_malformed_json():
     assert len(citations) == 1
     assert citations[0].field_name == "loop_name"
     assert usage["total_tokens"] == 345
+
+
+def test_verify_extraction_prompt_requires_exact_comparison_field_names():
+    repaired = '{"citations":[]}'
+    client = DummyClient([_response(repaired, prompt_tokens=20, completion_tokens=25)])
+
+    verify_extraction(
+        ["base64data"],
+        {"financials": {"purchase_price": 612500.0}},
+        client,
+        [{"path": "financials.purchase_price", "value": 612500.0}],
+    )
+
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    user_prompt = client.chat.completions.calls[0]["messages"][1]["content"][-1]["text"]
+    assert 'use "financials.purchase_price", not "purchase_price"' in system_prompt
+    assert "reuse each field_name exactly as written below" in user_prompt
+    assert 'field_name: "financials.purchase_price"' in user_prompt
 
 
 def test_recover_missing_fields_from_images_returns_recoveries():
@@ -116,6 +147,25 @@ def test_recover_missing_fields_from_images_repairs_malformed_json():
     assert recoveries["terms.inspection_contingency"] is False
     assert usage["prompt_tokens"] == 50
     assert usage["completion_tokens"] == 62
+
+
+def test_recover_missing_fields_from_images_prompt_mentions_checkbox_guidance():
+    client = DummyClient([
+        _response('{"recoveries":{"financials.closing_fee_paid_by":"Equally Shared"}}'),
+    ])
+
+    recover_missing_fields_from_images(
+        ["base64data"],
+        {"financials": {"purchase_price": 612500.0}},
+        [
+            {"path": "financials.closing_fee_paid_by", "label": "Closing Fee Paid By", "type": "string", "value": None},
+        ],
+        client,
+    )
+
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert "checkbox-backed fields" in system_prompt
+    assert "single checked option" in system_prompt
 
 
 def test_verify_extraction_ensures_required_not_found_citations():

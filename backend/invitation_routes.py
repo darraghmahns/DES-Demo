@@ -13,14 +13,17 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from auth import AUTH_ENABLED, CLERK_SECRET_KEY, generate_magic_link_token, get_current_user
+from rate_limiter import limiter
+from route_helpers import _get_user_or_dev, _normalize_email, _utcnow
 from db import Transaction, TransactionInvitation, UserProfile
 from invitation_delivery import build_invite_url, send_invitation_email
 from schemas import InvitationStatus, ParticipantRole, ParticipantStatus, TransactionParticipant, UserType
@@ -46,32 +49,11 @@ class ProfileSubmitRequest(BaseModel):
     address: Optional[dict] = None
 
 
+_CLERK_USER_ID_RE = re.compile(r"^user_[A-Za-z0-9]+$")
+
+
 class UpgradeRequest(BaseModel):
     clerk_user_id: str
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-async def _get_user_or_dev(user) -> UserProfile:
-    if user is not None:
-        return user
-    if not AUTH_ENABLED:
-        dev_user = await UserProfile.find_one({"email": "dev@deslabs.local"})
-        if not dev_user:
-            dev_user = UserProfile(
-                email="dev@deslabs.local",
-                name="Dev User",
-                has_clerk_account=False,
-            )
-            await dev_user.insert()
-        return dev_user
-    raise HTTPException(status_code=401, detail="Authentication required")
-
-
-def _normalize_email(email: str) -> str:
-    return email.strip().lower()
 
 
 def _hash_invitation_token(token: str) -> str:
@@ -395,7 +377,8 @@ async def revoke_invitation(invitation_id: str, user=Depends(get_current_user)):
 
 
 @router.get("/invitations/{token}/validate")
-async def validate_invitation(token: str):
+@limiter.limit("30/minute")
+async def validate_invitation(request: Request, token: str):
     """Validate a transaction invitation link and return the landing payload."""
     invitation, _payload = await _get_invitation_for_token(token)
     invitee = await UserProfile.get(invitation.invitee_user_id) if invitation.invitee_user_id else None
@@ -434,7 +417,8 @@ async def validate_invitation(token: str):
 
 
 @router.post("/invitations/{token}/accept")
-async def accept_invitation(token: str):
+@limiter.limit("20/minute")
+async def accept_invitation(request: Request, token: str):
     """Accept an invitation and mark the participant active."""
     invitation, _payload = await _get_invitation_for_token(token)
     invitee = await UserProfile.get(invitation.invitee_user_id) if invitation.invitee_user_id else None
@@ -506,14 +490,21 @@ async def submit_profile_via_magic_link(token: str, req: ProfileSubmitRequest):
 
 
 @router.post("/invitations/{token}/upgrade")
-async def upgrade_to_clerk(token: str, req: UpgradeRequest):
+@limiter.limit("10/minute")
+async def upgrade_to_clerk(request: Request, token: str, req: UpgradeRequest):
     """Link a Clerk account to a placeholder user created via invitation."""
     invitation, _payload = await _get_invitation_for_token(token)
+    if not _CLERK_USER_ID_RE.match(req.clerk_user_id):
+        raise HTTPException(status_code=400, detail="Invalid Clerk user ID format")
+
     invitee = await UserProfile.get(invitation.invitee_user_id) if invitation.invitee_user_id else None
     if not invitee:
         invitee = await UserProfile.find_one({"email": invitation.email})
     if not invitee:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if invitee.clerk_user_id and invitee.has_clerk_account:
+        raise HTTPException(status_code=409, detail="Account already linked to a Clerk user")
 
     invitee.clerk_user_id = req.clerk_user_id
     invitee.has_clerk_account = True

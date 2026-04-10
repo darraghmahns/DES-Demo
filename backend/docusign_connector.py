@@ -15,23 +15,23 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from docusign_client import DocuSignClient, DocuSignAPIError
 from db_writer import get_extraction, save_document, save_extraction
-from offer_fields import get_offer_field_targets, get_missing_offer_field_targets, merge_recovered_offer_fields
 from ocr_engine import get_engine
-from schemas import DotloopLoopDetails, ExtractionResult
-from verifier import compute_overall_confidence
+from pdf_converter import pdf_to_base64_images
+from real_estate_processing import process_real_estate_document
 
 log = logging.getLogger(__name__)
 
 _TOKEN_FILE = Path(__file__).parent / ".docusign_tokens.json"
 
 # ---------------------------------------------------------------------------
-# Persistent OAuth token storage (single-user, file-backed)
+# Persistent OAuth token storage (single-user / dev mode only, file-backed)
+# DEV MODE ONLY — not safe for multi-user production. Disabled when AUTH_ENABLED=True
+# (allow_fallback=False). In production, tokens are scoped to UserProfile.docusign_tokens.
 # ---------------------------------------------------------------------------
 
 _oauth_tokens: dict[str, str] = {}
@@ -350,61 +350,23 @@ async def process_from_docusign(
 
     try:
         engine = get_engine()
-        mode = "real_estate"
-
-        # Extract (engine methods return (result, usage) tuples)
-        if engine.prefers_file_path:
-            raw_extraction, _extract_usage = engine.extract_from_file(tmp_path, mode)
-        else:
-            from pdf_converter import pdf_to_images, image_to_base64
-            images = pdf_to_images(tmp_path)
-            images_b64 = [image_to_base64(img) for img in images]
-            raw_extraction, _extract_usage = engine.extract(images_b64, mode)
-
-        # Validate
-        validated = DotloopLoopDetails.model_validate(raw_extraction)
-        validated_data = validated.model_dump(mode="json")
-        recovery_targets = get_missing_offer_field_targets(validated_data)
-        if recovery_targets:
-            if engine.prefers_file_path:
-                recovered_values, _recovery_usage = engine.recover_missing_fields_from_file(tmp_path, validated_data, recovery_targets)
-            else:
-                recovered_values, _recovery_usage = engine.recover_missing_fields(images_b64, validated_data, recovery_targets)  # type: ignore[possibly-undefined]
-            validated_data, _ = merge_recovered_offer_fields(validated_data, recovered_values)
-
-        # Verify citations
-        required_field_targets = get_offer_field_targets(validated_data)
-        if engine.prefers_file_path:
-            citations, _verify_usage = engine.verify_from_file(tmp_path, validated_data, required_field_targets)
-        else:
-            citations, _verify_usage = engine.verify(images_b64, validated_data, required_field_targets)  # type: ignore[possibly-undefined]
-
-        overall_confidence = compute_overall_confidence(citations)
-
-        # Build result
         from pdf_converter import get_pdf_info
         file_info = get_pdf_info(tmp_path)
-
-        api_model = DotloopLoopDetails.model_validate(validated_data)
-        dotloop_api_payload = api_model.to_dotloop_api_format()
-        docusign_api_payload = api_model.to_docusign_api_format()
-
-        result = ExtractionResult(
-            mode=mode,
-            source_file=f"docusign:{envelope_id}",
-            extraction_timestamp=datetime.now(timezone.utc).isoformat(),
-            pages_processed=file_info["pages"],
-            dotloop_data=validated_data,
-            dotloop_api_payload=dotloop_api_payload,
-            docusign_api_payload=docusign_api_payload,
-            citations=citations,
-            overall_confidence=overall_confidence,
+        images_b64 = None if engine.prefers_file_path else pdf_to_base64_images(tmp_path)
+        outcome = process_real_estate_document(
+            engine=engine,
+            pdf_path=tmp_path,
+            filename=f"docusign:{envelope_id}",
+            images_b64=images_b64,
         )
+        result = outcome.result
+        result.source_file = f"docusign:{envelope_id}"
+        result.pages_processed = file_info["pages"]
 
         # Save to DB
         doc_id = await save_document(
             filename=f"{envelope_subject}.pdf",
-            mode=mode,
+            mode="real_estate",
             page_count=file_info["pages"],
             file_size_bytes=len(pdf_bytes),
             source="docusign",

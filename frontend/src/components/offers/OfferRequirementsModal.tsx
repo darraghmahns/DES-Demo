@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { Modal, Stack, Group, Text, Badge, Button, Divider, ThemeIcon } from '@mantine/core';
 import type { OfferData } from '../../api';
 import type { TransactionDocRecord } from '../../api/transactions';
+import type { OfferWorkspaceDocument, OfferWorkspaceSummary } from '../../types/transaction';
 import { uploadOfferDocument } from '../../api/transactions';
 import { ROLE_LABELS } from '../../types/transaction';
 import { evaluateOfferRequirements } from '../../types/offerRequirements';
@@ -15,6 +16,10 @@ interface OfferRequirementsModalProps {
   txnId: string;
   txnDocs: TransactionDocRecord[];
   onDocsRefresh: () => void;
+  onExtractAndAttach: (file: File, offerExtractionId: string, docType: string) => Promise<void>;
+  attachedExtractions: Array<OfferWorkspaceSummary & { attached_at?: string | null }>;
+  supportingDocuments: OfferWorkspaceDocument[];
+  onDetachAttachedExtraction: (documentRecordId: string) => Promise<void>;
 }
 
 function formatPrice(amount: number | string | null | undefined): string {
@@ -30,9 +35,14 @@ export function OfferRequirementsModal({
   txnId,
   txnDocs,
   onDocsRefresh,
+  onExtractAndAttach,
+  attachedExtractions,
+  supportingDocuments,
+  onDetachAttachedExtraction,
 }: OfferRequirementsModalProps) {
   const [uploading, setUploading] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [detaching, setDetaching] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingDocType = useRef<string | null>(null);
 
@@ -60,12 +70,27 @@ export function OfferRequirementsModal({
     setUploading(docType);
     setUploadError(null);
     try {
-      await uploadOfferDocument(txnId, file, docType, offer.extraction_id);
-      onDocsRefresh();
+      const rule = requirements.find((item) => item.rule.doc_type === docType)?.rule;
+      if (rule?.upload_mode === 'extract_and_merge') {
+        await onExtractAndAttach(file, offer.extraction_id, docType);
+      } else {
+        await uploadOfferDocument(txnId, file, docType, offer.extraction_id);
+        onDocsRefresh();
+      }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
       setUploading(null);
+    }
+  };
+
+  const handleDetach = async (documentRecordId: string) => {
+    setDetaching(documentRecordId);
+    try {
+      await onDetachAttachedExtraction(documentRecordId);
+      onDocsRefresh();
+    } finally {
+      setDetaching(null);
     }
   };
 
@@ -186,6 +211,53 @@ export function OfferRequirementsModal({
             <Text size="xs" c="red" mt="sm">{uploadError}</Text>
           )}
         </div>
+
+        {(attachedExtractions.length > 0 || supportingDocuments.length > 0) && <Divider />}
+
+        {attachedExtractions.length > 0 && (
+          <div>
+            <Text fw={600} mb={4}>Attached Extracted Docs</Text>
+            <Stack gap="xs">
+              {attachedExtractions.map((doc) => (
+                <Group key={doc.id} justify="space-between" wrap="nowrap">
+                  <Stack gap={0}>
+                    <Text size="sm" fw={500}>{doc.document_title || doc.filename}</Text>
+                    <Text size="xs" c="dimmed">
+                      {doc.document_type?.replace(/_/g, ' ') || doc.mode}
+                      {doc.document_revision ? ` • ${doc.document_revision}` : ''}
+                    </Text>
+                  </Stack>
+                  <Button
+                    size="xs"
+                    variant="subtle"
+                    color="red"
+                    loading={detaching === doc.id}
+                    onClick={() => handleDetach(doc.id)}
+                  >
+                    Detach
+                  </Button>
+                </Group>
+              ))}
+            </Stack>
+          </div>
+        )}
+
+        {supportingDocuments.length > 0 && (
+          <div>
+            <Text fw={600} mb={4}>Supporting Attachments</Text>
+            <Stack gap="xs">
+              {supportingDocuments.map((doc) => (
+                <Group key={doc._id} justify="space-between" wrap="nowrap">
+                  <Stack gap={0}>
+                    <Text size="sm" fw={500}>{doc.filename}</Text>
+                    <Text size="xs" c="dimmed">{doc.doc_type.replace(/_/g, ' ')}</Text>
+                  </Stack>
+                  <Badge variant="light" color="green" size="sm">Attached</Badge>
+                </Group>
+              ))}
+            </Stack>
+          </div>
+        )}
       </Stack>
     </Modal>
   );

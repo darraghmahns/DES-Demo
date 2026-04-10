@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from auth import get_current_user
+from route_helpers import _get_user_or_dev
 from db import UserDocument, UserProfile
 from schemas import UserDocumentType, FINANCIAL_EXTRACTION_SCHEMAS
 
@@ -42,25 +43,6 @@ _extraction_tasks: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-async def _get_user_or_dev(user) -> UserProfile:
-    if user is not None:
-        return user
-
-    from auth import AUTH_ENABLED
-    if not AUTH_ENABLED:
-        dev_user = await UserProfile.find_one(UserProfile.email == "dev@deslabs.local")
-        if not dev_user:
-            dev_user = UserProfile(
-                email="dev@deslabs.local",
-                name="Dev User",
-                has_clerk_account=False,
-            )
-            await dev_user.insert()
-        return dev_user
-
-    raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def _serialize_doc(doc: UserDocument) -> dict:

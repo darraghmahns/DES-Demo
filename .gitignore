@@ -43,8 +43,8 @@ dist/*.json
 # User-uploaded profile documents (generated at runtime)
 backend/profile_uploads/
 
-# Generated test PDFs (recreated via generate_test_docs.py)
-backend/test_docs/financial/
+# Generated test docs / PDFs
+test_docs/
 
 # Playwright E2E test artifacts
 frontend/e2e/screenshots/

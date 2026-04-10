@@ -237,6 +237,22 @@ class TestFindOrCreateUser:
             _patch_beanie_user["insert"].assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_creates_user_from_clerk_backend_api_when_claim_email_missing(self, _patch_beanie_user):
+        """If the JWT omits email, fall back to the Clerk backend API before using a placeholder."""
+        from auth import _find_or_create_user
+
+        claims = {"sub": "user_backend_lookup", "name": "Lookup User"}
+
+        with (
+            patch.object(UserProfile, "find_one", new_callable=AsyncMock, return_value=None),
+            patch("auth._fetch_clerk_email_from_backend_api", new=AsyncMock(return_value="lookup@example.com")),
+        ):
+            user = await _find_or_create_user("user_backend_lookup", claims)
+
+            assert user.email == "lookup@example.com"
+            _patch_beanie_user["insert"].assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_existing_placeholder_email_is_replaced_when_claim_email_appears(self, _patch_beanie_user):
         """A placeholder email should be upgraded once Clerk exposes the real email."""
         from auth import _find_or_create_user
@@ -253,4 +269,26 @@ class TestFindOrCreateUser:
             user = await _find_or_create_user("user_fixup", claims)
 
             assert user.email == "taylor@example.com"
+            _patch_beanie_user["save"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_existing_placeholder_email_is_replaced_from_clerk_backend_api(self, _patch_beanie_user):
+        """Placeholder emails should self-heal even when Clerk omits email from the JWT."""
+        from auth import _find_or_create_user
+
+        existing = UserProfile(
+            clerk_user_id="user_fixup_api",
+            email="user_fixup_api@users.clerk.local",
+            name="Taylor",
+            has_clerk_account=True,
+        )
+        claims = {"sub": "user_fixup_api"}
+
+        with (
+            patch.object(UserProfile, "find_one", new_callable=AsyncMock, return_value=existing),
+            patch("auth._fetch_clerk_email_from_backend_api", new=AsyncMock(return_value="taylor.api@example.com")),
+        ):
+            user = await _find_or_create_user("user_fixup_api", claims)
+
+            assert user.email == "taylor.api@example.com"
             _patch_beanie_user["save"].assert_awaited_once()

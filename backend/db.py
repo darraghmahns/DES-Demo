@@ -90,6 +90,20 @@ class ExtractionRecord(BaseModel):
     # User-edited field overrides — take precedence over extracted_data in the comparison view
     field_overrides: dict = Field(default_factory=dict)
 
+    # Classification and normalized projections
+    document_type: Optional[str] = None
+    document_form_id: Optional[str] = None
+    document_title: Optional[str] = None
+    document_subtitle: Optional[str] = None
+    document_revision: Optional[str] = None
+    document_publisher: Optional[str] = None
+    document_footer_text: Optional[str] = None
+    classification_source: Optional[str] = None
+    classification_confidence: Optional[float] = None
+    classification_evidence: List[dict] = Field(default_factory=list)
+    support_level: Optional[str] = None
+    normalized_offer_projection: Optional[dict] = None
+
     # Embedded children
     citations: List[VerificationCitation] = Field(default_factory=list)
     pii_report: Optional[PIIReport] = None
@@ -341,6 +355,13 @@ class TransactionUploadJob(Document):
     extraction_id: Optional[str] = None
     error_message: Optional[str] = None
     auto_link: bool = True
+    offer_extraction_id: Optional[str] = None
+    requested_doc_type: Optional[str] = None
+    attachment_state: str = "none"  # none | required | attached
+    attachment_candidates: List[str] = Field(default_factory=list)
+    document_type: Optional[str] = None
+    document_title: Optional[str] = None
+    support_level: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
@@ -409,6 +430,8 @@ class TransactionDocument(Document):
 
     # If set, this document is scoped to a specific offer (extraction_id)
     offer_extraction_id: Optional[str] = None
+    attachment_role: Optional[str] = None  # supporting | extracted_offer_doc
+    attached_at: Optional[datetime] = None
 
     # Metadata
     uploaded_by: str  # UserProfile ID

@@ -35,16 +35,20 @@ from ocr_engine import OCREngine
 from schemas import (
     DotloopLoopDetails,
     FOIARequest,
+    RealEstateDocumentSummary,
     VerificationCitation,
 )
 from extractor import (
+    REAL_ESTATE_CLASSIFICATION_PROMPT,
     REAL_ESTATE_SYSTEM_PROMPT,
     GOV_SYSTEM_PROMPT,
     OCR_SYSTEM_PROMPT,
     EMPTY_USAGE,
     MISSING_FIELD_RECOVERY_SYSTEM_PROMPT,
+    REAL_ESTATE_SUMMARY_PROMPT,
 )
 from offer_fields import ensure_required_citations, stringify_field_value
+from real_estate_classifier import FORM_DEFINITIONS
 from verifier import VERIFICATION_SYSTEM_PROMPT
 
 log = logging.getLogger(__name__)
@@ -347,6 +351,52 @@ class LocalEngine(OCREngine):
         """Extract raw text per page directly from a PDF file using Docling."""
         return self._convert_pdf_per_page(file_path), dict(EMPTY_USAGE)
 
+    def classify_real_estate_metadata(self, metadata: dict[str, Any]) -> tuple[dict, dict]:
+        user_msg = (
+            "Classify this Montana real-estate document from metadata only. "
+            "Return only valid JSON.\n\n"
+            f"{json.dumps(metadata, indent=2)}"
+        )
+        raw_json = self._chat(
+            system_prompt=REAL_ESTATE_CLASSIFICATION_PROMPT,
+            user_content=user_msg,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "document_form_id": {"type": "string", "enum": [definition.form_id for definition in FORM_DEFINITIONS] + ["UNKNOWN"]},
+                    "document_title": {"type": ["string", "null"]},
+                    "document_subtitle": {"type": ["string", "null"]},
+                    "document_revision": {"type": ["string", "null"]},
+                    "document_publisher": {"type": ["string", "null"]},
+                    "document_footer_text": {"type": ["string", "null"]},
+                    "classification_confidence": {"type": "number"},
+                },
+                "required": ["document_form_id", "classification_confidence"],
+            },
+        )
+        return json.loads(raw_json), dict(EMPTY_USAGE)
+
+    def summarize_real_estate_document_from_file(
+        self,
+        file_path: str,
+        classification: dict[str, Any],
+    ) -> tuple[dict, dict]:
+        markdown = self._convert_pdf(file_path)
+        user_msg = (
+            _EXTRACT_PREAMBLE
+            + f"Classification metadata:\n{json.dumps(classification, indent=2)}\n\n"
+            + "--- DOCUMENT TEXT ---\n\n"
+            + markdown
+            + "\n\n--- END DOCUMENT ---\n\n"
+            + "Extract a generic structured summary for this real-estate form. Return only valid JSON."
+        )
+        raw_json = self._chat(
+            system_prompt=REAL_ESTATE_SUMMARY_PROMPT,
+            user_content=user_msg,
+            json_schema=RealEstateDocumentSummary.model_json_schema(),
+        )
+        return json.loads(raw_json), dict(EMPTY_USAGE)
+
     # -- Image-based methods (fallback, for server.py SSE path) --------------
 
     def extract(self, images_b64: list[str], mode: str) -> tuple[dict, dict]:
@@ -387,5 +437,16 @@ class LocalEngine(OCREngine):
         tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
         try:
             return self.ocr_raw_text_from_file(tmp_pdf)
+        finally:
+            os.unlink(tmp_pdf)
+
+    def summarize_real_estate_document(
+        self,
+        images_b64: list[str],
+        classification: dict[str, Any],
+    ) -> tuple[dict, dict]:
+        tmp_pdf = self._b64_images_to_temp_pdf(images_b64)
+        try:
+            return self.summarize_real_estate_document_from_file(tmp_pdf, classification)
         finally:
             os.unlink(tmp_pdf)

@@ -1,7 +1,7 @@
 """Pydantic models for document extraction — Dotloop, FOIA, PII, Verification, and User Management schemas."""
 
 from pydantic import BaseModel, Field, computed_field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 from enum import Enum
 
@@ -74,6 +74,8 @@ class RequirementSource(str, Enum):
 # Dotloop-Compatible Models (Real Estate)
 # =============================================================================
 
+FeeResponsibility = Literal["Seller", "Buyer", "Equally Shared"]
+
 class DotloopPropertyAddress(BaseModel):
     """Maps to Dotloop Loop Details -> 'Property Address' section."""
     street_number: str = Field(description="Street number (e.g., '2100')")
@@ -98,8 +100,14 @@ class DotloopFinancials(BaseModel):
     financing_type: Optional[str] = Field(default=None, description="Financing type (e.g. 'conventional', 'FHA', 'VA', 'cash')")
     down_payment_amount: Optional[float] = Field(default=None, description="Down payment amount in USD")
     down_payment_percentage: Optional[str] = Field(default=None, description="Down payment as percentage of purchase price (e.g. '5%')")
-    closing_fee_paid_by: Optional[str] = Field(default=None, description="Who pays the title/closing company fee (Seller, Buyer, or Equally Shared)")
-    fincen_fee_paid_by: Optional[str] = Field(default=None, description="Who pays the FinCEN reports fee (Seller, Buyer, or Equally Shared)")
+    closing_fee_paid_by: Optional[FeeResponsibility] = Field(
+        default=None,
+        description="Who pays the title/closing company fee. Allowed values: Seller, Buyer, or Equally Shared",
+    )
+    fincen_fee_paid_by: Optional[FeeResponsibility] = Field(
+        default=None,
+        description="Who pays the FinCEN reports fee. Allowed values: Seller, Buyer, or Equally Shared",
+    )
 
 
 class DotloopParticipant(BaseModel):
@@ -118,6 +126,8 @@ class DotloopContractDates(BaseModel):
     offer_date: Optional[str] = Field(default=None, description="Date offer was made")
     offer_expiration_date: Optional[str] = Field(default=None, description="Offer expiration date")
     inspection_date: Optional[str] = Field(default=None, description="Inspection deadline")
+    inspection_release_date: Optional[str] = Field(default=None, description="Date by which buyer must release or satisfy an inspection-related contingency")
+    inspection_release_time: Optional[str] = Field(default=None, description="Time and timezone text for the inspection release deadline")
     inspection_negotiation_deadline: Optional[str] = Field(default=None, description="Deadline to complete inspection negotiations")
     insurance_contingency_date: Optional[str] = Field(default=None, description="Insurance contingency deadline date")
     loan_application_deadline: Optional[str] = Field(default=None, description="Date by which buyer must submit loan application")
@@ -140,12 +150,14 @@ class DotloopTerms(BaseModel):
     detection_devices: Optional[str] = Field(default=None, description="Checked detection devices (smoke detector, CO detector, etc., comma-separated)")
     opd_delivered: Optional[bool] = Field(default=None, description="True if Owner's Property Disclosure has already been delivered to buyer")
     inspection_contingency: Optional[bool] = Field(default=None, description="True if offer contains an inspection contingency")
+    inspection_release_clause_text: Optional[str] = Field(default=None, description="Verbatim contingency language tied to an inspection-related release date")
     financing_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on buyer obtaining financing")
     appraisal_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on property appraising at purchase price")
     appraisal_contingency_amount: Optional[float] = Field(default=None, description="Minimum appraisal value required for the contingency (defaults to purchase price if not specified)")
     title_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on satisfactory title review")
     insurance_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on buyer obtaining homeowner's insurance")
     sale_of_home_contingency: Optional[bool] = Field(default=None, description="True if offer is contingent on buyer selling their current home")
+    buyer_physically_visited_property: Optional[bool] = Field(default=None, description="True if the buyer checked that they physically visited the property; false if they checked that they did not")
     additional_provisions: Optional[str] = Field(default=None, description="Verbatim text of additional provisions or addendum titles")
     notes: Optional[str] = Field(default=None, description="Other noteworthy terms not captured in other fields")
 
@@ -554,6 +566,17 @@ class ExtractionResult(BaseModel):
         default=None,
         description="Classified document type (PURCHASE_OFFER, COUNTEROFFER, etc.)",
     )
+    document_form_id: Optional[str] = None
+    document_title: Optional[str] = None
+    document_subtitle: Optional[str] = None
+    document_revision: Optional[str] = None
+    document_publisher: Optional[str] = None
+    document_footer_text: Optional[str] = None
+    classification_source: Optional[str] = None
+    classification_confidence: Optional[float] = None
+    classification_evidence: List[dict] = Field(default_factory=list)
+    support_level: Optional[str] = None
+    normalized_offer_projection: Optional[dict] = None
 
     # API usage tracking
     prompt_tokens: int = 0
@@ -575,8 +598,50 @@ class DocumentType(str, Enum):
     INSPECTION_RESPONSE = "INSPECTION_RESPONSE"
     ADDENDUM = "ADDENDUM"
     AMENDMENT = "AMENDMENT"
+    DISCLOSURE = "DISCLOSURE"
+    BROKERAGE_FORM = "BROKERAGE_FORM"
+    COMPENSATION_AGREEMENT = "COMPENSATION_AGREEMENT"
+    AGENCY_FORM = "AGENCY_FORM"
+    OPTION_FORM = "OPTION_FORM"
+    NOTICE_FORM = "NOTICE_FORM"
     LISTING_AGREEMENT = "LISTING_AGREEMENT"
     UNKNOWN = "UNKNOWN"
+
+
+class ClassificationSource(str, Enum):
+    """How the real-estate document was classified."""
+    FOOTER_EXACT = "footer_exact"
+    HEADER_EXACT = "header_exact"
+    FILENAME_ALIAS = "filename_alias"
+    MODEL_FALLBACK = "model_fallback"
+    UNKNOWN = "unknown"
+
+
+class DocumentSupportLevel(str, Enum):
+    """How much structured support exists for a classified form."""
+    FULL = "full"
+    PARTIAL = "partial"
+    METADATA_ONLY = "metadata_only"
+
+
+class ClassificationEvidence(BaseModel):
+    """Single piece of evidence used to classify a document."""
+    kind: str
+    text: str
+    page_number: Optional[int] = None
+
+
+class RealEstateDocumentSummary(BaseModel):
+    """Generic structured summary for non-offer real-estate forms."""
+    document_title: Optional[str] = None
+    summary: Optional[str] = None
+    property_address: Optional[str] = None
+    referenced_agreement: Optional[str] = None
+    mentioned_parties: List[str] = Field(default_factory=list)
+    mentioned_dates: List[str] = Field(default_factory=list)
+    mentioned_amounts: List[str] = Field(default_factory=list)
+    requested_actions: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
 
 
 # =============================================================================

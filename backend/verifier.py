@@ -39,8 +39,12 @@ You MUST return a JSON object with this structure:
 Rules:
 - Include a citation for EVERY non-null field in the extraction.
 - For any required comparison fields provided separately, include a citation even when the value is null or false.
+- For required comparison fields, copy the exact field_name string provided in the comparison field list. Do not shorten,
+  rename, or drop the namespace. Example: use "financials.purchase_price", not "purchase_price".
 - For a required field that is not found, set surrounding_text to "NOT FOUND", confidence to 0.0, and extracted_value to the current field value string (for example "null" or "false").
 - If you cannot find a value in the document, set confidence to 0.0 and note "NOT FOUND" in surrounding_text.
+- For checkbox-backed fields, cite the exact line or clause that shows the checked option or checked statement.
+  If the checkbox state is not actually visible, return NOT FOUND rather than inferring from nearby text.
 - Be precise about page numbers — do not guess.
 - surrounding_text should be the actual text from the document, not paraphrased.
 """
@@ -86,7 +90,8 @@ def verify_extraction(
             for entry in required_field_targets
         )
         verification_instructions += (
-            "\n\nRequired comparison fields to explicitly verify even if null or false:\n"
+            "\n\nRequired comparison fields to explicitly verify even if null or false.\n"
+            "IMPORTANT: reuse each field_name exactly as written below, character for character:\n"
             f"{target_lines}"
         )
 

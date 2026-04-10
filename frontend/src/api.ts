@@ -71,6 +71,10 @@ export interface ExtractionResult {
   pii_report: PIIReport | null;
   compliance_report: ComplianceReport | null;
   extraction_id?: string;
+  attachment_state?: 'none' | 'required' | 'attached';
+  attachment_candidates?: string[];
+  document_type?: string | null;
+  document_title?: string | null;
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
@@ -547,6 +551,11 @@ export interface ExtractionSummary {
   overall_confidence: number;
   pages_processed: number;
   created_at: string | null;
+  document_type?: string | null;
+  document_form_id?: string | null;
+  document_title?: string | null;
+  document_revision?: string | null;
+  support_level?: string | null;
 }
 
 export async function fetchExtractions(mode?: string): Promise<ExtractionSummary[]> {
@@ -770,10 +779,13 @@ export interface OffersComparisonResult {
 
 export async function fetchOffersComparison(
   extractionIds: string[],
+  transactionId?: string,
 ): Promise<OffersComparisonResult> {
   const ids = extractionIds.join(',');
+  const params = new URLSearchParams({ extraction_ids: ids });
+  if (transactionId) params.set('transaction_id', transactionId);
   const resp = await fetch(
-    `${API_BASE}/api/offers/compare?extraction_ids=${encodeURIComponent(ids)}`,
+    `${API_BASE}/api/offers/compare?${params.toString()}`,
     { headers: { ...await authHeaders() } },
   );
   if (!resp.ok) throw new Error(`Failed to fetch comparison: ${resp.status}`);

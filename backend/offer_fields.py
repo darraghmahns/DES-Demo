@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from schemas import VerificationCitation
@@ -47,6 +48,8 @@ FIELD_REGISTRY = [
     # Contingency Deadlines
     {"path": "contract_dates.loan_application_deadline",       "key": "loan_application_deadline",       "label": "Loan Application Deadline",       "type": "date", "group": "Contingency Deadlines"},
     {"path": "contract_dates.inspection_date",                 "key": "inspection_date",                 "label": "Inspection Deadline",             "type": "date", "group": "Contingency Deadlines"},
+    {"path": "contract_dates.inspection_release_date",         "key": "inspection_release_date",         "label": "Inspection Release Date",         "type": "date", "group": "Contingency Deadlines"},
+    {"path": "contract_dates.inspection_release_time",         "key": "inspection_release_time",         "label": "Inspection Release Time",         "type": "string", "group": "Contingency Deadlines"},
     {"path": "contract_dates.inspection_negotiation_deadline", "key": "inspection_negotiation_deadline", "label": "Inspection Negotiation Deadline", "type": "date", "group": "Contingency Deadlines"},
     {"path": "contract_dates.insurance_contingency_date",      "key": "insurance_contingency_date",      "label": "Insurance Contingency Deadline",  "type": "date", "group": "Contingency Deadlines"},
     {"path": "contract_dates.title_contingency_date",          "key": "title_contingency_date",          "label": "Title Review Deadline",           "type": "date", "group": "Contingency Deadlines"},
@@ -54,6 +57,7 @@ FIELD_REGISTRY = [
     {"path": "terms.escalation_clause",         "key": "escalation_clause",         "label": "Escalation Clause",         "type": "boolean",  "group": "Contingencies"},
     {"path": "terms.opd_delivered",             "key": "opd_delivered",             "label": "OPD Contingency",           "type": "boolean",  "group": "Contingencies"},
     {"path": "terms.inspection_contingency",    "key": "inspection_contingency",    "label": "Inspection Contingency",    "type": "boolean",  "group": "Contingencies"},
+    {"path": "terms.inspection_release_clause_text","key": "inspection_release_clause_text","label": "Inspection Release Clause", "type": "text",     "group": "Contingencies"},
     {"path": "terms.financing_contingency",     "key": "financing_contingency",     "label": "Financing Contingency",     "type": "boolean",  "group": "Contingencies"},
     {"path": "terms.appraisal_contingency",     "key": "appraisal_contingency",     "label": "Appraisal Contingency",     "type": "boolean",  "group": "Contingencies"},
     {"path": "terms.appraisal_contingency_amount","key": "appraisal_contingency_amount","label": "Appraisal Amount",      "type": "currency", "group": "Contingencies"},
@@ -64,6 +68,7 @@ FIELD_REGISTRY = [
     {"path": "terms.hoa_approval_contingency",  "key": "hoa_approval_contingency",  "label": "HOA Contingency",           "type": "boolean",  "group": "Contingencies"},
     {"path": "terms.survey_contingency",        "key": "survey_contingency",        "label": "Survey Contingency",        "type": "boolean",  "group": "Contingencies"},
     {"path": "terms.as_is",                     "key": "as_is",                     "label": "As-Is",                     "type": "boolean",  "group": "Contingencies"},
+    {"path": "terms.buyer_physically_visited_property","key": "buyer_physically_visited_property","label": "Buyer Physically Visited Property", "type": "boolean", "group": "Contingencies"},
     # Personal Property
     {"path": "terms.inclusions",                "key": "inclusions",                "label": "Personal Property Included",        "type": "text", "group": "Personal Property"},
     {"path": "terms.exclusions",                "key": "exclusions",                "label": "Excluded Fixtures",                 "type": "text", "group": "Personal Property"},
@@ -79,6 +84,40 @@ FIELD_PATH_TO_ENTRY = {entry["path"]: entry for entry in FIELD_REGISTRY}
 FIELD_KEY_TO_ENTRY = {entry["key"]: entry for entry in FIELD_REGISTRY}
 FIELD_PATH_TO_KEY = {entry["path"]: entry["key"] for entry in FIELD_REGISTRY}
 FIELD_KEY_TO_PATH = {entry["key"]: entry["path"] for entry in FIELD_REGISTRY}
+
+_FEE_PAYER_PATHS = {
+    "financials.closing_fee_paid_by",
+    "financials.fincen_fee_paid_by",
+}
+_FEE_PAYER_NORMALIZATION = {
+    "seller": "Seller",
+    "buyer": "Buyer",
+    "equally shared": "Equally Shared",
+    "equally-shared": "Equally Shared",
+    "shared equally": "Equally Shared",
+    "split equally": "Equally Shared",
+    "split": "Equally Shared",
+}
+
+
+def _normalize_citation_alias(value: str) -> str:
+    normalized = value.strip().lower().replace("&", " and ")
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized)
+    return re.sub(r"_+", "_", normalized).strip("_")
+
+
+def _build_citation_field_aliases() -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for entry in FIELD_REGISTRY:
+        path = entry["path"]
+        for alias in {path, entry["key"], entry["label"], path.replace(".", "_")}:
+            normalized = _normalize_citation_alias(alias)
+            if normalized:
+                aliases[normalized] = path
+    return aliases
+
+
+FIELD_NAME_ALIASES = _build_citation_field_aliases()
 
 
 def flatten_extracted(extracted_data: dict) -> dict:
@@ -105,6 +144,17 @@ def build_offer_fields(extracted_data: dict) -> tuple[dict, dict]:
     fields = {entry["key"]: flat.get(entry["path"]) for entry in FIELD_REGISTRY}
     raw_extras = {key: value for key, value in flat.items() if key not in registered_paths and value is not None}
     return fields, raw_extras
+
+
+def canonicalize_citation_field_name(field_name: str | None) -> str | None:
+    if field_name is None:
+        return None
+    raw = str(field_name).strip()
+    if not raw:
+        return None
+    if raw in FIELD_PATH_TO_KEY:
+        return raw
+    return FIELD_NAME_ALIASES.get(_normalize_citation_alias(raw), raw)
 
 
 def _field_missing(entry: dict, value: Any) -> bool:
@@ -139,6 +189,22 @@ def _coerce_offer_field_value(entry: dict, value: Any) -> Any:
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
+            if entry["path"] == "terms.buyer_physically_visited_property":
+                if normalized in {
+                    "has physically visited the property",
+                    "physically visited",
+                    "visited",
+                    "yes, visited",
+                }:
+                    return True
+                if normalized in {
+                    "has not physically visited the property",
+                    "has not physically visited",
+                    "not physically visited",
+                    "did not visit",
+                    "no, not visited",
+                }:
+                    return False
             if normalized in {"true", "yes", "y", "checked", "included"}:
                 return True
             if normalized in {"false", "no", "n", "unchecked", "waived", "not delivered"}:
@@ -160,6 +226,9 @@ def _coerce_offer_field_value(entry: dict, value: Any) -> Any:
 
     if isinstance(value, str):
         stripped = value.strip()
+        if entry["path"] in _FEE_PAYER_PATHS:
+            normalized = _FEE_PAYER_NORMALIZATION.get(stripped.lower())
+            return normalized or (stripped or None)
         return stripped or None
 
     return str(value)
@@ -238,7 +307,8 @@ def ensure_required_citations(
     required_paths = {entry["path"]: entry for entry in required_targets}
     by_field: dict[str, list[VerificationCitation]] = {}
     for citation in citations:
-        by_field.setdefault(citation.field_name, []).append(citation)
+        canonical = canonicalize_citation_field_name(citation.field_name) or citation.field_name
+        by_field.setdefault(canonical, []).append(citation)
 
     merged = list(citations)
     for path, entry in required_paths.items():
@@ -272,13 +342,18 @@ def build_offer_field_citations(
 
     for raw in citations or []:
         citation = raw.model_dump(mode="json") if isinstance(raw, VerificationCitation) else dict(raw)
-        key = FIELD_PATH_TO_KEY.get(citation.get("field_name"))
+        canonical_field_name = canonicalize_citation_field_name(citation.get("field_name"))
+        if canonical_field_name:
+            citation["field_name"] = canonical_field_name
+        key = FIELD_PATH_TO_KEY.get(canonical_field_name)
         if not key:
             continue
         grouped.setdefault(key, []).append(citation)
 
-    for citation_list in grouped.values():
+    for key, citation_list in grouped.items():
         citation_list.sort(key=lambda item: float(item.get("confidence", 0) or 0), reverse=True)
+        if any(not _citation_is_not_found(item) for item in citation_list):
+            grouped[key] = [item for item in citation_list if not _citation_is_not_found(item)]
 
     overridden_fields = sorted(key for key in overrides.keys() if key in FIELD_KEY_TO_ENTRY)
     meta: dict[str, dict[str, Any]] = {}

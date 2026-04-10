@@ -7,7 +7,13 @@ from typing import Any
 from openai import OpenAI
 
 from ocr_engine import OCREngine
-from extractor import extract_from_images, extract_raw_text, recover_missing_fields_from_images
+from extractor import (
+    classify_real_estate_metadata,
+    extract_from_images,
+    extract_raw_text,
+    extract_real_estate_summary_from_images,
+    recover_missing_fields_from_images,
+)
 from verifier import verify_extraction
 from schemas import VerificationCitation
 
@@ -47,3 +53,13 @@ class OpenAIEngine(OCREngine):
 
     def ocr_raw_text(self, images_b64: list[str]) -> tuple[list[str], dict]:
         return extract_raw_text(images_b64, self._client)
+
+    def classify_real_estate_metadata(self, metadata: dict[str, Any]) -> tuple[dict, dict]:
+        return classify_real_estate_metadata(metadata, self._client)
+
+    def summarize_real_estate_document(
+        self,
+        images_b64: list[str],
+        classification: dict[str, Any],
+    ) -> tuple[dict, dict]:
+        return extract_real_estate_summary_from_images(images_b64, classification, self._client)

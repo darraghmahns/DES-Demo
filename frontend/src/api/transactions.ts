@@ -2,10 +2,11 @@
 
 import { API_BASE, _getAuthToken, apiFetch } from './client';
 import type {
-  AgentRole,
-  ParticipantRole,
-  Transaction,
-  TransactionInvitation,
+    AgentRole,
+    OfferWorkspace,
+    ParticipantRole,
+    Transaction,
+    TransactionInvitation,
   TransactionStatus,
   TransactionUploadJob,
 } from '../types/transaction';
@@ -117,6 +118,9 @@ export interface TransactionDocRecord {
   uploaded_by: string;
   uploaded_at: string;
   offer_extraction_id?: string | null;
+  document_record_id?: string | null;
+  attachment_role?: string | null;
+  attached_at?: string | null;
 }
 
 export async function listTransactionDocuments(txnId: string): Promise<TransactionDocRecord[]> {
@@ -158,13 +162,44 @@ export async function uploadOfferDocument(
 export async function uploadAndExtractTransactionDocument(
   txnId: string,
   file: File,
+  offerExtractionId?: string,
+  docType?: string,
 ): Promise<TransactionUploadJob> {
   const form = new FormData();
   form.append('file', file);
+  if (offerExtractionId) form.append('offer_extraction_id', offerExtractionId);
+  if (docType) form.append('doc_type', docType);
   return apiFetch<TransactionUploadJob>(
     `/api/transactions/${txnId}/documents/upload-and-extract`,
     { method: 'POST', body: form },
   );
+}
+
+export async function fetchOfferWorkspace(txnId: string): Promise<OfferWorkspace> {
+  return apiFetch<OfferWorkspace>(`/api/transactions/${txnId}/offer-workspace`);
+}
+
+export async function attachExtractionToOffer(
+  txnId: string,
+  documentRecordId: string,
+  offerExtractionId: string,
+): Promise<{ attached: boolean }> {
+  return apiFetch(`/api/transactions/${txnId}/offer-attachments`, {
+    method: 'POST',
+    body: JSON.stringify({
+      document_record_id: documentRecordId,
+      offer_extraction_id: offerExtractionId,
+    }),
+  });
+}
+
+export async function detachExtractionFromOffer(
+  txnId: string,
+  documentRecordId: string,
+): Promise<{ detached: boolean }> {
+  return apiFetch(`/api/transactions/${txnId}/offer-attachments/${documentRecordId}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function listTransactionUploadJobs(txnId: string): Promise<TransactionUploadJob[]> {
@@ -502,8 +537,32 @@ export async function unlinkExtractionFromTransaction(
 
 export async function fetchTransactionExtractions(
   txnId: string,
-): Promise<Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>> {
-  const data = await apiFetch<{ extractions: Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }> }>(`/api/transactions/${txnId}/extractions`);
+): Promise<Array<{
+  id: string;
+  filename: string;
+  mode: string;
+  overall_confidence: number;
+  pages_processed: number;
+  created_at: string | null;
+  document_type?: string | null;
+  document_form_id?: string | null;
+  document_title?: string | null;
+  document_revision?: string | null;
+  support_level?: string | null;
+}>> {
+  const data = await apiFetch<{ extractions: Array<{
+    id: string;
+    filename: string;
+    mode: string;
+    overall_confidence: number;
+    pages_processed: number;
+    created_at: string | null;
+    document_type?: string | null;
+    document_form_id?: string | null;
+    document_title?: string | null;
+    document_revision?: string | null;
+    support_level?: string | null;
+  }> }>(`/api/transactions/${txnId}/extractions`);
   return data.extractions;
 }
 

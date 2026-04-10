@@ -166,3 +166,183 @@ class TestInvitationRoutes:
             assert invitation.token_hash is None
         finally:
             app.dependency_overrides.clear()
+
+    # ------------------------------------------------------------------
+    # Issue 12: Tests for previously untested invitation endpoints
+    # ------------------------------------------------------------------
+
+    async def test_accept_invitation_success(self):
+        """POST /api/invitations/{token}/accept — valid token marks participant ACTIVE."""
+        from server import app
+        from invitation_routes import _hash_invitation_token, _sign_invitation_token
+
+        email = 'buyer@example.com'
+        raw_token = 'raw-accept-token'
+        invitation = DummyInvitation(
+            invitation_id='invite-accept-1',
+            email=email,
+            transaction_id='txn-1',
+            role=ParticipantRole.BUYER,
+        )
+        invitation.signed_token = _sign_invitation_token(raw_token, email, 'txn-1', 'invite-accept-1')
+        invitation.token_hash = _hash_invitation_token(raw_token)
+        invitee = DummyUser('user-2', email, 'Buyer Name')
+        txn = DummyTransaction()
+
+        with (
+            patch('invitation_routes.TransactionInvitation.get', AsyncMock(return_value=invitation)),
+            patch('invitation_routes.UserProfile.get', AsyncMock(return_value=invitee)),
+            patch('invitation_routes.Transaction.get', AsyncMock(return_value=txn)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post(f'/api/invitations/{invitation.signed_token}/accept')
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['accepted'] is True
+        assert payload['user_id'] == 'user-2'
+        assert payload['transaction_id'] == 'txn-1'
+        assert invitation.status == InvitationStatus.ACCEPTED
+        assert txn.participants[0].status == ParticipantStatus.ACTIVE
+
+    async def test_accept_invitation_invalid_token(self):
+        """POST /api/invitations/{token}/accept — garbage token returns 400."""
+        from server import app
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.post('/api/invitations/not-a-real-token/accept')
+
+        assert response.status_code in (400, 401, 404)
+
+    async def test_upgrade_to_clerk_success(self):
+        """POST /api/invitations/{token}/upgrade — links Clerk ID to placeholder user."""
+        from server import app
+        from invitation_routes import _hash_invitation_token, _sign_invitation_token
+
+        email = 'placeholder@example.com'
+        raw_token = 'raw-upgrade-token'
+        invitation = DummyInvitation(
+            invitation_id='invite-upgrade-1',
+            email=email,
+            transaction_id='txn-1',
+            role=ParticipantRole.BUYER,
+        )
+        invitation.signed_token = _sign_invitation_token(raw_token, email, 'txn-1', 'invite-upgrade-1')
+        invitation.token_hash = _hash_invitation_token(raw_token)
+        invitee = DummyUser('user-placeholder', email, 'Placeholder User')
+        # Placeholder: no Clerk account yet
+        invitee.clerk_user_id = None
+
+        with (
+            patch('invitation_routes.TransactionInvitation.get', AsyncMock(return_value=invitation)),
+            patch('invitation_routes.UserProfile.get', AsyncMock(return_value=invitee)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post(
+                    f'/api/invitations/{invitation.signed_token}/upgrade',
+                    json={'clerk_user_id': 'user_abc123XYZ'},
+                )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['upgraded'] is True
+        assert invitee.clerk_user_id == 'user_abc123XYZ'
+        assert invitee.has_clerk_account is True
+
+    async def test_upgrade_to_clerk_invalid_id_format(self):
+        """POST /api/invitations/{token}/upgrade — malformed Clerk ID returns 400 (Issue 14 regression)."""
+        from server import app
+        from invitation_routes import _hash_invitation_token, _sign_invitation_token
+
+        email = 'placeholder2@example.com'
+        raw_token = 'raw-upgrade-token-2'
+        invitation = DummyInvitation(
+            invitation_id='invite-upgrade-2',
+            email=email,
+            transaction_id='txn-1',
+            role=ParticipantRole.BUYER,
+        )
+        invitation.signed_token = _sign_invitation_token(raw_token, email, 'txn-1', 'invite-upgrade-2')
+        invitation.token_hash = _hash_invitation_token(raw_token)
+        invitee = DummyUser('user-placeholder-2', email, 'Placeholder User 2')
+        invitee.clerk_user_id = None
+
+        with (
+            patch('invitation_routes.TransactionInvitation.get', AsyncMock(return_value=invitation)),
+            patch('invitation_routes.UserProfile.get', AsyncMock(return_value=invitee)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post(
+                    f'/api/invitations/{invitation.signed_token}/upgrade',
+                    json={'clerk_user_id': 'notaclerkid'},
+                )
+
+        assert response.status_code == 400
+        assert 'Invalid Clerk user ID format' in response.json()['detail']
+
+    async def test_upgrade_to_clerk_already_linked(self):
+        """POST /api/invitations/{token}/upgrade — already-linked user returns 409."""
+        from server import app
+        from invitation_routes import _hash_invitation_token, _sign_invitation_token
+
+        email = 'linked@example.com'
+        raw_token = 'raw-upgrade-token-3'
+        invitation = DummyInvitation(
+            invitation_id='invite-upgrade-3',
+            email=email,
+            transaction_id='txn-1',
+            role=ParticipantRole.BUYER,
+        )
+        invitation.signed_token = _sign_invitation_token(raw_token, email, 'txn-1', 'invite-upgrade-3')
+        invitation.token_hash = _hash_invitation_token(raw_token)
+        invitee = DummyUser('user-already-linked', email, 'Already Linked User')
+        invitee.clerk_user_id = 'user_existingClerkId'
+        invitee.has_clerk_account = True
+
+        with (
+            patch('invitation_routes.TransactionInvitation.get', AsyncMock(return_value=invitation)),
+            patch('invitation_routes.UserProfile.get', AsyncMock(return_value=invitee)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post(
+                    f'/api/invitations/{invitation.signed_token}/upgrade',
+                    json={'clerk_user_id': 'user_newClerkId'},
+                )
+
+        assert response.status_code == 409
+        assert 'already linked' in response.json()['detail'].lower()
+
+    async def test_submit_profile_via_magic_link(self):
+        """POST /api/invitations/{token}/profile — updates name and phone on placeholder user."""
+        from server import app
+        from invitation_routes import _hash_invitation_token, _sign_invitation_token
+
+        email = 'jane@example.com'
+        raw_token = 'raw-profile-token'
+        invitation = DummyInvitation(
+            invitation_id='invite-profile-1',
+            email=email,
+            transaction_id='txn-1',
+            role=ParticipantRole.BUYER,
+        )
+        invitation.signed_token = _sign_invitation_token(raw_token, email, 'txn-1', 'invite-profile-1')
+        invitation.token_hash = _hash_invitation_token(raw_token)
+        invitee = DummyUser('user-jane', email, '')
+        # Simulate placeholder: no user_types yet
+        invitee.user_types = []
+
+        with (
+            patch('invitation_routes.TransactionInvitation.get', AsyncMock(return_value=invitation)),
+            patch('invitation_routes.UserProfile.get', AsyncMock(return_value=invitee)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post(
+                    f'/api/invitations/{invitation.signed_token}/profile',
+                    json={'name': 'Jane Doe', 'phone': '555-1234'},
+                )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['updated'] is True
+        assert invitee.name == 'Jane Doe'
+        assert invitee.phone == '555-1234'

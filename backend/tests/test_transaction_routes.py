@@ -541,6 +541,59 @@ class TestTransactionRouteUpdates:
         finally:
             app.dependency_overrides.clear()
 
+    async def test_post_extraction_attachment_uses_requested_doc_type_for_attached_offer_docs(self):
+        from db import DocumentRecord, ExtractionRecord, TransactionUploadJob
+        from transaction_routes import _apply_post_extraction_attachment_state
+
+        txn = DummyTransaction(None)
+        upload_job = TransactionUploadJob.model_construct(
+            transaction_id="txn-123",
+            uploaded_by="user-1",
+            original_filename="Escalation Addendum.pdf",
+            stored_filename="stored_escalation.pdf",
+            file_path="/tmp/stored_escalation.pdf",
+            file_hash="hash-123",
+            task_id="task-123",
+            offer_extraction_id="root-doc:0",
+            requested_doc_type="escalation_addendum",
+        )
+
+        extraction = ExtractionRecord.model_construct(
+            mode="real_estate",
+            document_type="ADDENDUM",
+            document_title="Escalation Addendum",
+            support_level="partial",
+            overall_confidence=0.9,
+            pages_processed=1,
+            created_at=datetime.now(timezone.utc),
+        )
+        doc_record = DocumentRecord.model_construct(
+            id="child-doc",
+            filename="Escalation Addendum.pdf",
+            mode="real_estate",
+            page_count=1,
+            extractions=[extraction],
+            source="upload",
+            file_hash="hash-123",
+        )
+
+        with (
+            patch("transaction_routes.DocumentRecord.get", AsyncMock(return_value=doc_record)),
+            patch("transaction_routes.TransactionUploadJob.save", new=AsyncMock()),
+            patch("transaction_routes._ensure_transaction_document_link", AsyncMock()) as ensure_link_mock,
+        ):
+            await _apply_post_extraction_attachment_state(
+                txn,
+                upload_job=upload_job,
+                extraction_id="child-doc:0",
+            )
+
+        ensure_link_mock.assert_awaited_once()
+        assert ensure_link_mock.call_args.kwargs["doc_type"] == "escalation_addendum"
+        assert ensure_link_mock.call_args.kwargs["offer_extraction_id"] == "root-doc:0"
+        assert upload_job.attachment_state == "attached"
+        assert upload_job.document_type == "ADDENDUM"
+
     async def test_list_active_transaction_upload_jobs_only_returns_incomplete_jobs(self):
         from auth import get_current_user
         from db import TransactionUploadJob
@@ -574,6 +627,187 @@ class TestTransactionRouteUpdates:
             assert len(payload["jobs"]) == 1
             assert payload["jobs"][0]["id"] == "job-123"
             assert payload["jobs"][0]["transaction_name"] == txn.name
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_list_transaction_extractions_includes_classification_metadata(self):
+        from auth import get_current_user
+        from db import DocumentRecord, ExtractionRecord
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.extraction_ids = ["doc-123"]
+        extraction = ExtractionRecord.model_construct(
+            mode="real_estate",
+            overall_confidence=0.94,
+            pages_processed=3,
+            created_at=datetime.now(timezone.utc),
+            document_type="COUNTEROFFER",
+            document_form_id="MAR_COUNTER_OFFER",
+            document_title="Counter Offer",
+            document_revision="April 2022",
+            support_level="full",
+        )
+        doc_record = DocumentRecord.model_construct(
+            id="doc-123",
+            filename="counter_offer.pdf",
+            mode="real_estate",
+            page_count=3,
+            extractions=[extraction],
+        )
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_transaction_for_user", AsyncMock(return_value=txn)),
+            patch("transaction_routes.DocumentRecord.get", AsyncMock(return_value=doc_record)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/transactions/txn-123/extractions")
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["extractions"][0]["document_type"] == "COUNTEROFFER"
+            assert payload["extractions"][0]["document_form_id"] == "MAR_COUNTER_OFFER"
+            assert payload["extractions"][0]["document_title"] == "Counter Offer"
+            assert payload["extractions"][0]["document_revision"] == "April 2022"
+            assert payload["extractions"][0]["support_level"] == "full"
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_get_offer_workspace_groups_root_offers_and_loose_extractions(self):
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.extraction_ids = ["root-doc", "child-doc", "loose-doc"]
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_transaction_for_user", AsyncMock(return_value=txn)),
+            patch(
+                "transaction_routes.build_offer_workspace",
+                AsyncMock(
+                    return_value={
+                        "offers": [
+                            {
+                                "extraction_id": "root-doc:0",
+                                "document_id": "root-doc",
+                                "summary": {
+                                    "id": "root-doc",
+                                    "filename": "offer.pdf",
+                                    "mode": "real_estate",
+                                    "overall_confidence": 0.9,
+                                    "pages_processed": 2,
+                                    "created_at": None,
+                                    "document_type": "PURCHASE_OFFER",
+                                    "document_title": "Buy-Sell Agreement",
+                                    "document_revision": "April 2022",
+                                    "support_level": "full",
+                                },
+                                "fields": {},
+                                "raw_extras": {},
+                                "field_citations": {},
+                                "field_citation_meta": {},
+                                "overridden_fields": [],
+                                "attached_extractions": [
+                                    {
+                                        "id": "child-doc",
+                                        "filename": "counter.pdf",
+                                        "mode": "real_estate",
+                                        "overall_confidence": 0.8,
+                                        "pages_processed": 1,
+                                        "created_at": None,
+                                        "document_type": "COUNTEROFFER",
+                                        "document_title": "Counter Offer",
+                                        "document_revision": None,
+                                        "support_level": "partial",
+                                        "attached_at": None,
+                                    }
+                                ],
+                                "supporting_documents": [],
+                            }
+                        ],
+                        "loose_extractions": [
+                            {
+                                "id": "loose-doc",
+                                "filename": "inspection.pdf",
+                                "mode": "real_estate",
+                                "overall_confidence": 0.5,
+                                "pages_processed": 1,
+                                "created_at": None,
+                                "document_type": "INSPECTION_NOTICE",
+                                "document_title": "Inspection Notice",
+                                "document_revision": None,
+                                "support_level": "partial",
+                            }
+                        ],
+                        "loose_documents": [],
+                        "root_offer_ids": ["root-doc:0"],
+                        "attachment_candidates": [{"extraction_id": "root-doc:0", "label": "Buy-Sell Agreement"}],
+                    }
+                ),
+            ),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/transactions/txn-123/offer-workspace")
+
+        try:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["root_offer_ids"] == ["root-doc:0"]
+            assert payload["offers"][0]["summary"]["document_type"] == "PURCHASE_OFFER"
+            assert payload["offers"][0]["attached_extractions"][0]["document_type"] == "COUNTEROFFER"
+            assert payload["loose_extractions"][0]["id"] == "loose-doc"
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_attach_extracted_document_to_offer_creates_attachment_link(self):
+        from auth import get_current_user
+        from db import DocumentRecord, ExtractionRecord
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.extraction_ids = ["child-doc", "root-doc"]
+        extraction = ExtractionRecord.model_construct(
+            mode="real_estate",
+            document_type="COUNTEROFFER",
+            overall_confidence=0.8,
+            pages_processed=1,
+            created_at=datetime.now(timezone.utc),
+        )
+        doc_record = DocumentRecord.model_construct(
+            id="child-doc",
+            filename="counter.pdf",
+            mode="real_estate",
+            page_count=1,
+            extractions=[extraction],
+            source="upload",
+            file_hash="hash-123",
+        )
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with (
+            patch("transaction_routes._get_transaction_for_user", AsyncMock(return_value=txn)),
+            patch("transaction_routes.DocumentRecord.get", AsyncMock(return_value=doc_record)),
+            patch(
+                "transaction_routes.build_offer_workspace",
+                AsyncMock(return_value={"root_offer_ids": ["root-doc:0"]}),
+            ),
+            patch("transaction_routes._ensure_transaction_document_link", AsyncMock()) as ensure_link_mock,
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/api/transactions/txn-123/offer-attachments",
+                    json={"document_record_id": "child-doc", "offer_extraction_id": "root-doc:0"},
+                )
+
+        try:
+            assert response.status_code == 200
+            assert response.json() == {"attached": True}
+            ensure_link_mock.assert_awaited_once()
+            assert ensure_link_mock.call_args.kwargs["offer_extraction_id"] == "root-doc:0"
+            assert ensure_link_mock.call_args.kwargs["attachment_role"] == "extracted_offer_doc"
         finally:
             app.dependency_overrides.clear()
 
@@ -879,5 +1113,99 @@ class TestTransactionRouteUpdates:
             import_mock.assert_awaited_once()
             assert import_mock.await_args.kwargs["profile_id"] == 77
             assert response.json()["imported"] == 1
+        finally:
+            app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Issue 13: Transaction ownership enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestTransactionOwnershipEnforcement:
+    """Verify that transactions are isolated per user and ownership rules are enforced."""
+
+    async def test_list_transactions_user_isolation(self):
+        """GET /api/transactions — user_b does not see user_a's transaction."""
+        from auth import get_current_user
+        from server import app
+
+        txn_a = DummyTransaction(None)
+        txn_a.id = "txn-user-a"
+        txn_a.created_by = "user-a"
+        txn_a.participants = []
+
+        # The DB query returns user_a's transaction; the route then filters by creator/participant.
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-b")
+        with patch(
+            "transaction_routes.Transaction.find",
+            return_value=FakeCursor([txn_a]),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/transactions")
+
+        try:
+            assert response.status_code == 200
+            # user_b is neither creator nor participant — list must be empty
+            assert response.json() == []
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_delete_transaction_not_owner(self):
+        """DELETE /api/transactions/{id} — non-owner gets 403."""
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.created_by = "user-a"
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-b")
+        with patch("transaction_routes.Transaction.get", AsyncMock(return_value=txn)):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.delete("/api/transactions/txn-123")
+
+        try:
+            assert response.status_code == 403
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_delete_transaction_non_draft_blocked(self):
+        """DELETE /api/transactions/{id} — owner cannot delete an ACTIVE transaction."""
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.created_by = "user-1"
+        txn.status = TransactionStatus.ACTIVE
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-1")
+        with patch("transaction_routes.Transaction.get", AsyncMock(return_value=txn)):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.delete("/api/transactions/txn-123")
+
+        try:
+            assert response.status_code == 400
+            assert "draft" in response.json()["detail"].lower()
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_create_transaction_visible_only_to_creator(self):
+        """GET /api/transactions/{id} — non-participant user_b gets 403."""
+        from auth import get_current_user
+        from server import app
+
+        txn = DummyTransaction(None)
+        txn.id = "txn-private"
+        txn.created_by = "user-a"
+        txn.participants = []
+
+        app.dependency_overrides[get_current_user] = lambda: MagicMock(id="user-b")
+        with patch("transaction_routes.Transaction.get", AsyncMock(return_value=txn)):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get("/api/transactions/txn-private")
+
+        try:
+            assert response.status_code == 403
         finally:
             app.dependency_overrides.clear()

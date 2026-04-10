@@ -81,7 +81,19 @@ interface UseTransactionDetailReturn {
   resendTransactionInvitation: (invitationId: string) => Promise<InvitationResult>;
   revokeTransactionInvitation: (invitationId: string) => Promise<InvitationResult>;
   runAutoFill: () => Promise<string[]>;
-  extractions: Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>;
+  extractions: Array<{
+    id: string;
+    filename: string;
+    mode: string;
+    overall_confidence: number;
+    pages_processed: number;
+    created_at: string | null;
+    document_type?: string | null;
+    document_form_id?: string | null;
+    document_title?: string | null;
+    document_revision?: string | null;
+    support_level?: string | null;
+  }>;
   linkExtraction: (extractionId: string) => Promise<void>;
   unlinkExtraction: (extractionId: string) => Promise<void>;
 }
@@ -90,7 +102,19 @@ export function useTransactionDetail(id: string | undefined): UseTransactionDeta
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [completion, setCompletion] = useState<TransactionCompletionResult | null>(null);
   const [invitations, setInvitations] = useState<TransactionInvitation[]>([]);
-  const [extractions, setExtractions] = useState<Array<{ id: string; filename: string; mode: string; overall_confidence: number; pages_processed: number; created_at: string | null }>>([]);
+  const [extractions, setExtractions] = useState<Array<{
+    id: string;
+    filename: string;
+    mode: string;
+    overall_confidence: number;
+    pages_processed: number;
+    created_at: string | null;
+    document_type?: string | null;
+    document_form_id?: string | null;
+    document_title?: string | null;
+    document_revision?: string | null;
+    support_level?: string | null;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const initialLoadDone = useRef(false);

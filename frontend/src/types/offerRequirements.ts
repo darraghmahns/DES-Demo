@@ -11,6 +11,7 @@ export interface OfferRequirementRule {
   description: string;
   role: ParticipantRole;
   required: boolean;
+  upload_mode: 'attachment_only' | 'extract_and_merge';
   triggered_when: (fields: Record<string, FieldValue>) => boolean;
 }
 
@@ -26,6 +27,7 @@ export const OFFER_REQUIREMENT_RULES: OfferRequirementRule[] = [
     description: 'Lender letter confirming buyer is approved for financing.',
     role: 'BUYING_AGENT',
     required: true,
+    upload_mode: 'attachment_only',
     triggered_when: () => true,
   },
   {
@@ -34,6 +36,7 @@ export const OFFER_REQUIREMENT_RULES: OfferRequirementRule[] = [
     description: 'Addendum detailing escalation clause terms and cap.',
     role: 'BUYING_AGENT',
     required: true,
+    upload_mode: 'extract_and_merge',
     triggered_when: (fields) => fields['escalation_clause'] === true,
   },
   {
@@ -42,6 +45,7 @@ export const OFFER_REQUIREMENT_RULES: OfferRequirementRule[] = [
     description: 'Addendum specifying inspection contingency terms and deadlines.',
     role: 'BUYING_AGENT',
     required: true,
+    upload_mode: 'extract_and_merge',
     triggered_when: (fields) => fields['inspection_contingency'] === true,
   },
   {
@@ -50,6 +54,7 @@ export const OFFER_REQUIREMENT_RULES: OfferRequirementRule[] = [
     description: 'HOA rules, financials, or approval documentation required for the contingency.',
     role: 'BUYING_AGENT',
     required: true,
+    upload_mode: 'attachment_only',
     triggered_when: (fields) => fields['hoa_approval_contingency'] === true,
   },
   {
@@ -58,6 +63,7 @@ export const OFFER_REQUIREMENT_RULES: OfferRequirementRule[] = [
     description: 'Addendum confirming sale of buyer\'s current home as a condition of this offer.',
     role: 'BUYER',
     required: true,
+    upload_mode: 'extract_and_merge',
     triggered_when: (fields) => fields['sale_of_home_contingency'] === true,
   },
   {
@@ -66,6 +72,7 @@ export const OFFER_REQUIREMENT_RULES: OfferRequirementRule[] = [
     description: 'Addendum documenting terms if property appraises below purchase price.',
     role: 'BUYING_AGENT',
     required: true,
+    upload_mode: 'extract_and_merge',
     triggered_when: (fields) => fields['appraisal_contingency'] === true,
   },
 ];

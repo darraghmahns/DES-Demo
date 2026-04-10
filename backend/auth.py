@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY", "")
 CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL", "")
+CLERK_API_URL = os.getenv("CLERK_API_URL", "https://api.clerk.com/v1")
 AUTH_ENABLED = bool(CLERK_SECRET_KEY)
 
 # Cache the JWKS keys in memory (refreshed every 60 min)
@@ -154,15 +155,49 @@ def _fallback_clerk_email(clerk_user_id: str) -> str:
     return f"{clerk_user_id}@users.clerk.local"
 
 
+def _is_placeholder_clerk_email(email: str | None) -> bool:
+    return bool(email and email.endswith("@users.clerk.local"))
+
+
+async def _fetch_clerk_email_from_backend_api(clerk_user_id: str) -> str:
+    """Best-effort Clerk backend API lookup when JWT claims omit email."""
+    if not CLERK_SECRET_KEY:
+        return ""
+
+    url = f"{CLERK_API_URL.rstrip('/')}/users/{clerk_user_id}"
+    headers = {"Authorization": f"Bearer {CLERK_SECRET_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            return ""
+        return _extract_claim_email(payload)
+    except Exception as e:
+        log.warning("Failed to fetch Clerk email for %s: %s", clerk_user_id, e)
+        return ""
+
+
+async def _resolve_clerk_email(clerk_user_id: str, claims: dict, *, existing_email: str | None = None) -> str:
+    """Prefer JWT claims, then self-heal placeholder emails from the Clerk backend API."""
+    claim_email = _extract_claim_email(claims)
+    if claim_email:
+        return claim_email
+    if existing_email and not _is_placeholder_clerk_email(existing_email):
+        return existing_email
+    return await _fetch_clerk_email_from_backend_api(clerk_user_id)
+
+
 async def _find_or_create_user(clerk_user_id: str, claims: dict) -> "UserProfile":
     """Find existing user or create new one from JWT claims. Sync email/org on every call."""
     from db import UserProfile
 
-    claim_email = _extract_claim_email(claims)
     claim_name = _extract_claim_name(claims)
 
     user = await UserProfile.find_one(UserProfile.clerk_user_id == clerk_user_id)
     if user:
+        claim_email = await _resolve_clerk_email(clerk_user_id, claims, existing_email=user.email)
         changed = False
         if claim_email and user.email != claim_email:
             user.email = claim_email
@@ -179,6 +214,7 @@ async def _find_or_create_user(clerk_user_id: str, claims: dict) -> "UserProfile
         return user
 
     # Create new user — seed name from Clerk (one-time only)
+    claim_email = await _resolve_clerk_email(clerk_user_id, claims)
     user = UserProfile(
         clerk_user_id=clerk_user_id,
         email=claim_email or _fallback_clerk_email(clerk_user_id),

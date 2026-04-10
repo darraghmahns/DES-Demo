@@ -73,6 +73,7 @@ async def save_extraction(
         dotloop_api_payload=result.dotloop_api_payload,
         docusign_api_payload=result.docusign_api_payload,
         validation_success=extracted_data is not None,
+        validation_errors=None,
         overall_confidence=result.overall_confidence,
         pages_processed=result.pages_processed,
         extraction_timestamp=datetime.fromisoformat(result.extraction_timestamp),
@@ -90,6 +91,18 @@ async def save_extraction(
             result.property_enrichment.model_dump(mode="json")
             if result.property_enrichment else None
         ),
+        document_type=result.document_type,
+        document_form_id=result.document_form_id,
+        document_title=result.document_title,
+        document_subtitle=result.document_subtitle,
+        document_revision=result.document_revision,
+        document_publisher=result.document_publisher,
+        document_footer_text=result.document_footer_text,
+        classification_source=result.classification_source,
+        classification_confidence=result.classification_confidence,
+        classification_evidence=list(result.classification_evidence or []),
+        support_level=result.support_level,
+        normalized_offer_projection=result.normalized_offer_projection,
     )
 
     doc.extractions.append(extraction)
@@ -175,5 +188,10 @@ async def list_extractions(
                 "overall_confidence": ext.overall_confidence,
                 "pages_processed": ext.pages_processed,
                 "created_at": ext.created_at.isoformat() if ext.created_at else None,
+                "document_type": ext.document_type,
+                "document_form_id": ext.document_form_id,
+                "document_title": ext.document_title,
+                "document_revision": ext.document_revision,
+                "support_level": ext.support_level,
             })
     return results[:limit]

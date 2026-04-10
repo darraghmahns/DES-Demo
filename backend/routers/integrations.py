@@ -5,12 +5,13 @@ extraction endpoints.  Mounted with ``app.include_router(router)``.
 """
 
 import asyncio
+import hmac
 import logging
 import os
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -66,6 +67,14 @@ router = APIRouter()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "")
 DOTLOOP_AUTH_BASE = "https://auth.dotloop.com"
 DOCUSIGN_AUTH_SERVER = os.getenv("DOCUSIGN_AUTH_SERVER", "account-d.docusign.com")
+
+_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+
+def _verify_webhook_secret(x_webhook_secret: str = Header(default=None)) -> None:
+    """Reject webhook requests that don't carry the shared secret (when configured)."""
+    if _WEBHOOK_SECRET and not hmac.compare_digest(x_webhook_secret or "", _WEBHOOK_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +212,8 @@ async def dotloop_loops(profile_id: int | None = None, batch_size: int = 20, use
         loops = await asyncio.to_thread(list_dotloop_loops, profile_id, batch_size, user_tokens=user_tokens)
         return {"loops": loops}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.get("/api/dotloop/loops/search")
@@ -221,7 +231,8 @@ async def dotloop_search_loops(
         matches = await asyncio.to_thread(search_loops, q, profile_id, user_tokens=user_tokens)
         return {"loops": matches, "query": q}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.get("/api/dotloop/loops/{loop_id}")
@@ -235,7 +246,8 @@ async def dotloop_loop_detail(loop_id: int, profile_id: int | None = None, user=
         detail = await asyncio.to_thread(get_loop_with_details, loop_id, profile_id, user_tokens=user_tokens)
         return detail
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.post("/api/dotloop/sync/{extraction_id}")
@@ -257,7 +269,8 @@ async def dotloop_sync(extraction_id: str, body: DotloopSyncRequest = DotloopSyn
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.post("/api/dotloop/sync-preview")
@@ -276,7 +289,8 @@ async def dotloop_sync_preview(body: DotloopSyncPreviewRequest, user=Depends(get
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.post("/api/dotloop/sync-execute")
@@ -300,7 +314,8 @@ async def dotloop_sync_execute(body: DotloopSyncExecuteRequest, user=Depends(get
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.post("/api/dotloop/process/{loop_id}")
@@ -317,7 +332,8 @@ async def dotloop_process(loop_id: int, request: ProcessFromDotloopRequest, user
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.delete("/api/dotloop/loops/{loop_id}")
@@ -330,7 +346,8 @@ async def dotloop_archive_loop(loop_id: int, user=Depends(get_current_user)):
         result = await asyncio.to_thread(archive_dotloop_loop, loop_id, user_tokens=user_tokens)
         return {"status": "archived", "loop_id": loop_id, "detail": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.delete("/api/dotloop/loops")
@@ -352,7 +369,8 @@ async def dotloop_archive_all_loops(user=Depends(get_current_user)):
                     results.append({"loop_id": lid, "result": str(e)})
         return {"archived": len(results), "details": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +513,7 @@ async def dotloop_oauth_disconnect(user=Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @router.post("/api/webhooks/dotloop")
-async def dotloop_webhook(payload: dict):
+async def dotloop_webhook(payload: dict, _: None = Depends(_verify_webhook_secret)):
     """Receive Dotloop LOOP_UPDATED webhook events."""
     result = await dotloop_handle_webhook(payload)
     return result
@@ -554,7 +572,7 @@ async def docusign_envelopes(
         return {"envelopes": envelopes}
     except Exception as e:
         log.error("DocuSign envelope listing failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.get("/api/docusign/envelopes/{envelope_id}")
@@ -568,7 +586,8 @@ async def docusign_envelope_detail(envelope_id: str, user=Depends(get_optional_u
         detail = await asyncio.to_thread(get_envelope_with_details, envelope_id, user_tokens=user_tokens)
         return detail
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.post("/api/docusign/sync/{extraction_id}")
@@ -593,7 +612,8 @@ async def docusign_sync(extraction_id: str, body: DocuSignSyncRequest = DocuSign
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.delete("/api/docusign/envelopes/{envelope_id}")
@@ -606,7 +626,8 @@ async def docusign_remove_envelope(envelope_id: str, user=Depends(get_current_us
         result = await asyncio.to_thread(remove_docusign_envelope, envelope_id, user_tokens=user_tokens)
         return {"status": "removed", "envelope_id": envelope_id, "detail": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.delete("/api/docusign/envelopes")
@@ -630,7 +651,8 @@ async def docusign_remove_all_envelopes(user=Depends(get_current_user)):
                     results.append({"envelope_id": eid, "result": str(e)})
         return {"removed": len(results), "details": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @router.post("/api/docusign/process/{envelope_id}")
@@ -647,7 +669,8 @@ async def docusign_process(envelope_id: str, request: ProcessFromDocuSignRequest
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Unexpected integration error")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +806,7 @@ async def docusign_oauth_disconnect(user=Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @router.post("/api/webhooks/docusign")
-async def docusign_webhook(payload: dict):
+async def docusign_webhook(payload: dict, _: None = Depends(_verify_webhook_secret)):
     """Receive DocuSign Connect webhook events."""
     result = await docusign_handle_webhook(payload)
     return result

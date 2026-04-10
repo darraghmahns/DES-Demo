@@ -13,13 +13,17 @@ import {
   ROLE_LABELS,
   transactionToAgentRole,
   type AgentRole,
+  type OfferWorkspace,
   type ParticipantRole,
   type TransactionStatus,
   type TransactionUploadJob,
 } from '../types/transaction';
 import {
+  attachExtractionToOffer,
+  detachExtractionFromOffer,
   DotloopLoopConflictError,
   type DotloopLoopConflictDetail,
+  fetchOfferWorkspace,
   isDotloopLoopConflictError,
   listTransactionDocuments,
   listTransactionUploadJobs,
@@ -98,6 +102,11 @@ interface InlineUploadState {
   steps?: UploadProgressStep[];
   totalSteps?: number;
   completedAt?: string | null;
+  extractionId?: string;
+  attachmentState?: 'none' | 'required' | 'attached';
+  attachmentCandidates?: string[];
+  documentType?: string | null;
+  documentTitle?: string | null;
 }
 
 type UploadProgressStepStatus = 'pending' | 'running' | 'complete' | 'error';
@@ -166,6 +175,11 @@ function buildUploadStateFromJob(job: TransactionUploadJob): InlineUploadState {
     steps: job.steps?.map((step) => ({ ...step })) ?? [],
     totalSteps: job.total_steps ?? undefined,
     completedAt: job.completed_at ?? undefined,
+    extractionId: job.extraction_id ?? undefined,
+    attachmentState: job.attachment_state ?? 'none',
+    attachmentCandidates: job.attachment_candidates ?? [],
+    documentType: job.document_type ?? undefined,
+    documentTitle: job.document_title ?? undefined,
   };
 
   switch (job.status) {
@@ -205,6 +219,7 @@ export function TransactionDetail() {
   } = useTransactionDetail(id);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [offersData, setOffersData] = useState<OffersComparisonResult | null>(null);
+  const [offerWorkspace, setOfferWorkspace] = useState<OfferWorkspace | null>(null);
   const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
   const [docs, setDocs] = useState<TransactionDocRecord[]>([]);
   const [docsLoading, setDocsLoading] = useState(true);
@@ -231,12 +246,15 @@ export function TransactionDetail() {
   }, []);
 
   useEffect(() => {
-    if (extractions.length === 0) {
+    const comparisonIds = transaction?.agent_side === 'seller'
+      ? (offerWorkspace?.root_offer_ids ?? [])
+      : extractions.map(e => e.id);
+    if (comparisonIds.length === 0) {
       setOffersData(null);
       setSelectedOfferId(null);
       return;
     }
-    fetchOffersComparison(extractions.map(e => e.id))
+    fetchOffersComparison(comparisonIds, transaction?.agent_side === 'seller' ? id : undefined)
       .then(result => {
         setOffersData(result);
         setSelectedOfferId(result.offers[0]?.extraction_id ?? null);
@@ -245,11 +263,16 @@ export function TransactionDetail() {
         setOffersData(null);
         setSelectedOfferId(null);
       });
-  }, [extractions]);
+  }, [extractions, id, offerWorkspace?.root_offer_ids, transaction?.agent_side]);
 
   const refreshDocs = () => {
     if (!id) return;
     listTransactionDocuments(id).then(setDocs).catch(() => setDocs([]));
+  };
+
+  const refreshOfferWorkspace = () => {
+    if (!id) return;
+    fetchOfferWorkspace(id).then(setOfferWorkspace).catch(() => setOfferWorkspace(null));
   };
 
   const scheduleUploadDismiss = () => {
@@ -301,13 +324,26 @@ export function TransactionDetail() {
           progress: 'Done',
           percent: 100,
           completedAt: new Date().toISOString(),
+          extractionId: event.data.extraction_id ?? prev.extractionId,
+          attachmentState: event.data.attachment_state ?? prev.attachmentState ?? 'none',
+          attachmentCandidates: event.data.attachment_candidates ?? prev.attachmentCandidates ?? [],
+          documentType: event.data.document_type ?? prev.documentType,
+          documentTitle: event.data.document_title ?? prev.documentTitle,
         }));
         activeTaskIdRef.current = null;
         unsubRef.current?.();
         unsubRef.current = null;
         await refresh();
         refreshDocs();
-        scheduleUploadDismiss();
+        refreshOfferWorkspace();
+        if ((event.data.attachment_state ?? 'none') === 'required') {
+          if (dismissTimerRef.current) {
+            window.clearTimeout(dismissTimerRef.current);
+            dismissTimerRef.current = null;
+          }
+        } else {
+          scheduleUploadDismiss();
+        }
       } else if (event.type === 'error') {
         setUploadState((prev) => ({
           ...prev,
@@ -330,6 +366,14 @@ export function TransactionDetail() {
       .catch(() => setDocs([]))
       .finally(() => setDocsLoading(false));
   }, [id]);
+
+  useEffect(() => {
+    if (!id || transaction?.agent_side !== 'seller') {
+      setOfferWorkspace(null);
+      return;
+    }
+    fetchOfferWorkspace(id).then(setOfferWorkspace).catch(() => setOfferWorkspace(null));
+  }, [id, transaction?.agent_side]);
 
   useEffect(() => {
     if (!id) return;
@@ -363,7 +407,11 @@ export function TransactionDetail() {
           if (activeJob) {
             subscribeToUploadTask(activeJob);
           } else if (latestJob.status === 'complete') {
-            scheduleUploadDismiss();
+            if ((latestJob.attachment_state ?? 'none') === 'required') {
+              setUploadState(buildUploadStateFromJob(latestJob));
+            } else {
+              scheduleUploadDismiss();
+            }
           }
         } else {
           setUploadState({ status: 'idle', percent: 0, steps: [] });
@@ -387,11 +435,8 @@ export function TransactionDetail() {
     };
   }, [id]);
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !id) return;
-    e.target.value = '';
-
+  const startUpload = async (file: File, offerExtractionId?: string, docType?: string) => {
+    if (!id) return;
     setUploadState({
       status: 'uploading',
       transactionId: id,
@@ -399,10 +444,11 @@ export function TransactionDetail() {
       progress: 'Uploading document',
       percent: 8,
       steps: [{ key: 'upload', title: 'Upload document', status: 'running' }],
+      attachmentState: offerExtractionId ? 'attached' : 'none',
     });
 
     try {
-      const job = await uploadAndExtractTransactionDocument(id, file);
+      const job = await uploadAndExtractTransactionDocument(id, file, offerExtractionId, docType);
       setUploadState(buildUploadStateFromJob(job));
       subscribeToUploadTask(job);
     } catch (err) {
@@ -415,6 +461,40 @@ export function TransactionDetail() {
       }));
       activeTaskIdRef.current = null;
     }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    await startUpload(file);
+  };
+
+  const handleAttachLooseExtraction = async (documentRecordId: string, offerExtractionId: string) => {
+    if (!id) return;
+    await attachExtractionToOffer(id, documentRecordId, offerExtractionId);
+    await refresh();
+    refreshDocs();
+    refreshOfferWorkspace();
+    setUploadState((prev) => ({
+      ...prev,
+      attachmentState: prev.extractionId === documentRecordId || prev.extractionId?.startsWith(`${documentRecordId}:`)
+        ? 'attached'
+        : prev.attachmentState,
+    }));
+  };
+
+  const handleDetachAttachedExtraction = async (documentRecordId: string) => {
+    if (!id) return;
+    await detachExtractionFromOffer(id, documentRecordId);
+    await refresh();
+    refreshDocs();
+    refreshOfferWorkspace();
+  };
+
+  const dismissAttachmentPrompt = () => {
+    setUploadState((prev) => ({ ...prev, attachmentState: 'none', attachmentCandidates: [] }));
+    scheduleUploadDismiss();
   };
 
   if (loading) return <div className="loading-state">Loading transaction...</div>;
@@ -591,7 +671,9 @@ export function TransactionDetail() {
                   value={tab}
                   leftSection={TAB_ICONS[tab]}
                   rightSection={
-                    tab === 'offers' && extractions.length > 0 ? <Badge size="xs">{extractions.length}</Badge> : undefined
+                    tab === 'offers' && (offerWorkspace?.offers.length ?? 0) > 0
+                      ? <Badge size="xs">{offerWorkspace?.offers.length ?? 0}</Badge>
+                      : undefined
                   }
                 >
                   {TAB_LABELS[tab]}
@@ -619,6 +701,9 @@ export function TransactionDetail() {
                 docsLoading={docsLoading}
                 uploadState={uploadState}
                 uploadBusy={uploadState.status !== 'idle'}
+                offerWorkspace={offerWorkspace}
+                onAttachUpload={handleAttachLooseExtraction}
+                onKeepUnattached={dismissAttachmentPrompt}
                 onFileSelect={handleFileSelect}
               />
             </Tabs.Panel>
@@ -626,13 +711,16 @@ export function TransactionDetail() {
               {isSeller && (
                 <OffersTab
                   txnId={id!}
-                  extractions={extractions}
+                  workspace={offerWorkspace}
                   offersData={offersData}
                   txnDocs={docs}
                   onUnlink={unlinkExtraction}
                   onDocsRefresh={refreshDocs}
+                  onAttachLooseExtraction={handleAttachLooseExtraction}
+                  onDetachAttachedExtraction={handleDetachAttachedExtraction}
+                  onExtractAndAttach={startUpload}
                   onNavigateToCompare={() =>
-                    navigate(`/comparison?txn=${id}&ids=${extractions.map(e => e.id).join(',')}`)
+                    navigate(`/comparison?txn=${id}&ids=${(offerWorkspace?.root_offer_ids ?? []).join(',')}`)
                   }
                 />
               )}
@@ -1563,6 +1651,9 @@ function DocumentsTab({
   docsLoading,
   uploadState,
   uploadBusy,
+  offerWorkspace,
+  onAttachUpload,
+  onKeepUnattached,
   onFileSelect,
 }: {
   txnId: string;
@@ -1571,9 +1662,13 @@ function DocumentsTab({
   docsLoading: boolean;
   uploadState: InlineUploadState;
   uploadBusy: boolean;
+  offerWorkspace: OfferWorkspace | null;
+  onAttachUpload: (documentRecordId: string, offerExtractionId: string) => Promise<void>;
+  onKeepUnattached: () => void;
   onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [selectedOfferTarget, setSelectedOfferTarget] = useState<string | null>(null);
 
   return (
     <div className="documents-tab">
@@ -1649,6 +1744,45 @@ function DocumentsTab({
               ))}
             </div>
           )}
+          {uploadState.status === 'done'
+            && uploadState.attachmentState === 'required'
+            && uploadState.extractionId
+            && (offerWorkspace?.attachment_candidates.length ?? 0) > 0 && (
+              <div className="upload-progress-attachment-prompt">
+                <div className="upload-progress-message">
+                  {uploadState.documentTitle || uploadState.filename} can attach to an existing offer thread.
+                </div>
+                <Group gap="sm" mt="sm">
+                  <Select
+                    placeholder="Choose offer"
+                    data={(offerWorkspace?.attachment_candidates ?? []).map((item) => ({
+                      value: item.extraction_id,
+                      label: item.label,
+                    }))}
+                    value={selectedOfferTarget}
+                    onChange={setSelectedOfferTarget}
+                    w={280}
+                    size="sm"
+                  />
+                  <Button
+                    size="xs"
+                    color="cyan"
+                    disabled={!selectedOfferTarget}
+                    onClick={() => {
+                      if (selectedOfferTarget && uploadState.extractionId) {
+                        const docId = uploadState.extractionId.split(':')[0];
+                        void onAttachUpload(docId, selectedOfferTarget);
+                      }
+                    }}
+                  >
+                    Attach to Offer
+                  </Button>
+                  <Button size="xs" variant="subtle" onClick={onKeepUnattached}>
+                    Keep Unattached
+                  </Button>
+                </Group>
+              </div>
+            )}
         </div>
       )}
 
@@ -1660,8 +1794,9 @@ function DocumentsTab({
             {extractions.map(ext => (
               <div key={ext.id} className="doc-requirement satisfied">
                 <span className="doc-req-icon">OK</span>
-                <span className="doc-req-type">{ext.filename}</span>
-                <span className="doc-req-role">{ext.mode}</span>
+                <span className="doc-req-type">{ext.document_title || ext.filename}</span>
+                <span className="doc-req-role">{ext.document_type?.replace(/_/g, ' ') || ext.mode}</span>
+                {ext.document_revision && <span className="doc-req-status status-ok">{ext.document_revision}</span>}
               </div>
             ))}
           </div>
@@ -1691,37 +1826,37 @@ function DocumentsTab({
   );
 }
 
-
-
-interface ExtractionSummary {
-  id: string;
-  filename: string;
-  mode: string;
-  overall_confidence: number;
-  pages_processed: number;
-  created_at: string | null;
-}
-
 function OffersTab({
   txnId,
-  extractions,
+  workspace,
   offersData,
   txnDocs,
   onUnlink,
   onDocsRefresh,
+  onAttachLooseExtraction,
+  onDetachAttachedExtraction,
+  onExtractAndAttach,
   onNavigateToCompare,
 }: {
   txnId: string;
-  extractions: ExtractionSummary[];
+  workspace: OfferWorkspace | null;
   offersData: OffersComparisonResult | null;
   txnDocs: TransactionDocRecord[];
   onUnlink: (id: string) => Promise<void>;
   onDocsRefresh: () => void;
+  onAttachLooseExtraction: (documentRecordId: string, offerExtractionId: string) => Promise<void>;
+  onDetachAttachedExtraction: (documentRecordId: string) => Promise<void>;
+  onExtractAndAttach: (file: File, offerExtractionId: string, docType: string) => Promise<void>;
   onNavigateToCompare: () => void;
 }) {
   const [unlinking, setUnlinking] = useState<string | null>(null);
   const [modalOfferId, setModalOfferId] = useState<string | null>(null);
+  const [attachTargets, setAttachTargets] = useState<Record<string, string>>({});
+  const [attachingDocId, setAttachingDocId] = useState<string | null>(null);
   const modalOffer = offersData?.offers.find(o => o.extraction_id === modalOfferId) ?? null;
+  const rootOffers = workspace?.offers ?? [];
+  const looseExtractions = workspace?.loose_extractions ?? [];
+  const modalThread = rootOffers.find((offer) => offer.extraction_id === modalOfferId) ?? null;
 
   const handleUnlink = async (id: string) => {
     setUnlinking(id);
@@ -1732,11 +1867,22 @@ function OffersTab({
     }
   };
 
-  if (extractions.length === 0) {
+  const handleAttach = async (documentId: string) => {
+    const target = attachTargets[documentId];
+    if (!target) return;
+    setAttachingDocId(documentId);
+    try {
+      await onAttachLooseExtraction(documentId, target);
+    } finally {
+      setAttachingDocId(null);
+    }
+  };
+
+  if (rootOffers.length === 0 && looseExtractions.length === 0) {
     return (
       <div className="extractions-tab-empty">
         <p>No offers linked yet.</p>
-        <p>Upload offer documents from the Documents tab to add them here.</p>
+        <p>Upload a purchase offer to create the first offer thread.</p>
       </div>
     );
   }
@@ -1744,27 +1890,30 @@ function OffersTab({
   return (
     <div className="extractions-tab">
       <div className="extractions-tab-header">
-        <span>{extractions.length} offer{extractions.length !== 1 ? 's' : ''} received</span>
-        {extractions.length >= 1 && (
+        <span>{rootOffers.length} offer{rootOffers.length !== 1 ? 's' : ''} received</span>
+        {rootOffers.length >= 1 && (
           <Button size="sm" variant="filled" color="cyan" onClick={onNavigateToCompare}>
-            {extractions.length === 1 ? 'Compare Offer' : 'Compare All Offers'}
+            {rootOffers.length === 1 ? 'Compare Offer' : 'Compare All Offers'}
           </Button>
         )}
       </div>
       <div className="extractions-grid">
-        {extractions.map(ext => {
-          const offerFields = offersData?.offers.find(o => o.extraction_id === ext.id)?.fields ?? {};
-          const reqs = evaluateOfferRequirements(offerFields, txnDocs, ext.id);
+        {rootOffers.map((thread) => {
+          const ext = thread.summary;
+          const offerFields = offersData?.offers.find(o => o.extraction_id === thread.extraction_id)?.fields ?? {};
+          const reqs = evaluateOfferRequirements(offerFields, txnDocs, thread.extraction_id);
           const pendingCount = reqs.filter(r => !r.satisfied).length;
+          const displayTitle = ext.document_title || ext.filename;
+          const displayType = ext.document_type ? ext.document_type.replace(/_/g, ' ') : null;
           return (
-          <div
-            key={ext.id}
-            className="extraction-card"
-            style={{ cursor: 'pointer' }}
-            onClick={() => setModalOfferId(ext.id)}
-          >
+	          <div
+	            key={thread.extraction_id}
+	            className="extraction-card"
+	            style={{ cursor: 'pointer' }}
+	            onClick={() => setModalOfferId(thread.extraction_id)}
+	          >
             <div className="extraction-card-header">
-              <span className="extraction-card-filename">{ext.filename}</span>
+              <span className="extraction-card-filename">{displayTitle}</span>
               <Badge
                 variant="light"
                 color={ext.overall_confidence >= 0.85 ? 'green' : ext.overall_confidence >= 0.65 ? 'yellow' : 'red'}
@@ -1772,11 +1921,19 @@ function OffersTab({
                 {(ext.overall_confidence * 100).toFixed(0)}%
               </Badge>
             </div>
-            <div className="extraction-card-meta">
-              <span>{ext.pages_processed} page{ext.pages_processed !== 1 ? 's' : ''}</span>
-              {ext.created_at && (
-                <span>{formatDate(ext.created_at)}</span>
-              )}
+	            <div className="extraction-card-meta">
+	              <span>{ext.pages_processed} page{ext.pages_processed !== 1 ? 's' : ''}</span>
+	              {displayType && <span>{displayType}</span>}
+	              {ext.document_revision && <span>{ext.document_revision}</span>}
+                  {thread.attached_extractions.length > 0 && (
+                    <span>{thread.attached_extractions.length} attached doc{thread.attached_extractions.length !== 1 ? 's' : ''}</span>
+                  )}
+                  {thread.supporting_documents.length > 0 && (
+                    <span>{thread.supporting_documents.length} support doc{thread.supporting_documents.length !== 1 ? 's' : ''}</span>
+                  )}
+	              {ext.created_at && (
+	                <span>{formatDate(ext.created_at)}</span>
+	              )}
             </div>
             {reqs.length > 0 && (
               <div className="extraction-card-requirements">
@@ -1791,19 +1948,60 @@ function OffersTab({
                 )}
               </div>
             )}
-            <Button
-              variant="subtle"
-              size="sm"
-              color="red"
-              disabled={unlinking === ext.id}
-              onClick={(e) => { e.stopPropagation(); handleUnlink(ext.id); }}
-            >
-              {unlinking === ext.id ? 'Removing...' : 'Remove Offer'}
-            </Button>
-          </div>
-          );
+	            <Button
+	              variant="subtle"
+	              size="sm"
+	              color="red"
+	              disabled={unlinking === thread.document_id}
+	              onClick={(e) => { e.stopPropagation(); handleUnlink(thread.document_id); }}
+	            >
+	              {unlinking === thread.document_id ? 'Removing...' : 'Remove Offer'}
+	            </Button>
+	          </div>
+	          );
         })}
       </div>
+      {looseExtractions.length > 0 && (
+        <div className="doc-requirements-section">
+          <h3>Loose Extracted Documents ({looseExtractions.length})</h3>
+          <div className="doc-requirements-list">
+            {looseExtractions.map((doc) => (
+              <div key={doc.id} className="doc-requirement satisfied">
+                <span className="doc-req-icon">OK</span>
+                <span className="doc-req-type">{doc.document_title || doc.filename}</span>
+                <span className="doc-req-role">{doc.document_type?.replace(/_/g, ' ') || doc.mode}</span>
+                {rootOffers.length > 0 ? (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' }}>
+                    <Select
+                      placeholder="Attach to offer"
+                      data={rootOffers.map((offer) => ({
+                        value: offer.extraction_id,
+                        label: offer.summary.document_title || offer.summary.filename,
+                      }))}
+                      value={attachTargets[doc.id] ?? null}
+                      onChange={(value) => setAttachTargets((prev) => ({ ...prev, [doc.id]: value ?? '' }))}
+                      size="xs"
+                      w={220}
+                    />
+                    <Button
+                      size="xs"
+                      variant="light"
+                      color="cyan"
+                      disabled={!attachTargets[doc.id]}
+                      loading={attachingDocId === doc.id}
+                      onClick={() => handleAttach(doc.id)}
+                    >
+                      Attach
+                    </Button>
+                  </div>
+                ) : (
+                  <span className="doc-req-status status-ok">Waiting for an offer</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <OfferRequirementsModal
         opened={modalOfferId !== null}
         onClose={() => setModalOfferId(null)}
@@ -1811,6 +2009,10 @@ function OffersTab({
         txnId={txnId}
         txnDocs={txnDocs}
         onDocsRefresh={onDocsRefresh}
+        onExtractAndAttach={onExtractAndAttach}
+        attachedExtractions={modalThread?.attached_extractions ?? []}
+        supportingDocuments={modalThread?.supporting_documents ?? []}
+        onDetachAttachedExtraction={onDetachAttachedExtraction}
       />
     </div>
   );

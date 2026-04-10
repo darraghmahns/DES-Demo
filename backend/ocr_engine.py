@@ -131,6 +131,30 @@ class OCREngine(ABC):
         """
         raise NotImplementedError(f"{self.name} engine does not support file-based OCR")
 
+    def classify_real_estate_metadata(self, metadata: dict[str, Any]) -> tuple[dict, dict]:
+        """Classify a real-estate document from parsed metadata only.
+
+        Engines may override this to provide a lightweight model fallback when
+        deterministic classification fails.
+        """
+        return {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def summarize_real_estate_document(
+        self,
+        images_b64: list[str],
+        classification: dict[str, Any],
+    ) -> tuple[dict, dict]:
+        """Extract a generic structured summary for non-offer real-estate forms."""
+        return {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def summarize_real_estate_document_from_file(
+        self,
+        file_path: str,
+        classification: dict[str, Any],
+    ) -> tuple[dict, dict]:
+        """File-based generic real-estate summary extraction."""
+        return {}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
 
 def get_engine(engine_name: str | None = None) -> OCREngine:
     """Factory: return the configured OCR engine.

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from real_estate_classifier import RealEstateClassification
 from schemas import PropertyEnrichment, TransactionUploadJobStatus, VerificationCitation
 
 
@@ -156,6 +157,40 @@ def _collect_emitter():
     return emit, events
 
 
+def _purchase_offer_classification() -> RealEstateClassification:
+    return RealEstateClassification(
+        document_form_id="MAR_BUY_SELL_RESIDENTIAL",
+        document_type="PURCHASE_OFFER",
+        document_title="Buy-Sell Agreement Residential",
+        document_revision="April 2022",
+        document_publisher="Montana Association of REALTORS",
+        document_footer_text="Buy-Sell Agreement Residential, April 2022",
+        classification_source="footer_exact",
+        classification_confidence=1.0,
+        classification_evidence=[
+            {"kind": "footer_title", "text": "Buy-Sell Agreement Residential", "page_number": 1},
+        ],
+        support_level="full",
+    )
+
+
+def _metadata_only_classification() -> RealEstateClassification:
+    return RealEstateClassification(
+        document_form_id="MAR_PROPERTY_DISCLOSURE_STATEMENT",
+        document_type="DISCLOSURE",
+        document_title="Property Disclosure Statement",
+        document_revision="April 2022",
+        document_publisher="Montana Association of REALTORS",
+        document_footer_text="Property Disclosure Statement, April 2022",
+        classification_source="footer_exact",
+        classification_confidence=1.0,
+        classification_evidence=[
+            {"kind": "footer_title", "text": "Property Disclosure Statement", "page_number": 1},
+        ],
+        support_level="metadata_only",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Patch targets — all in server module namespace
 # ---------------------------------------------------------------------------
@@ -169,6 +204,8 @@ def _standard_patches(
     mock_enrichment,
     *,
     regrid_configured: bool = True,
+    classification: RealEstateClassification | None = None,
+    route: str = "offer_projection",
 ):
     """Return a list of context managers for the standard pipeline mocks."""
     return [
@@ -183,6 +220,11 @@ def _standard_patches(
         patch(f"{_SERVER}.property_prefill.enrich_property", new_callable=AsyncMock, return_value=mock_enrichment),
         patch(f"{_SERVER}.save_document", new_callable=AsyncMock, return_value="doc-id-123"),
         patch(f"{_SERVER}.save_extraction", new_callable=AsyncMock, return_value="ext-id-456"),
+        patch(
+            f"{_SERVER}.classify_real_estate_document",
+            return_value=(classification or _purchase_offer_classification(), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+        ),
+        patch(f"{_SERVER}.get_processing_route", return_value=route),
     ]
 
 
@@ -242,7 +284,7 @@ class TestRealEstateHappyPath:
     async def test_step_count_matches(
         self, tmp_pdf, mock_engine, mock_compliance_report, mock_enrichment,
     ):
-        """Total steps should be 8 for real_estate with recovery + Regrid configured."""
+        """Total steps should be 9 for real_estate with classification + recovery + Regrid configured."""
         from server import _extraction_pipeline
 
         emit, events = _collect_emitter()
@@ -256,7 +298,7 @@ class TestRealEstateHappyPath:
 
         # First step event tells us the total
         step_events = [e for e in events if e[0] == "step"]
-        assert step_events[0][1]["total"] == 8  # Load,Convert,Extract,Validate,Recover,Verify,Enrich,Output
+        assert step_events[0][1]["total"] == 9  # Load,Convert,Classify,Extract,Validate,Recover,Verify,Enrich,Output
 
     @pytest.mark.asyncio
     async def test_validation_succeeds(
@@ -372,6 +414,7 @@ class TestRealEstateHappyPath:
             await _extraction_pipeline("real_estate", tmp_pdf, emit)
 
         step_titles = [e[1]["title"] for e in events if e[0] == "step"]
+        assert "Classify Document" in step_titles
         assert "Recover Missing Comparison Fields" in step_titles
         mock_engine.recover_missing_fields.assert_called_once()
 
@@ -425,7 +468,54 @@ class TestNoRegridConfigured:
             await _extraction_pipeline("real_estate", tmp_pdf, emit)
 
         step_events = [e for e in events if e[0] == "step"]
-        assert step_events[0][1]["total"] == 7  # Recovery still runs; no enrichment step
+        assert step_events[0][1]["total"] == 8  # Classification + recovery still run; no enrichment step
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_route_skips_recovery_and_verification(
+        self, tmp_pdf, mock_engine, mock_compliance_report, mock_enrichment,
+    ):
+        from server import _extraction_pipeline
+
+        mock_engine.summarize_real_estate_document.return_value = (
+            {
+                "document_title": "Property Disclosure Statement",
+                "summary": "Seller disclosure form.",
+                "property_address": "100 Main St",
+                "referenced_agreement": None,
+                "mentioned_parties": ["Jane Doe"],
+                "mentioned_dates": [],
+                "mentioned_amounts": [],
+                "requested_actions": [],
+                "notes": None,
+            },
+            {"prompt_tokens": 120, "completion_tokens": 20, "total_tokens": 140},
+        )
+
+        emit, events = _collect_emitter()
+        patches = _standard_patches(
+            mock_engine,
+            mock_compliance_report,
+            mock_enrichment,
+            regrid_configured=False,
+            classification=_metadata_only_classification(),
+            route="summary",
+        )
+
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            await _extraction_pipeline("real_estate", tmp_pdf, emit)
+
+        step_titles = [e[1]["title"] for e in events if e[0] == "step"]
+        assert "Classify Document" in step_titles
+        assert "Recover Missing Comparison Fields" in step_titles
+        mock_engine.recover_missing_fields.assert_not_called()
+        mock_engine.verify.assert_not_called()
+
+        citations_event = [e[1] for e in events if e[0] == "citations"][0]
+        assert citations_event["citations"] == []
+        assert citations_event["overall_confidence"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +771,11 @@ class TestDBFailureNonFatal:
             patch(f"{_SERVER}.property_prefill.enrich_property", new_callable=AsyncMock, return_value=mock_enrichment),
             patch(f"{_SERVER}.save_document", new_callable=AsyncMock, side_effect=Exception("DB connection refused")),
             patch(f"{_SERVER}.save_extraction", new_callable=AsyncMock),
+            patch(
+                f"{_SERVER}.classify_real_estate_document",
+                return_value=(_purchase_offer_classification(), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+            ),
+            patch(f"{_SERVER}.get_processing_route", return_value="offer_projection"),
         ]
 
         from contextlib import ExitStack

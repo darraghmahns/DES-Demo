@@ -13,10 +13,13 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, List, Optional
 
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field, ValidationError
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from rate_limiter import limiter
 
 from pdf_converter import get_pdf_info, pdf_to_base64_images
 
@@ -25,10 +28,6 @@ from verifier import compute_overall_confidence
 from pii_scanner import scan_all_pages
 from schemas import (
     DotloopLoopDetails,
-    DotloopPropertyAddress,
-    DotloopFinancials,
-    DotloopContractDates,
-    DotloopParticipant,
     ExtractionResult,
     FOIARequest,
     TransactionUploadJobStatus,
@@ -53,6 +52,12 @@ from offer_fields import (
     get_offer_field_targets,
     get_missing_offer_field_targets,
     merge_recovered_offer_fields,
+)
+from offer_threads import build_offer_workspace
+from real_estate_processing import (
+    build_lenient_offer_model,
+    classify_real_estate_document,
+    get_processing_route,
 )
 from routers.integrations import router as integrations_router
 from routers.integrations import _user_dotloop_tokens, _user_docusign_tokens
@@ -104,6 +109,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DESLabs API", version="1.0.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
 
@@ -643,8 +650,10 @@ async def list_documents(mode: str | None = None) -> list[DocumentInfo]:
 @app.get("/api/documents/{name}")
 async def get_document(name: str):
     """Serve a PDF file for inline preview."""
-    pdf_path = TEST_DOCS_DIR / name
-    if not pdf_path.exists() or not pdf_path.suffix.lower() == ".pdf":
+    pdf_path = (TEST_DOCS_DIR / name).resolve()
+    if not str(pdf_path).startswith(str(TEST_DOCS_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid document path")
+    if not pdf_path.exists() or pdf_path.suffix.lower() != ".pdf":
         raise HTTPException(status_code=404, detail="Document not found")
     return FileResponse(
         str(pdf_path),
@@ -659,7 +668,9 @@ async def get_document(name: str):
 
 
 @app.post("/api/upload")
+@limiter.limit("30/minute")
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     mode: str = Query("real_estate"),
     user=Depends(get_current_user),
@@ -669,20 +680,24 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
     TEST_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = TEST_DOCS_DIR / file.filename
+    safe_filename = os.path.basename(file.filename)
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    dest = TEST_DOCS_DIR / safe_filename
     contents = await file.read()
     dest.write_bytes(contents)
 
     info = await asyncio.to_thread(get_pdf_info, str(dest))
     return {
-        "filename": file.filename,
+        "filename": safe_filename,
         "pages": info["pages"],
         "size_human": info["size_human"],
     }
 
 
 @app.post("/api/extract")
-async def extract(request: ExtractRequest, user=Depends(get_current_user)):
+@limiter.limit("20/minute")
+async def extract(http_request: Request, request: ExtractRequest, user=Depends(get_current_user)):
     """Start the extraction pipeline as a background task, return task_id.
 
     The extraction runs independently of the HTTP connection.
@@ -877,11 +892,28 @@ async def _run_extraction_task(task, mode: str, pdf_path: str, user_id: str | No
         task.mark_complete(TaskStatus.COMPLETE)
         if upload_job_id:
             complete_payload = task.events[-1]["data"] if task.events and task.events[-1]["type"] == "complete" else {}
+            extraction_id = complete_payload.get("extraction_id")
+            if extraction_id and transaction_id:
+                from transaction_routes import _apply_post_extraction_attachment_state
+                from db import Transaction
+
+                txn = await Transaction.get(transaction_id)
+                upload_job = await TransactionUploadJob.get(upload_job_id)
+                if txn and upload_job:
+                    await _apply_post_extraction_attachment_state(
+                        txn,
+                        upload_job=upload_job,
+                        extraction_id=extraction_id,
+                    )
+                    complete_payload["attachment_state"] = upload_job.attachment_state
+                    complete_payload["attachment_candidates"] = upload_job.attachment_candidates
+                    complete_payload["document_type"] = upload_job.document_type
+                    complete_payload["document_title"] = upload_job.document_title
             await _set_transaction_upload_job_state(
                 upload_job_id,
                 status=TransactionUploadJobStatus.COMPLETE,
                 progress_message="Done",
-                extraction_id=complete_payload.get("extraction_id"),
+                extraction_id=extraction_id,
                 error_message=None,
             )
 
@@ -905,7 +937,7 @@ async def _extraction_pipeline(
     if link_extraction is not None:
         total_steps += 1  # Link to transaction
     if mode == "real_estate":
-        total_steps += 1  # Recover Missing Comparison Fields
+        total_steps += 2  # Classify Document + Recover Missing Comparison Fields
         if property_prefill.is_configured():
             total_steps += 1  # Property enrichment
     if mode == "gov":
@@ -953,43 +985,110 @@ async def _extraction_pipeline(
             "data": {"pages_converted": pages_converted},
         })
 
-        # --- Step 3: Neural OCR Extraction ---
+        engine = get_engine()
+        use_file = engine.prefers_file_path
+        classification = None
+        real_estate_route = None
+        validated = None
+        lenient_validated = None
+        validated_data = None
+        validation_errors: list[str] = []
+        raw_extraction = None
+        required_field_targets: list[dict[str, Any]] = []
+        citations = []
+        overall_confidence = 0.0
+        property_enrichment_data = None
+
+        if mode == "real_estate":
+            current_step += 1
+            emit("step", {
+                "step": current_step, "total": total_steps,
+                "title": "Classify Document", "status": "running",
+            })
+
+            classification, classification_usage = await asyncio.to_thread(
+                classify_real_estate_document,
+                engine=engine,
+                pdf_path=pdf_path,
+                filename=Path(pdf_path).name,
+                images_b64=images_b64,
+            )
+            _add_usage(classification_usage)
+            real_estate_route = get_processing_route(classification)
+
+            classification_payload = {
+                "document_form_id": classification.document_form_id,
+                "document_type": classification.document_type,
+                "document_title": classification.document_title,
+                "document_revision": classification.document_revision,
+                "classification_source": classification.classification_source,
+                "support_level": classification.support_level,
+            }
+            emit("classification", classification_payload)
+            emit("step_complete", {
+                "step": current_step,
+                "title": "Classify Document",
+                "status": "complete",
+                "data": {
+                    **classification_payload,
+                    "route": real_estate_route,
+                },
+            })
+
+        # --- Step 3/4: Neural OCR Extraction ---
         current_step += 1
         emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Neural OCR Extraction", "status": "running",
         })
 
-        engine = get_engine()
-        use_file = engine.prefers_file_path
-        if use_file:
-            raw_extraction, extract_usage = await asyncio.to_thread(
-                engine.extract_from_file, pdf_path, mode,
-            )
+        if mode == "real_estate" and real_estate_route == "summary":
+            classification_payload = classification.model_dump(mode="json") if classification else {}
+            if use_file:
+                raw_extraction, extract_usage = await asyncio.to_thread(
+                    engine.summarize_real_estate_document_from_file,
+                    pdf_path,
+                    classification_payload,
+                )
+            else:
+                raw_extraction, extract_usage = await asyncio.to_thread(
+                    engine.summarize_real_estate_document,
+                    images_b64,
+                    classification_payload,
+                )
         else:
-            raw_extraction, extract_usage = await asyncio.to_thread(
-                engine.extract, images_b64, mode,
-            )
+            if use_file:
+                raw_extraction, extract_usage = await asyncio.to_thread(
+                    engine.extract_from_file,
+                    pdf_path,
+                    mode,
+                )
+            else:
+                raw_extraction, extract_usage = await asyncio.to_thread(
+                    engine.extract,
+                    images_b64,
+                    mode,
+                )
         _add_usage(extract_usage)
 
         emit("step_complete", {
             "step": current_step, "title": "Neural OCR Extraction", "status": "complete",
-            "data": {"fields_extracted": len(raw_extraction)},
+            "data": {"fields_extracted": len(raw_extraction) if isinstance(raw_extraction, dict) else 0},
         })
 
-        # --- Step 4: Validate Schema ---
+        # --- Step 4/5: Validate Schema ---
         current_step += 1
         emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Validate Schema", "status": "running",
         })
 
-        validated = None
-        validated_data = None
-        validation_errors: list[str] = []
-
         try:
-            if mode == "real_estate":
+            if mode == "real_estate" and real_estate_route == "summary":
+                from schemas import RealEstateDocumentSummary
+
+                validated = RealEstateDocumentSummary.model_validate(raw_extraction)
+            elif mode == "real_estate":
                 validated = DotloopLoopDetails.model_validate(raw_extraction)
             else:
                 validated = FOIARequest.model_validate(raw_extraction)
@@ -1000,25 +1099,10 @@ async def _extraction_pipeline(
                 validation_errors.append(f"{loc}: {err['msg']}")
             validated_data = raw_extraction
 
-        # Lenient fallback: build partial model even when strict validation fails
-        lenient_validated = None
-        if mode == "real_estate" and validated is None:
-            try:
-                nested = dict(raw_extraction)
-                if isinstance(nested.get("property_address"), dict):
-                    nested["property_address"] = DotloopPropertyAddress.model_construct(**nested["property_address"])
-                if isinstance(nested.get("financials"), dict):
-                    nested["financials"] = DotloopFinancials.model_construct(**nested["financials"])
-                if isinstance(nested.get("contract_dates"), dict):
-                    nested["contract_dates"] = DotloopContractDates.model_construct(**nested["contract_dates"])
-                if isinstance(nested.get("participants"), list):
-                    nested["participants"] = [
-                        DotloopParticipant.model_construct(**p) if isinstance(p, dict) else p
-                        for p in nested["participants"]
-                    ]
-                lenient_validated = DotloopLoopDetails.model_construct(**nested)
-            except (TypeError, KeyError, ValidationError):
-                pass
+        if mode == "real_estate" and real_estate_route == "offer_projection" and validated is None:
+            lenient_validated = build_lenient_offer_model(raw_extraction or {})
+            if lenient_validated is not None:
+                validated_data = lenient_validated.model_dump(mode="json")
 
         emit("extraction", {"validated_data": validated_data})
         emit("validation", {
@@ -1026,36 +1110,49 @@ async def _extraction_pipeline(
             "errors": validation_errors,
         })
         emit("step_complete", {
-            "step": current_step, "title": "Validate Schema", "status": "complete",
-            "data": {"success": len(validation_errors) == 0, "error_count": len(validation_errors)},
+            "step": current_step,
+            "title": "Validate Schema",
+            "status": "complete",
+            "data": {
+                "success": len(validation_errors) == 0,
+                "error_count": len(validation_errors),
+                "route": real_estate_route if mode == "real_estate" else mode,
+            },
         })
 
-        required_field_targets = []
         if mode == "real_estate":
-            # --- Step 5: Recover Missing Comparison Fields ---
-            required_field_targets = get_offer_field_targets(validated_data or {})
-            recovery_targets = get_missing_offer_field_targets(validated_data or {})
-
             current_step += 1
             emit("step", {
                 "step": current_step, "total": total_steps,
                 "title": "Recover Missing Comparison Fields", "status": "running",
             })
 
-            recovered_values = {}
-            if recovery_targets:
-                if use_file:
-                    recovered_values, recovery_usage = await asyncio.to_thread(
-                        engine.recover_missing_fields_from_file, pdf_path, validated_data, recovery_targets,
-                    )
-                else:
-                    recovered_values, recovery_usage = await asyncio.to_thread(
-                        engine.recover_missing_fields, images_b64, validated_data, recovery_targets,
-                    )
-                _add_usage(recovery_usage)
+            recovery_targets: list[dict[str, Any]] = []
+            recovered_paths: list[str] = []
+            if real_estate_route == "offer_projection":
+                required_field_targets = get_offer_field_targets(validated_data or {})
+                recovery_targets = get_missing_offer_field_targets(validated_data or {})
 
-            validated_data, recovered_paths = merge_recovered_offer_fields(validated_data or {}, recovered_values)
-            required_field_targets = get_offer_field_targets(validated_data or {})
+                recovered_values = {}
+                if recovery_targets:
+                    if use_file:
+                        recovered_values, recovery_usage = await asyncio.to_thread(
+                            engine.recover_missing_fields_from_file,
+                            pdf_path,
+                            validated_data,
+                            recovery_targets,
+                        )
+                    else:
+                        recovered_values, recovery_usage = await asyncio.to_thread(
+                            engine.recover_missing_fields,
+                            images_b64,
+                            validated_data,
+                            recovery_targets,
+                        )
+                    _add_usage(recovery_usage)
+
+                validated_data, recovered_paths = merge_recovered_offer_fields(validated_data or {}, recovered_values)
+                required_field_targets = get_offer_field_targets(validated_data or {})
 
             emit("step_complete", {
                 "step": current_step,
@@ -1064,40 +1161,55 @@ async def _extraction_pipeline(
                 "data": {
                     "targeted_fields": len(recovery_targets),
                     "recovered_fields": len(recovered_paths),
+                    "skipped": real_estate_route != "offer_projection",
                 },
             })
 
-        # --- Step 6: Verify Citations ---
+        # --- Verify Citations ---
         current_step += 1
         emit("step", {
             "step": current_step, "total": total_steps,
             "title": "Verify Citations", "status": "running",
         })
 
-        if use_file:
-            citations, verify_usage = await asyncio.to_thread(
-                engine.verify_from_file, pdf_path, validated_data, required_field_targets,
-            )
+        if mode == "real_estate" and real_estate_route != "offer_projection":
+            citations = []
+            overall_confidence = 0.0
         else:
-            citations, verify_usage = await asyncio.to_thread(
-                engine.verify, images_b64, validated_data, required_field_targets,
-            )
-        _add_usage(verify_usage)
-        overall_confidence = compute_overall_confidence(citations)
+            if use_file:
+                citations, verify_usage = await asyncio.to_thread(
+                    engine.verify_from_file,
+                    pdf_path,
+                    validated_data,
+                    required_field_targets,
+                )
+            else:
+                citations, verify_usage = await asyncio.to_thread(
+                    engine.verify,
+                    images_b64,
+                    validated_data,
+                    required_field_targets,
+                )
+            _add_usage(verify_usage)
+            overall_confidence = compute_overall_confidence(citations)
 
         citations_data = [c.model_dump(mode="json") for c in citations]
-
         emit("citations", {
             "citations": citations_data,
             "overall_confidence": overall_confidence,
         })
         emit("step_complete", {
-            "step": current_step, "title": "Verify Citations", "status": "complete",
-            "data": {"citation_count": len(citations), "overall_confidence": overall_confidence},
+            "step": current_step,
+            "title": "Verify Citations",
+            "status": "complete",
+            "data": {
+                "citation_count": len(citations),
+                "overall_confidence": overall_confidence,
+                "skipped": mode == "real_estate" and real_estate_route != "offer_projection",
+            },
         })
 
         # --- Property Enrichment (real_estate, when Regrid configured) ---
-        property_enrichment_data = None
         if mode == "real_estate" and property_prefill.is_configured():
             current_step += 1
             emit("step", {
@@ -1105,19 +1217,22 @@ async def _extraction_pipeline(
                 "title": "Property Enrichment", "status": "running",
             })
 
-            addr = (validated_data or {}).get("property_address", {})
-            enrichment = await property_prefill.enrich_property(addr if isinstance(addr, dict) else {})
+            enrichment = None
+            if real_estate_route == "offer_projection":
+                addr = (validated_data or {}).get("property_address", {})
+                enrichment = await property_prefill.enrich_property(addr if isinstance(addr, dict) else {})
 
-            if enrichment and enrichment.parcel_id:
-                # Auto-populate parcel_tax_id if the extraction didn't capture it
-                if validated_data and isinstance(validated_data.get("property_address"), dict):
-                    if not validated_data["property_address"].get("parcel_tax_id"):
-                        validated_data["property_address"]["parcel_tax_id"] = enrichment.parcel_id
+                if enrichment and enrichment.parcel_id:
+                    if validated_data and isinstance(validated_data.get("property_address"), dict):
+                        if not validated_data["property_address"].get("parcel_tax_id"):
+                            validated_data["property_address"]["parcel_tax_id"] = enrichment.parcel_id
 
-            property_enrichment_data = enrichment
-            log.info("Property enrichment result: match_quality=%s, parcel_id=%s",
-                     enrichment.match_quality if enrichment else "none",
-                     enrichment.parcel_id if enrichment else None)
+                property_enrichment_data = enrichment
+                log.info(
+                    "Property enrichment result: match_quality=%s, parcel_id=%s",
+                    enrichment.match_quality if enrichment else "none",
+                    enrichment.parcel_id if enrichment else None,
+                )
 
             emit("property_enrichment", {
                 "match_quality": enrichment.match_quality if enrichment else "none",
@@ -1129,10 +1244,13 @@ async def _extraction_pipeline(
                 "owner_name": enrichment.owner_name if enrichment else None,
             })
             emit("step_complete", {
-                "step": current_step, "title": "Property Enrichment", "status": "complete",
+                "step": current_step,
+                "title": "Property Enrichment",
+                "status": "complete",
                 "data": {
                     "match_quality": enrichment.match_quality if enrichment else "none",
                     "parcel_id": enrichment.parcel_id if enrichment else None,
+                    "skipped": real_estate_route != "offer_projection",
                 },
             })
 
@@ -1178,7 +1296,8 @@ async def _extraction_pipeline(
 
         dotloop_api_payload = None
         docusign_api_payload = None
-        if mode == "real_estate":
+        normalized_offer_projection = None
+        if mode == "real_estate" and real_estate_route == "offer_projection":
             source = None
             if validated_data:
                 try:
@@ -1196,6 +1315,7 @@ async def _extraction_pipeline(
                     docusign_api_payload = source.to_docusign_api_format()
                 except (AttributeError, ValueError, KeyError) as e:
                     log.warning("DocuSign API format failed: %s", e)
+            normalized_offer_projection = validated_data
 
         # Compute cost: GPT-4o pricing ($2.50/1M input, $10.00/1M output)
         cost_usd = (
@@ -1217,6 +1337,18 @@ async def _extraction_pipeline(
             pii_report=pii_report,
             compliance_report=None,
             property_enrichment=property_enrichment_data,
+            document_type=classification.document_type if classification else None,
+            document_form_id=classification.document_form_id if classification else None,
+            document_title=classification.document_title if classification else None,
+            document_subtitle=classification.document_subtitle if classification else None,
+            document_revision=classification.document_revision if classification else None,
+            document_publisher=classification.document_publisher if classification else None,
+            document_footer_text=classification.document_footer_text if classification else None,
+            classification_source=classification.classification_source if classification else None,
+            classification_confidence=classification.classification_confidence if classification else None,
+            classification_evidence=classification.classification_evidence if classification else [],
+            support_level=classification.support_level if classification else None,
+            normalized_offer_projection=normalized_offer_projection,
             prompt_tokens=total_usage["prompt_tokens"],
             completion_tokens=total_usage["completion_tokens"],
             total_tokens=total_usage["total_tokens"],
@@ -1289,9 +1421,12 @@ async def _extraction_pipeline(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/extractions/cached")
+@limiter.limit("60/minute")
 async def check_cached_extraction(
+    request: Request,
     file_hash: str = Query(...),
     mode: str = Query("real_estate"),
+    user=Depends(get_current_user),
 ):
     """Check if a document with this hash and mode has already been extracted."""
     from db import DocumentRecord
@@ -1443,7 +1578,7 @@ async def extract_batch(request: BatchExtractRequest, user=Depends(get_current_u
 async def create_comparison(
     from_extraction_id: str = Query(..., description="Extraction ID of the base document"),
     to_extraction_id: str = Query(..., description="Extraction ID of the document to compare"),
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Compare two document extractions and return field-level deltas.
 
@@ -1476,19 +1611,44 @@ async def create_comparison(
 @app.get("/api/offers/compare")
 async def compare_offers(
     extraction_ids: str = Query(..., description="Comma-separated extraction IDs"),
-    user=Depends(get_optional_user),
+    transaction_id: str | None = None,
+    user=Depends(get_current_user),
 ):
     """N-way offer comparison. Returns structured field rows for each extraction."""
     ids = [eid.strip() for eid in extraction_ids.split(",") if eid.strip()]
     if not ids:
         raise HTTPException(status_code=400, detail="No extraction IDs provided")
 
+    if transaction_id:
+        workspace = await build_offer_workspace(transaction_id, ids)
+        by_root = {offer["extraction_id"]: offer for offer in workspace["offers"]}
+        offers = []
+        for eid in ids:
+            offer = by_root.get(eid)
+            if not offer:
+                raise HTTPException(status_code=404, detail=f"Offer {eid} not found in transaction")
+            offers.append({
+                "extraction_id": eid,
+                "filename": offer["summary"].get("document_title") or offer["summary"].get("filename") or eid,
+                "fields": offer["fields"],
+                "raw_extras": offer["raw_extras"],
+                "field_citations": offer["field_citations"],
+                "field_citation_meta": offer["field_citation_meta"],
+                "overridden_fields": offer["overridden_fields"],
+            })
+        return {"offers": offers, "field_definitions": FIELD_DEFINITIONS}
+
     offers = []
     for eid in ids:
         ext = await get_extraction(eid)
         if not ext:
             raise HTTPException(status_code=404, detail=f"Extraction {eid} not found")
-        extracted_data = ext.get("extracted_data") or ext.get("result") or {}
+        extracted_data = (
+            ext.get("normalized_offer_projection")
+            or ext.get("extracted_data")
+            or ext.get("result")
+            or {}
+        )
         fields, raw_extras = build_offer_fields(extracted_data)
         # Apply user overrides on top of extracted values
         overrides = ext.get("field_overrides") or {}
@@ -1518,7 +1678,7 @@ class _OfferFieldUpdates(BaseModel):
 async def update_offer_fields(
     extraction_id: str,
     body: _OfferFieldUpdates,
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Persist user-edited field overrides for an offer extraction."""
     from db import DocumentRecord
@@ -1529,6 +1689,9 @@ async def update_offer_fields(
     doc = await DocumentRecord.get(doc_id)
     if not doc or idx >= len(doc.extractions):
         raise HTTPException(status_code=404, detail="Extraction not found")
+
+    if user and doc.user_id and str(doc.user_id) != str(user.id):
+        raise HTTPException(status_code=403, detail="Not authorized to modify this document")
 
     doc.extractions[idx].field_overrides.update(body.updates)
     await doc.save()
@@ -1552,7 +1715,7 @@ async def property_lookup(
     city: str = Query(...),
     state: str = Query(...),
     zip: str = Query("", alias="zip"),
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Manual property/parcel lookup by address via Regrid API."""
     if not property_prefill.is_configured():

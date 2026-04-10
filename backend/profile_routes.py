@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth import get_current_user, AUTH_ENABLED
+from route_helpers import _get_user_or_dev
 from db import UserProfile
 from schemas import (
     AgentProfile,
@@ -50,30 +51,6 @@ class ProfileCompletionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-async def _get_user_or_dev(user) -> UserProfile:
-    """Return the authenticated user, or create/return a dev user when auth is disabled."""
-    if user is not None:
-        return user
-
-    if not AUTH_ENABLED:
-        # Dev mode: use a shared dev user profile
-        dev_user = await UserProfile.find_one(UserProfile.email == "dev@deslabs.local")
-        if not dev_user:
-            dev_user = UserProfile(
-                email="dev@deslabs.local",
-                name="Dev User",
-                has_clerk_account=False,
-            )
-            await dev_user.insert()
-            log.info("Created dev user profile for local development")
-        return dev_user
-
-    raise HTTPException(
-        status_code=401,
-        detail="Authentication required. Set CLERK_SECRET_KEY to enable auth.",
-    )
 
 
 def _compute_completion(user: UserProfile) -> ProfileCompletionResponse:

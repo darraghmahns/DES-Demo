@@ -21,16 +21,18 @@ from typing import Any
 from dotloop_client import DotloopClient, DotloopAPIError
 from db import DocumentRecord, Transaction
 from db_writer import get_extraction, save_document, save_extraction
-from offer_fields import get_offer_field_targets, get_missing_offer_field_targets, merge_recovered_offer_fields
 from ocr_engine import get_engine
-from schemas import DotloopLoopDetails, DotloopSyncStatus, ExtractionResult
-from verifier import compute_overall_confidence
+from pdf_converter import pdf_to_base64_images
+from real_estate_processing import process_real_estate_document
+from schemas import DotloopSyncStatus
 
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# In-memory OAuth token storage (single-user for now)
+# In-memory OAuth token storage (single-user / dev mode only)
+# DEV MODE ONLY — not safe for multi-user production. Disabled when AUTH_ENABLED=True
+# (allow_fallback=False). In production, tokens are scoped to UserProfile.dotloop_tokens.
 # ---------------------------------------------------------------------------
 
 _oauth_tokens: dict[str, Any] = {}
@@ -478,58 +480,23 @@ async def process_from_dotloop(
 
     try:
         engine = get_engine()
-        mode = "real_estate"
-
-        # Extract (engine methods return (result, usage) tuples)
-        if engine.prefers_file_path:
-            raw_extraction, _extract_usage = engine.extract_from_file(tmp_path, mode)
-        else:
-            from pdf_converter import pdf_to_base64_images
-            images_b64 = pdf_to_base64_images(tmp_path)
-            raw_extraction, _extract_usage = engine.extract(images_b64, mode)
-
-        # Validate
-        validated = DotloopLoopDetails.model_validate(raw_extraction)
-        validated_data = validated.model_dump(mode="json")
-        recovery_targets = get_missing_offer_field_targets(validated_data)
-        if recovery_targets:
-            if engine.prefers_file_path:
-                recovered_values, _recovery_usage = engine.recover_missing_fields_from_file(tmp_path, validated_data, recovery_targets)
-            else:
-                recovered_values, _recovery_usage = engine.recover_missing_fields(images_b64, validated_data, recovery_targets)  # type: ignore[possibly-undefined]
-            validated_data, _ = merge_recovered_offer_fields(validated_data, recovered_values)
-
-        # Verify citations
-        required_field_targets = get_offer_field_targets(validated_data)
-        if engine.prefers_file_path:
-            citations, _verify_usage = engine.verify_from_file(tmp_path, validated_data, required_field_targets)
-        else:
-            citations, _verify_usage = engine.verify(images_b64, validated_data, required_field_targets)  # type: ignore[possibly-undefined]
-
-        overall_confidence = compute_overall_confidence(citations)
-
-        # Build result
         from pdf_converter import get_pdf_info
         file_info = get_pdf_info(tmp_path)
-
-        api_model = DotloopLoopDetails.model_validate(validated_data)
-        dotloop_api_payload = api_model.to_dotloop_api_format()
-
-        result = ExtractionResult(
-            mode=mode,
-            source_file=pdf_doc.get("name", "dotloop_document.pdf"),
-            extraction_timestamp=datetime.now(timezone.utc).isoformat(),
-            pages_processed=file_info["pages"],
-            dotloop_data=validated_data,
-            dotloop_api_payload=dotloop_api_payload,
-            citations=citations,
-            overall_confidence=overall_confidence,
+        images_b64 = None if engine.prefers_file_path else pdf_to_base64_images(tmp_path)
+        outcome = process_real_estate_document(
+            engine=engine,
+            pdf_path=tmp_path,
+            filename=pdf_doc.get("name", "dotloop_document.pdf"),
+            images_b64=images_b64,
         )
+        result = outcome.result
+        result.source_file = pdf_doc.get("name", "dotloop_document.pdf")
+        result.pages_processed = file_info["pages"]
 
         # Save to DB
         doc_id = await save_document(
             filename=pdf_doc.get("name", "dotloop_document.pdf"),
-            mode=mode,
+            mode="real_estate",
             page_count=file_info["pages"],
             file_size_bytes=len(pdf_bytes),
             source="dotloop",

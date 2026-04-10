@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel, ValidationError
 
 from auth import AUTH_ENABLED, get_current_user
+from route_helpers import _get_user_or_dev, _normalize_email, _utcnow
 from db import (
     DocumentRecord,
     Transaction,
@@ -34,23 +35,27 @@ from dotloop_connector import (
     is_configured as dotloop_configured,
     resolve_profile_id as resolve_dotloop_profile_id,
 )
-from offer_fields import get_offer_field_targets, get_missing_offer_field_targets, merge_recovered_offer_fields
 from ocr_engine import get_engine
+from offer_threads import (
+    ATTACHABLE_OFFER_DOC_TYPES,
+    ATTACHMENT_ONLY_DOC_TYPES,
+    EXTRACT_AND_MERGE_DOC_TYPES,
+    build_offer_workspace,
+    is_attachable_offer_doc,
+)
 from pdf_converter import get_pdf_info, pdf_to_base64_images
+from real_estate_processing import process_real_estate_document
 from schemas import (
     DEFAULT_PURCHASE_REQUIREMENTS,
     DocumentRequirement,
-    DotloopLoopDetails,
     DotloopPropertyAddress,
     DotloopSyncStatus,
-    ExtractionResult,
     ParticipantRole,
     ParticipantStatus,
     TransactionParticipant,
     TransactionStatus,
     TransactionUploadJobStatus,
 )
-from verifier import compute_overall_confidence
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +135,11 @@ class TransactionUploadStartResponse(BaseModel):
     status: str
 
 
+class AttachOfferExtractionRequest(BaseModel):
+    document_record_id: str
+    offer_extraction_id: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -143,26 +153,6 @@ _SETUP_BUCKET_WEIGHTS = {
     "participant_profiles": 20,
     "required_documents": 25,
 }
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-async def _get_user_or_dev(user) -> UserProfile:
-    if user is not None:
-        return user
-    if not AUTH_ENABLED:
-        dev_user = await UserProfile.find_one({"email": "dev@deslabs.local"})
-        if not dev_user:
-            dev_user = UserProfile(
-                email="dev@deslabs.local",
-                name="Dev User",
-                has_clerk_account=False,
-            )
-            await dev_user.insert()
-        return dev_user
-    raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def _serialize_transaction(txn: Transaction) -> dict:
@@ -364,10 +354,6 @@ def _merge_property_address(
     return DotloopPropertyAddress.model_validate(merged)
 
 
-def _normalize_email(email: str) -> str:
-    return email.strip().lower()
-
-
 def _user_dotloop_tokens(user: UserProfile | None) -> dict | None:
     if not user or not getattr(user, "dotloop_tokens", None):
         return None
@@ -513,11 +499,24 @@ async def _build_setup_progress(txn: Transaction) -> dict[str, Any]:
     active_count = 0
     non_removed_count = 0
 
+    # Batch-fetch all participant profiles in one query to avoid N+1
+    active_participant_ids = [
+        p.user_id for p in txn.participants
+        if p.status != ParticipantStatus.REMOVED
+    ]
+    if active_participant_ids:
+        profile_list = await UserProfile.find(
+            {"_id": {"$in": active_participant_ids}}
+        ).to_list()
+        profile_map = {str(p.id): p for p in profile_list}
+    else:
+        profile_map = {}
+
     for participant in txn.participants:
         if participant.status == ParticipantStatus.REMOVED:
             continue
 
-        p_user = await UserProfile.get(participant.user_id)
+        p_user = profile_map.get(str(participant.user_id))
         profile_completion = 0.0
         if p_user:
             profile_completion = _compute_completion(p_user).overall
@@ -711,24 +710,43 @@ async def _ensure_transaction_document_link(
     filename: str,
     file_hash: str,
     doc_type: str = "dotloop_document",
+    source: str = "dotloop",
+    offer_extraction_id: str | None = None,
+    attachment_role: str | None = None,
 ) -> Optional[TransactionDocument]:
     existing_link = await TransactionDocument.find_one(
         {
             "transaction_id": str(txn.id),
             "document_record_id": str(doc_record.id),
+            "offer_extraction_id": offer_extraction_id,
         }
     )
     if existing_link:
+        updates = False
+        if attachment_role and existing_link.attachment_role != attachment_role:
+            existing_link.attachment_role = attachment_role
+            updates = True
+        if offer_extraction_id and existing_link.offer_extraction_id != offer_extraction_id:
+            existing_link.offer_extraction_id = offer_extraction_id
+            updates = True
+        if offer_extraction_id and not existing_link.attached_at:
+            existing_link.attached_at = _utcnow()
+            updates = True
+        if updates:
+            await existing_link.save()
         return None
 
     link = TransactionDocument(
         transaction_id=str(txn.id),
         doc_type=doc_type,
-        source="dotloop",
+        source=source,
         filename=filename,
         file_path=doc_record.file_path or "",
         file_hash=file_hash,
         document_record_id=str(doc_record.id),
+        offer_extraction_id=offer_extraction_id,
+        attachment_role=attachment_role,
+        attached_at=_utcnow() if offer_extraction_id else None,
         uploaded_by=uploaded_by,
     )
     await link.insert()
@@ -788,46 +806,21 @@ async def _import_dotloop_document(
 
     try:
         engine = get_engine()
-        mode = "real_estate"
-        if engine.prefers_file_path:
-            raw_extraction, _ = engine.extract_from_file(dest_path, mode)
-        else:
-            images_b64 = pdf_to_base64_images(dest_path)
-            raw_extraction, _ = engine.extract(images_b64, mode)
-
-        validated = DotloopLoopDetails.model_validate(raw_extraction)
-        validated_data = validated.model_dump(mode="json")
-        recovery_targets = get_missing_offer_field_targets(validated_data)
-        if recovery_targets:
-            if engine.prefers_file_path:
-                recovered_values, _ = engine.recover_missing_fields_from_file(dest_path, validated_data, recovery_targets)
-            else:
-                recovered_values, _ = engine.recover_missing_fields(images_b64, validated_data, recovery_targets)  # type: ignore[name-defined]
-            validated_data, _ = merge_recovered_offer_fields(validated_data, recovered_values)
-
-        required_field_targets = get_offer_field_targets(validated_data)
-        if engine.prefers_file_path:
-            citations, _ = engine.verify_from_file(dest_path, validated_data, required_field_targets)
-        else:
-            citations, _ = engine.verify(images_b64, validated_data, required_field_targets)  # type: ignore[name-defined]
-
-        overall_confidence = compute_overall_confidence(citations)
         file_info = get_pdf_info(dest_path)
-        api_model = DotloopLoopDetails.model_validate(validated_data)
-        result = ExtractionResult(
-            mode=mode,
-            source_file=safe_name,
-            extraction_timestamp=_utcnow().isoformat(),
-            pages_processed=file_info["pages"],
-            dotloop_data=validated_data,
-            dotloop_api_payload=api_model.to_dotloop_api_format(),
-            citations=citations,
-            overall_confidence=overall_confidence,
+        images_b64 = None if engine.prefers_file_path else pdf_to_base64_images(dest_path)
+        outcome = process_real_estate_document(
+            engine=engine,
+            pdf_path=dest_path,
+            filename=safe_name,
+            images_b64=images_b64,
         )
+        result = outcome.result
+        result.source_file = safe_name
+        result.pages_processed = file_info["pages"]
 
         doc_id = await save_document(
             filename=safe_name,
-            mode=mode,
+            mode="real_estate",
             page_count=file_info["pages"],
             file_size_bytes=len(pdf_bytes),
             source="dotloop",
@@ -863,6 +856,56 @@ async def _import_dotloop_document(
         if os.path.exists(dest_path):
             os.unlink(dest_path)
         raise
+
+
+async def _apply_post_extraction_attachment_state(
+    txn: Transaction,
+    *,
+    upload_job: TransactionUploadJob,
+    extraction_id: str,
+) -> None:
+    doc_id = extraction_id.split(":")[0] if ":" in extraction_id else extraction_id
+    doc_record = await DocumentRecord.get(doc_id)
+    if not doc_record:
+        raise RuntimeError("Extraction not found for upload job")
+
+    latest = doc_record.extractions[-1] if doc_record.extractions else None
+    document_type = latest.document_type if latest else None
+    document_title = latest.document_title if latest else None
+    support_level = latest.support_level if latest else None
+
+    upload_job.document_type = document_type
+    upload_job.document_title = document_title
+    upload_job.support_level = support_level
+    upload_job.extraction_id = extraction_id
+    upload_job.attachment_candidates = []
+
+    if upload_job.offer_extraction_id and document_type in ATTACHABLE_OFFER_DOC_TYPES:
+        await _ensure_transaction_document_link(
+            txn,
+            doc_record=doc_record,
+            uploaded_by=upload_job.uploaded_by,
+            filename=doc_record.filename,
+            file_hash=doc_record.file_hash or upload_job.file_hash,
+            doc_type=upload_job.requested_doc_type or (document_type or "offer_document").lower(),
+            source=doc_record.source,
+            offer_extraction_id=upload_job.offer_extraction_id,
+            attachment_role="extracted_offer_doc",
+        )
+        upload_job.attachment_state = "attached"
+    elif document_type == "PURCHASE_OFFER":
+        upload_job.attachment_state = "none"
+    elif document_type in ATTACHABLE_OFFER_DOC_TYPES:
+        workspace = await build_offer_workspace(str(txn.id), txn.extraction_ids)
+        upload_job.attachment_candidates = [
+            item["extraction_id"] for item in workspace["attachment_candidates"]
+        ]
+        upload_job.attachment_state = "required" if upload_job.attachment_candidates else "none"
+    else:
+        upload_job.attachment_state = "none"
+
+    upload_job.updated_at = _utcnow()
+    await upload_job.save()
 
 
 # ---------------------------------------------------------------------------
@@ -1493,6 +1536,8 @@ async def list_transaction_documents(
 async def upload_and_extract_transaction_document(
     txn_id: str,
     file: UploadFile = File(...),
+    offer_extraction_id: Optional[str] = Form(None),
+    doc_type: Optional[str] = Form(None),
     user=Depends(get_current_user),
 ):
     """Upload a transaction document and launch a background extraction job."""
@@ -1522,6 +1567,8 @@ async def upload_and_extract_transaction_document(
         progress_message="Upload accepted. Waiting for extraction.",
         steps=[TransactionUploadStep(key="upload", title="Upload document", status="complete")],
         auto_link=True,
+        offer_extraction_id=offer_extraction_id,
+        requested_doc_type=doc_type,
     )
     await upload_job.insert()
 
@@ -1537,6 +1584,8 @@ async def upload_and_extract_transaction_document(
             "display_filename": original_filename,
             "file_path": dest_path,
             "auto_link": True,
+            "offer_extraction_id": offer_extraction_id,
+            "requested_doc_type": doc_type,
         },
     )
     upload_job.task_id = task.task_id
@@ -1575,6 +1624,8 @@ async def link_document_to_transaction(
         file_hash=user_doc.file_hash,
         uploaded_by=str(u.id),
         offer_extraction_id=req.offer_extraction_id,
+        attachment_role="supporting" if req.offer_extraction_id else None,
+        attached_at=_utcnow() if req.offer_extraction_id else None,
     )
     await txn_doc.insert()
 
@@ -1605,6 +1656,8 @@ async def upload_offer_document(
     user=Depends(get_current_user),
 ):
     """Upload a supporting document scoped to a specific offer (no OCR extraction)."""
+    if doc_type in EXTRACT_AND_MERGE_DOC_TYPES:
+        raise HTTPException(status_code=400, detail="This document type must be uploaded with extraction")
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
@@ -1628,6 +1681,8 @@ async def upload_offer_document(
         file_hash=file_hash,
         uploaded_by=str(u.id),
         offer_extraction_id=offer_extraction_id,
+        attachment_role="supporting" if offer_extraction_id else None,
+        attached_at=_utcnow() if offer_extraction_id else None,
     )
     await txn_doc.insert()
     return {"_id": str(txn_doc.id), **txn_doc.model_dump(mode="json")}
@@ -1650,11 +1705,23 @@ async def auto_fill_transaction(
     filled_fields = []
     from profile_routes import _compute_completion
 
+    # Batch-fetch all participant profiles in one query to avoid N+1
+    active_ids = [
+        p.user_id for p in txn.participants
+        if p.status != ParticipantStatus.REMOVED
+    ]
+    auto_fill_profile_map: dict[str, Any] = {}
+    if active_ids:
+        auto_fill_profiles = await UserProfile.find(
+            {"_id": {"$in": active_ids}}
+        ).to_list()
+        auto_fill_profile_map = {str(p.id): p for p in auto_fill_profiles}
+
     for participant in txn.participants:
         if participant.status == ParticipantStatus.REMOVED:
             continue
 
-        p_user = await UserProfile.get(participant.user_id)
+        p_user = auto_fill_profile_map.get(str(participant.user_id))
         if not p_user:
             continue
 
@@ -1725,6 +1792,17 @@ async def unlink_extraction(
     if extraction_id in txn.extraction_ids:
         txn.extraction_ids.remove(extraction_id)
         await txn.save()
+    attached_docs = await TransactionDocument.find(
+        {
+            "transaction_id": str(txn.id),
+            "offer_extraction_id": extraction_id,
+        }
+    ).to_list()
+    for doc in attached_docs:
+        doc.offer_extraction_id = None
+        doc.attachment_role = None
+        doc.attached_at = None
+        await doc.save()
     return _serialize_transaction(txn)
 
 
@@ -1755,7 +1833,93 @@ async def list_transaction_extractions(
                 "overall_confidence": latest.overall_confidence if latest else 0.0,
                 "pages_processed": latest.pages_processed if latest else doc_record.page_count,
                 "created_at": latest.created_at.isoformat() if latest and latest.created_at else None,
+                "document_type": latest.document_type if latest else None,
+                "document_form_id": latest.document_form_id if latest else None,
+                "document_title": latest.document_title if latest else None,
+                "document_revision": latest.document_revision if latest else None,
+                "support_level": latest.support_level if latest else None,
             }
         )
 
     return {"extractions": summaries}
+
+
+@router.get("/{txn_id}/offer-workspace")
+async def get_transaction_offer_workspace(
+    txn_id: str,
+    user=Depends(get_current_user),
+):
+    """Seller offer workspace: root offers, loose extracted docs, and loose supporting docs."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+    workspace = await build_offer_workspace(str(txn.id), txn.extraction_ids)
+    return {
+        "offers": workspace["offers"],
+        "loose_extractions": workspace["loose_extractions"],
+        "loose_documents": workspace["loose_documents"],
+        "root_offer_ids": workspace["root_offer_ids"],
+        "attachment_candidates": workspace["attachment_candidates"],
+    }
+
+
+@router.post("/{txn_id}/offer-attachments")
+async def attach_extracted_document_to_offer(
+    txn_id: str,
+    body: AttachOfferExtractionRequest,
+    user=Depends(get_current_user),
+):
+    """Attach an existing loose extracted doc to a root offer thread."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    doc_record = await DocumentRecord.get(body.document_record_id)
+    if not doc_record:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    if str(doc_record.id) not in txn.extraction_ids:
+        raise HTTPException(status_code=400, detail="Extraction is not linked to this transaction")
+    if not is_attachable_offer_doc(doc_record):
+        raise HTTPException(status_code=400, detail="This document type cannot attach to an offer")
+
+    workspace = await build_offer_workspace(str(txn.id), txn.extraction_ids)
+    if body.offer_extraction_id not in set(workspace["root_offer_ids"]):
+        raise HTTPException(status_code=400, detail="Offer target not found")
+
+    latest = doc_record.extractions[-1] if doc_record.extractions else None
+    await _ensure_transaction_document_link(
+        txn,
+        doc_record=doc_record,
+        uploaded_by=str(u.id),
+        filename=doc_record.filename,
+        file_hash=doc_record.file_hash or "",
+        doc_type=((latest.document_type or "offer_document").lower() if latest else "offer_document"),
+        source=doc_record.source,
+        offer_extraction_id=body.offer_extraction_id,
+        attachment_role="extracted_offer_doc",
+    )
+    return {"attached": True}
+
+
+@router.delete("/{txn_id}/offer-attachments/{document_record_id}")
+async def detach_extracted_document_from_offer(
+    txn_id: str,
+    document_record_id: str,
+    user=Depends(get_current_user),
+):
+    """Detach an extracted offer doc from its parent offer thread."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    link = await TransactionDocument.find_one(
+        {
+            "transaction_id": str(txn.id),
+            "document_record_id": document_record_id,
+            "attachment_role": "extracted_offer_doc",
+        }
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Offer attachment not found")
+    link.offer_extraction_id = None
+    link.attachment_role = None
+    link.attached_at = None
+    await link.save()
+    return {"detached": True}

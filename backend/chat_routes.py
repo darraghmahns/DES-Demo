@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 from auth import get_current_user, AUTH_ENABLED
+from route_helpers import _get_user_or_dev
 from db import UserProfile
 from schemas import (
     AgentProfile,
@@ -69,22 +70,6 @@ class ChatMessageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-async def _get_user_or_dev(user) -> UserProfile:
-    if user is not None:
-        return user
-    if not AUTH_ENABLED:
-        dev_user = await UserProfile.find_one(UserProfile.email == "dev@deslabs.local")
-        if not dev_user:
-            dev_user = UserProfile(
-                email="dev@deslabs.local",
-                name="Dev User",
-                has_clerk_account=False,
-            )
-            await dev_user.insert()
-        return dev_user
-    raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def _build_system_prompt(user: UserProfile, completion: dict) -> str:
