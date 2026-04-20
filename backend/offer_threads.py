@@ -43,6 +43,19 @@ def _latest_extraction_ref(doc_record: DocumentRecord) -> str | None:
 
 def _summary_from_extraction(doc_record: DocumentRecord) -> dict[str, Any]:
     latest = _latest_extraction(doc_record)
+    buyer_name: str | None = None
+    if latest:
+        projection = (
+            latest.normalized_offer_projection
+            or latest.extracted_data
+            or {}
+        )
+        fields, _extras = build_offer_fields(projection)
+        overrides = latest.field_overrides or {}
+        raw_buyer = overrides.get("buyer_name") if "buyer_name" in overrides else fields.get("buyer_name")
+        if raw_buyer is not None:
+            text = str(raw_buyer).strip()
+            buyer_name = text or None
     return {
         "id": str(doc_record.id),
         "filename": doc_record.filename,
@@ -55,6 +68,7 @@ def _summary_from_extraction(doc_record: DocumentRecord) -> dict[str, Any]:
         "document_title": latest.document_title if latest else None,
         "document_revision": latest.document_revision if latest else None,
         "support_level": latest.support_level if latest else None,
+        "buyer_name": buyer_name,
     }
 
 

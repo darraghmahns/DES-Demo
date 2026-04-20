@@ -566,6 +566,44 @@ export async function fetchTransactionExtractions(
   return data.extractions;
 }
 
+// ---------------------------------------------------------------------------
+// Offer summary
+// ---------------------------------------------------------------------------
+
+export interface OfferSummaryResponse {
+  status: 'generating' | 'ready' | 'error' | null;
+  summary: string | null;
+  generated_at: string | null;
+  error?: string | null;
+}
+
+function extractionIdsQuery(extractionIds: string[]): string {
+  const params = new URLSearchParams();
+  for (const id of extractionIds) params.append('extraction_ids', id);
+  return params.toString();
+}
+
+export async function getOfferSummary(
+  txnId: string,
+  extractionIds: string[],
+): Promise<OfferSummaryResponse> {
+  return apiFetch<OfferSummaryResponse>(
+    `/api/transactions/${txnId}/offer-summary?${extractionIdsQuery(extractionIds)}`,
+  );
+}
+
+export async function generateOfferSummary(
+  txnId: string,
+  extractionIds: string[],
+  force: boolean = false,
+): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/api/transactions/${txnId}/offer-summary/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ extraction_ids: extractionIds, force }),
+  });
+}
+
 export async function submitProfileViaMagicLink(
   token: string,
   data: { name?: string; phone?: string; address?: Record<string, string> },

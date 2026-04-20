@@ -916,6 +916,16 @@ async def _run_extraction_task(task, mode: str, pdf_path: str, user_id: str | No
                 extraction_id=extraction_id,
                 error_message=None,
             )
+            if extraction_id and transaction_id:
+                txn_for_summary = await Transaction.get(transaction_id)
+                if txn_for_summary and len(txn_for_summary.extraction_ids) >= 2:
+                    from transaction_routes import _generate_and_store_offer_summary
+                    asyncio.create_task(
+                        _generate_and_store_offer_summary(
+                            transaction_id,
+                            list(txn_for_summary.extraction_ids),
+                        )
+                    )
 
     cleanup_old_tasks()
 

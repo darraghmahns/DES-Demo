@@ -77,11 +77,6 @@ function stepIcon(status: StepStatus): string {
   }
 }
 
-function confLevel(c: number): string {
-  if (c >= 0.85) return 'high';
-  if (c >= 0.65) return 'medium';
-  return 'low';
-}
 
 // Job key for parallel extraction tracking
 function jk(filename: string): string {
@@ -141,7 +136,6 @@ export function ExtractionPage() {
   const [extractedData, setExtractedData] = useState<Record<string, unknown> | null>(null);
   const [validationSuccess, setValidationSuccess] = useState<boolean | null>(null);
   const [, setValidationErrors] = useState<string[]>([]);
-  const [, setOverallConfidence] = useState<number | null>(null);
   const [finalResult, setFinalResult] = useState<ExtractionResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [extractionId, setExtractionId] = useState<string | null>(null);
@@ -189,7 +183,7 @@ export function ExtractionPage() {
     setExtractedData(null);
     setValidationSuccess(null);
     setValidationErrors([]);
-    setOverallConfidence(null);
+
     setPropertyEnrichment(null);
     setFinalResult(null);
     setErrorMessage(null);
@@ -239,7 +233,6 @@ export function ExtractionPage() {
           setValidationErrors(event.data.errors);
           break;
         case 'citations':
-          setOverallConfidence(event.data.overall_confidence);
           break;
         case 'property_enrichment':
           setPropertyEnrichment(event.data as PropertyEnrichmentEvent);
@@ -1060,9 +1053,6 @@ export function ExtractionPage() {
                 )}
                 {finalResult && (
                   <div className="extraction-confidence-row">
-                    <span className={`conf-badge ${confLevel(finalResult.overall_confidence)}`}>
-                      {(finalResult.overall_confidence * 100).toFixed(0)}% confidence
-                    </span>
                     <span className="extraction-pages">
                       {finalResult.pages_processed} page{finalResult.pages_processed !== 1 ? 's' : ''}
                     </span>

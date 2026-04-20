@@ -2607,6 +2607,159 @@ body {
   padding: 24px;
 }
 
+/* ---------------------------------------------------------------------------
+   AI Offer Summary — themed card with subtle rainbow border animations
+   --------------------------------------------------------------------------- */
+
+@keyframes rainbow-sweep {
+  0%   { background-position: 100% center; }
+  100% { background-position: -100% center; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes fade-in {
+  to { opacity: 1; }
+}
+
+/* Outer wrapper carries the rainbow gradient as a 4px top "border" */
+.offer-summary-wrapper {
+  border-radius: var(--radius);
+  padding-top: 4px;
+  margin-bottom: 1.5rem;
+  background: linear-gradient(90deg,
+    #a04040, #a06030, #8a8030, #3a7a40, #2a5a80, #5a3a80, #a04040
+  );
+  background-size: 200% 100%;
+}
+
+.offer-summary-wrapper--error {
+  background: var(--red);
+  animation: none;
+}
+
+.rainbow-fast {
+  animation: rainbow-sweep 1.5s linear infinite;
+}
+
+.rainbow-slow {
+  animation: rainbow-sweep 5s linear infinite;
+}
+
+/* Inner card — do NOT add top border-radius here; wrapper handles rounded top corners */
+.offer-summary-card {
+  background: var(--bg-card);
+  border-radius: 0 0 var(--radius) var(--radius);
+  border: 1px solid var(--border);
+  border-top: none;
+  padding: 1.25rem 1.5rem;
+}
+
+.offer-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.offer-summary-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.offer-summary-refresh {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.offer-summary-refresh:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.offer-summary-refresh:disabled {
+  cursor: default;
+}
+
+.offer-summary-refresh--spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+.offer-summary-loading {
+  padding: 0.25rem 0;
+}
+
+.offer-summary-loading-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.offer-summary-shimmer-bar {
+  height: 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  background: linear-gradient(90deg,
+    var(--bg-card-hover),
+    #a04040, #a06030, #8a8030, #3a7a40, #2a5a80, #5a3a80,
+    var(--bg-card-hover)
+  );
+  background-size: 200% 100%;
+  animation: rainbow-sweep 1.5s linear infinite;
+  width: 100%;
+}
+
+.offer-summary-content {
+  opacity: 0;
+  animation: fade-in 0.4s ease forwards;
+}
+
+.offer-summary-text {
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  margin: 0 0 0.5rem;
+}
+
+.offer-summary-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.offer-summary-error {
+  font-size: 0.875rem;
+  color: var(--red);
+  margin: 0;
+}
+
+[data-theme="light"] .offer-summary-wrapper:not(.offer-summary-wrapper--error) {
+  background: linear-gradient(90deg,
+    #ffb3b3, #ffd4a8, #fff3b3, #b8f0cc, #b3d9ff, #d4b3ff, #ffb3b3
+  );
+}
+
+[data-theme="light"] .offer-summary-shimmer-bar {
+  background: linear-gradient(90deg,
+    #f0f3f6,
+    #ffb3b3, #ffd4a8, #fff3b3, #b8f0cc, #b3d9ff, #d4b3ff,
+    #f0f3f6
+  );
+  background-size: 200% 100%;
+}
+
 .comparison-selector {
   margin-bottom: 24px;
 }

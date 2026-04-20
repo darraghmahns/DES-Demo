@@ -5,7 +5,8 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Group } from '@mantine/core';
 import { fetchExtractions, fetchOffersComparison, deleteExtraction, updateOfferFields } from '../api';
 import type { ExtractionSummary, OffersComparisonResult, OfferField, VerificationCitation } from '../api';
-import { fetchOfferWorkspace, listTransactions } from '../api/transactions';
+import { fetchOfferWorkspace, listTransactions, getOfferSummary, generateOfferSummary } from '../api/transactions';
+import type { OfferSummaryResponse } from '../api/transactions';
 import type { Transaction } from '../types/transaction';
 import { ComparisonCellCitation } from '../components/offers/ComparisonCellCitation';
 
@@ -77,7 +78,7 @@ type ComparisonExtractionOption = Pick<
   | 'document_title'
   | 'document_type'
   | 'document_revision'
->;
+> & { buyer_name?: string | null };
 
 function parseFieldValue(raw: string, type: OfferField['type']): FieldValue {
   if (raw === '') return null;
@@ -398,6 +399,52 @@ export function OfferComparison() {
   const [filterTxnId, setFilterTxnId] = useState<string>('');
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
 
+  const [summary, setSummary] = useState<OfferSummaryResponse | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [comparedIds, setComparedIds] = useState<string[] | null>(null);
+  const summaryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopSummaryPoll = useCallback(() => {
+    if (summaryPollRef.current) {
+      clearInterval(summaryPollRef.current);
+      summaryPollRef.current = null;
+    }
+  }, []);
+
+  const pollSummary = useCallback(async (txnId: string, ids: string[]) => {
+    try {
+      const data = await getOfferSummary(txnId, ids);
+      setSummary(data);
+      if (data.status !== 'generating') {
+        stopSummaryPoll();
+      }
+    } catch {
+      setSummaryError('Could not load offer summary');
+      stopSummaryPoll();
+    }
+  }, [stopSummaryPoll]);
+
+  const startSummaryPoll = useCallback((txnId: string, ids: string[]) => {
+    stopSummaryPoll();
+    summaryPollRef.current = setInterval(() => {
+      pollSummary(txnId, ids);
+    }, 4000);
+  }, [pollSummary, stopSummaryPoll]);
+
+  useEffect(() => stopSummaryPoll, [stopSummaryPoll]);
+
+  const handleRefreshSummary = useCallback(async () => {
+    if (!preloadTxnId || !comparedIds || comparedIds.length < 2) return;
+    setSummary({ status: 'generating', summary: null, generated_at: null });
+    setSummaryError(null);
+    try {
+      await generateOfferSummary(preloadTxnId, comparedIds, true);
+      startSummaryPoll(preloadTxnId, comparedIds);
+    } catch {
+      setSummary({ status: 'error', summary: null, generated_at: null });
+    }
+  }, [preloadTxnId, comparedIds, startSummaryPoll]);
+
   const handleFieldSave = useCallback(async (
     extractionId: string,
     key: string,
@@ -432,6 +479,7 @@ export function OfferComparison() {
             document_title: offer.summary.document_title,
             document_type: offer.summary.document_type,
             document_revision: offer.summary.document_revision,
+            buyer_name: offer.summary.buyer_name,
           })),
         )
       : fetchExtractions('real_estate').then((items) =>
@@ -497,6 +545,9 @@ export function OfferComparison() {
       return next;
     });
     setResult(null);
+    setComparedIds(null);
+    setSummary(null);
+    stopSummaryPoll();
   }
 
   function toggleAll() {
@@ -511,6 +562,9 @@ export function OfferComparison() {
       setSelectedIds(prev => new Set([...prev, ...visibleExtractions.map(e => e.id)]));
     }
     setResult(null);
+    setComparedIds(null);
+    setSummary(null);
+    stopSummaryPoll();
   }
 
   async function handleDelete(ext: ComparisonExtractionOption) {
@@ -536,11 +590,36 @@ export function OfferComparison() {
 
   async function handleCompare() {
     if (selectedIds.size < 1) return;
-      setLoading(true);
-      setError(null);
-      try {
-      const data = await fetchOffersComparison(Array.from(selectedIds), preloadTxnId ?? undefined);
+    const ids = Array.from(selectedIds).sort();
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchOffersComparison(ids, preloadTxnId ?? undefined);
       setResult(data);
+      setComparedIds(ids);
+
+      if (preloadTxnId && ids.length >= 2) {
+        setSummaryError(null);
+        stopSummaryPoll();
+        try {
+          const existing = await getOfferSummary(preloadTxnId, ids);
+          if (existing.status === 'ready' || existing.status === 'error') {
+            setSummary(existing);
+          } else if (existing.status === 'generating') {
+            setSummary(existing);
+            startSummaryPoll(preloadTxnId, ids);
+          } else {
+            setSummary({ status: 'generating', summary: null, generated_at: null });
+            await generateOfferSummary(preloadTxnId, ids);
+            startSummaryPoll(preloadTxnId, ids);
+          }
+        } catch {
+          setSummaryError('Could not load offer summary');
+        }
+      } else {
+        setSummary(null);
+        stopSummaryPoll();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Comparison failed');
     } finally {
@@ -610,7 +689,7 @@ export function OfferComparison() {
           <div className="comparison-card-list">
             {visibleExtractions.map((ext) => {
               const linkedTxn = txnByDocId.get(ext.document_id);
-              const displayTitle = ext.document_title || ext.filename;
+              const displayTitle = (ext.buyer_name && ext.buyer_name.trim()) || ext.document_title || ext.filename;
               const displayType = ext.document_type ? ext.document_type.replace(/_/g, ' ') : null;
               return (
                 <div
@@ -629,9 +708,6 @@ export function OfferComparison() {
                         {ext.pages_processed}p -{' '}
                         {displayType ? `${displayType} - ` : ''}
                         {ext.document_revision ? `${ext.document_revision} - ` : ''}
-                        <span className={`conf-badge-inline ${ext.overall_confidence >= 0.85 ? 'high' : ext.overall_confidence >= 0.65 ? 'medium' : 'low'}`}>
-                          {Math.round(ext.overall_confidence * 100)}%
-                        </span>
                         {ext.created_at && (
                           <> - {formatDate(ext.created_at)}</>
                         )}
@@ -668,6 +744,60 @@ export function OfferComparison() {
               : `Compare ${selectedIds.size > 0 ? `(${selectedIds.size})` : ''} Offers`}
         </button>
       </section>
+
+      {/* AI Offer Summary — only shown after Compare is clicked for a transaction with ≥2 offers */}
+      {preloadTxnId && comparedIds && comparedIds.length >= 2 && (summary || summaryError) && (
+        <div className={`offer-summary-wrapper ${summary?.status === 'error' ? 'offer-summary-wrapper--error' : summary?.status === 'generating' ? 'rainbow-fast' : 'rainbow-slow'}`}>
+          <section className="offer-summary-card">
+            <div className="offer-summary-header">
+              <h2 className="offer-summary-title">AI Offer Summary</h2>
+              <button
+                className={`offer-summary-refresh${summary?.status === 'generating' ? ' offer-summary-refresh--spinning' : ''}`}
+                onClick={handleRefreshSummary}
+                disabled={summary?.status === 'generating'}
+                title="Regenerate summary"
+                aria-label="Regenerate AI summary"
+              >
+                ↻
+              </button>
+            </div>
+
+            {summaryError && (
+              <p className="offer-summary-error">{summaryError}</p>
+            )}
+
+            {summary?.status === 'generating' && (
+              <div className="offer-summary-loading">
+                <p className="offer-summary-loading-label">
+                  Analyzing offers&hellip; This takes about 15 seconds.
+                </p>
+                <div className="offer-summary-shimmer-bar" />
+                <div className="offer-summary-shimmer-bar" style={{ width: '90%' }} />
+                <div className="offer-summary-shimmer-bar" style={{ width: '95%' }} />
+                <div className="offer-summary-shimmer-bar" style={{ width: '80%' }} />
+                <div className="offer-summary-shimmer-bar" style={{ width: '70%' }} />
+              </div>
+            )}
+
+            {summary?.status === 'ready' && summary.summary && (
+              <div className="offer-summary-content" key={summary.generated_at ?? 'summary'}>
+                <p className="offer-summary-text">{summary.summary}</p>
+                {summary.generated_at && (
+                  <p className="offer-summary-meta">
+                    Generated {new Date(summary.generated_at).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {summary?.status === 'error' && (
+              <p className="offer-summary-error">
+                Summary generation failed. Click ↻ to retry.
+              </p>
+            )}
+          </section>
+        </div>
+      )}
 
       {/* Comparison table */}
       {result && (

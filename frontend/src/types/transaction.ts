@@ -149,6 +149,7 @@ export interface OfferWorkspaceSummary {
   document_title?: string | null;
   document_revision?: string | null;
   support_level?: string | null;
+  buyer_name?: string | null;
 }
 
 export interface OfferWorkspaceDocument {

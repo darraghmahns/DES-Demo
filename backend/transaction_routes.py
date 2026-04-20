@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from openai import OpenAI
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ValidationError
 
@@ -20,6 +22,7 @@ from auth import AUTH_ENABLED, get_current_user
 from route_helpers import _get_user_or_dev, _normalize_email, _utcnow
 from db import (
     DocumentRecord,
+    OfferSummaryEntry,
     Transaction,
     TransactionDocument,
     TransactionUploadJob,
@@ -316,6 +319,139 @@ async def _link_extraction_to_transaction_record(txn_id: str, extraction_id: str
         txn.updated_at = _utcnow()
         await txn.save()
     return txn
+
+
+_OFFER_SUMMARY_SYSTEM_PROMPT = (
+    "You are a real estate advisor summarizing competing purchase offers for a listing agent. "
+    "Evaluate offers in this priority order: "
+    "1. Deal certainty: financing type (cash > conventional > FHA/VA), whether the financing contingency is waived, "
+    "and whether the appraisal and inspection contingencies are waived. "
+    "2. Buyer commitment: earnest money amount relative to purchase price. "
+    "3. Timeline: closing date fit and flexibility for the seller. "
+    "4. Escalation clause ceiling if present. "
+    "5. Seller concessions and repair requests. "
+    "6. Purchase price in the context of all the above. "
+    "Write exactly 3-4 sentences of plain-English analysis that: "
+    "leads with the strongest offer and the primary reason it stands out; "
+    "flags the single biggest risk or weakness across all competing offers; "
+    "and closes with a clear recommendation. "
+    "Be direct and concise. No bullet points, no markdown, no more than 4 sentences total."
+)
+
+
+def _combo_key(extraction_ids: list[str]) -> str:
+    """Deterministic cache key for a combination of offers (order-independent)."""
+    return ":".join(sorted(extraction_ids))
+
+
+async def _build_offer_fields_for_summary(extraction_ids: list[str]) -> list[dict]:
+    """Return [{filename, fields}] for each offer extraction.
+
+    Accepts either bare doc IDs or composite "doc_id:idx" refs.
+    """
+    from offer_fields import build_offer_fields
+
+    offers = []
+    for extraction_ref in extraction_ids:
+        doc_id = extraction_ref.split(":")[0] if ":" in extraction_ref else extraction_ref
+        try:
+            doc = await DocumentRecord.get(doc_id)
+        except Exception:
+            continue
+        if not doc or not doc.extractions:
+            continue
+        latest = doc.extractions[-1]
+        fields, _extras = build_offer_fields(latest.extracted_data or {})
+        fields = dict(fields)
+        for k, v in (latest.field_overrides or {}).items():
+            fields[k] = v
+        buyer_name = fields.get("buyer_name")
+        label = str(buyer_name).strip() if buyer_name else ""
+        offers.append({
+            "offer_from": label or doc.filename,
+            "filename": doc.filename,
+            "fields": fields,
+        })
+    return offers
+
+
+def _call_openai_for_summary(offers_json: str) -> str:
+    """Synchronous OpenAI call — run via run_in_executor to avoid blocking the event loop."""
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": _OFFER_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Here are the offers to compare:\n\n{offers_json}"},
+        ],
+        temperature=0.3,
+        max_tokens=300,
+        timeout=60.0,
+    )
+    return response.choices[0].message.content or ""
+
+
+async def _generate_and_store_offer_summary(
+    txn_id: str,
+    extraction_ids: list[str],
+    force: bool = False,
+) -> None:
+    """Generate an AI summary for a specific combination of offers and persist it.
+
+    The summary is cached under ``transaction.offer_summaries[key]`` where
+    ``key`` is the sorted-joined combination of ``extraction_ids``.
+    """
+    if len(extraction_ids) < 2:
+        return
+
+    key = _combo_key(extraction_ids)
+    txn = await Transaction.get(txn_id)
+    if not txn:
+        return
+
+    existing = txn.offer_summaries.get(key)
+    if existing and existing.status in ("ready", "generating") and not force:
+        return
+
+    txn.offer_summaries[key] = OfferSummaryEntry(status="generating")
+    txn.updated_at = _utcnow()
+    await txn.save()
+
+    try:
+        offers = await _build_offer_fields_for_summary(extraction_ids)
+        if len(offers) < 2:
+            log.warning("offer summary: only %d docs had extractions for txn %s combo %s", len(offers), txn_id, key)
+            txn = await Transaction.get(txn_id)
+            if txn:
+                txn.offer_summaries.pop(key, None)
+                txn.updated_at = _utcnow()
+                await txn.save()
+            return
+
+        offers_json = json.dumps(offers, default=str, indent=2)
+        loop = asyncio.get_event_loop()
+        summary_text = await loop.run_in_executor(None, _call_openai_for_summary, offers_json)
+
+        txn = await Transaction.get(txn_id)
+        if txn:
+            txn.offer_summaries[key] = OfferSummaryEntry(
+                status="ready",
+                summary=summary_text,
+                generated_at=_utcnow(),
+            )
+            txn.updated_at = _utcnow()
+            await txn.save()
+            log.info("offer summary generated for txn %s combo %s (%d offers)", txn_id, key, len(offers))
+    except Exception as exc:
+        log.exception("offer summary failed for txn %s combo %s: %s", txn_id, key, exc)
+        txn = await Transaction.get(txn_id)
+        if txn:
+            txn.offer_summaries[key] = OfferSummaryEntry(
+                status="error",
+                error=str(exc),
+            )
+            txn.updated_at = _utcnow()
+            await txn.save()
 
 
 def _apply_dotloop_link_state(txn: Transaction, loop_id: str | None) -> None:
@@ -1804,6 +1940,55 @@ async def unlink_extraction(
         doc.attached_at = None
         await doc.save()
     return _serialize_transaction(txn)
+
+
+@router.get("/{txn_id}/offer-summary")
+async def get_offer_summary(
+    txn_id: str,
+    extraction_ids: list[str] = Query(..., description="Offer extraction IDs in the combination"),
+    user=Depends(get_current_user),
+):
+    """Return the cached AI summary for a specific combination of offers."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    if len(extraction_ids) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 offers")
+
+    key = _combo_key(extraction_ids)
+    entry = txn.offer_summaries.get(key)
+    if not entry:
+        return {"status": None, "summary": None, "generated_at": None, "error": None}
+    return {
+        "status": entry.status,
+        "summary": entry.summary,
+        "generated_at": entry.generated_at.isoformat() if entry.generated_at else None,
+        "error": entry.error,
+    }
+
+
+class _OfferSummaryGenerateRequest(BaseModel):
+    extraction_ids: list[str]
+    force: bool = False
+
+
+@router.post("/{txn_id}/offer-summary/generate")
+async def trigger_offer_summary(
+    txn_id: str,
+    body: _OfferSummaryGenerateRequest,
+    user=Depends(get_current_user),
+):
+    """Kick off AI summary generation for a specific combination of offers."""
+    u = await _get_user_or_dev(user)
+    txn = await _get_transaction_for_user(txn_id, u)
+
+    if len(body.extraction_ids) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 offers to generate a summary")
+
+    asyncio.create_task(
+        _generate_and_store_offer_summary(str(txn.id), body.extraction_ids, body.force)
+    )
+    return {"status": "generating"}
 
 
 @router.get("/{txn_id}/extractions")

@@ -49,9 +49,6 @@ export function OfferRequirementsModal({
   if (!offer) return null;
 
   const fields = offer.fields as Record<string, string | number | boolean | null>;
-  const conf = typeof fields['overall_confidence'] === 'number'
-    ? fields['overall_confidence'] as number
-    : null;
 
   const requirements = evaluateOfferRequirements(fields, txnDocs, offer.extraction_id);
 
@@ -128,18 +125,6 @@ export function OfferRequirementsModal({
             <Text size="xs" c="dimmed">Closing Date</Text>
             <Text size="sm" fw={500}>{String(fields['closing_date'] ?? '--')}</Text>
           </div>
-          {conf !== null && (
-            <div>
-              <Text size="xs" c="dimmed">Confidence</Text>
-              <Badge
-                variant="light"
-                color={conf >= 0.85 ? 'green' : conf >= 0.65 ? 'yellow' : 'red'}
-                size="sm"
-              >
-                {(conf * 100).toFixed(0)}%
-              </Badge>
-            </div>
-          )}
         </Group>
 
         <Divider />

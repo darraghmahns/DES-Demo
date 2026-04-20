@@ -1903,7 +1903,8 @@ function OffersTab({
           const offerFields = offersData?.offers.find(o => o.extraction_id === thread.extraction_id)?.fields ?? {};
           const reqs = evaluateOfferRequirements(offerFields, txnDocs, thread.extraction_id);
           const pendingCount = reqs.filter(r => !r.satisfied).length;
-          const displayTitle = ext.document_title || ext.filename;
+          const buyerLabel = offerFields.buyer_name ? String(offerFields.buyer_name).trim() : '';
+          const displayTitle = buyerLabel || ext.buyer_name || ext.document_title || ext.filename;
           const displayType = ext.document_type ? ext.document_type.replace(/_/g, ' ') : null;
           return (
 	          <div
@@ -1914,12 +1915,6 @@ function OffersTab({
 	          >
             <div className="extraction-card-header">
               <span className="extraction-card-filename">{displayTitle}</span>
-              <Badge
-                variant="light"
-                color={ext.overall_confidence >= 0.85 ? 'green' : ext.overall_confidence >= 0.65 ? 'yellow' : 'red'}
-              >
-                {(ext.overall_confidence * 100).toFixed(0)}%
-              </Badge>
             </div>
 	            <div className="extraction-card-meta">
 	              <span>{ext.pages_processed} page{ext.pages_processed !== 1 ? 's' : ''}</span>
@@ -1974,10 +1969,14 @@ function OffersTab({
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' }}>
                     <Select
                       placeholder="Attach to offer"
-                      data={rootOffers.map((offer) => ({
-                        value: offer.extraction_id,
-                        label: offer.summary.document_title || offer.summary.filename,
-                      }))}
+                      data={rootOffers.map((offer) => {
+                        const offerFields = offersData?.offers.find(o => o.extraction_id === offer.extraction_id)?.fields ?? {};
+                        const buyerLabel = offerFields.buyer_name ? String(offerFields.buyer_name).trim() : '';
+                        return {
+                          value: offer.extraction_id,
+                          label: buyerLabel || offer.summary.buyer_name || offer.summary.document_title || offer.summary.filename,
+                        };
+                      })}
                       value={attachTargets[doc.id] ?? null}
                       onChange={(value) => setAttachTargets((prev) => ({ ...prev, [doc.id]: value ?? '' }))}
                       size="xs"

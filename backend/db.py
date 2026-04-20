@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from beanie import Document, Indexed, init_beanie
 from dotenv import load_dotenv
@@ -249,6 +249,15 @@ class DocumentRecord(Document):
 # ---------------------------------------------------------------------------
 
 
+class OfferSummaryEntry(BaseModel):
+    """Cached AI summary for a specific combination of offers."""
+
+    status: Literal["generating", "ready", "error"]
+    summary: Optional[str] = None
+    generated_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+
 class Transaction(Document):
     """A real estate transaction linking participants, documents, and compliance."""
 
@@ -286,6 +295,9 @@ class Transaction(Document):
 
     # Compliance
     compliance_report_id: Optional[str] = None
+
+    # AI offer summaries — cached per sorted-combo of extraction_ids
+    offer_summaries: Dict[str, OfferSummaryEntry] = Field(default_factory=dict)
 
     # Metadata
     created_by: str  # UserProfile document ID
