@@ -174,9 +174,16 @@ async def list_extractions(
     query = DocumentRecord.find(filters)
     docs = await query.sort(-DocumentRecord.uploaded_at).limit(limit).to_list()
 
+    from offer_fields import build_offer_fields
+
     results = []
     for doc in docs:
         for idx, ext in enumerate(doc.extractions):
+            projection = ext.normalized_offer_projection or ext.extracted_data or {}
+            fields, _extras = build_offer_fields(projection)
+            overrides = ext.field_overrides or {}
+            raw_buyer = overrides.get("buyer_name") if "buyer_name" in overrides else fields.get("buyer_name")
+            buyer_name = str(raw_buyer).strip() if raw_buyer else None
             results.append({
                 "id": f"{doc.id}:{idx}",
                 "document_id": str(doc.id),
@@ -193,5 +200,6 @@ async def list_extractions(
                 "document_title": ext.document_title,
                 "document_revision": ext.document_revision,
                 "support_level": ext.support_level,
+                "buyer_name": buyer_name or None,
             })
     return results[:limit]

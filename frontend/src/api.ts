@@ -556,6 +556,7 @@ export interface ExtractionSummary {
   document_title?: string | null;
   document_revision?: string | null;
   support_level?: string | null;
+  buyer_name?: string | null;
 }
 
 export async function fetchExtractions(mode?: string): Promise<ExtractionSummary[]> {

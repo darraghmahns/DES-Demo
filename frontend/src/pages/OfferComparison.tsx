@@ -493,6 +493,7 @@ export function OfferComparison() {
             document_title: item.document_title,
             document_type: item.document_type,
             document_revision: item.document_revision,
+            buyer_name: item.buyer_name,
           })),
         );
 
